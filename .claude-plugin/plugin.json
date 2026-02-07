@@ -1,13 +1,20 @@
 {
-  "name": "search-chats",
-  "description": "Search and extract Claude Code chat history with keyword matching, session extraction, and local LLM analysis",
-  "version": "1.0.7",
-  "author": {
-    "name": "pcvelz",
-    "email": "pcvelz@users.noreply.github.com"
-  },
-  "homepage": "https://github.com/pcvelz/cc-search-chats-plugin",
-  "repository": "https://github.com/pcvelz/cc-search-chats-plugin",
+  "name": "cc-search-chats",
+  "description": "Context recovery and cross-referencing for Claude Code chat history — recover from compression, search sessions, extract conversations",
+  "version": "0.1.0",
+  "author": [
+    {
+      "name": "pcvelz",
+      "email": "pcvelz@users.noreply.github.com",
+      "url": "https://github.com/pcvelz/cc-search-chats-plugin"
+    },
+    {
+      "name": "Denubis",
+      "url": "https://github.com/Denubis"
+    }
+  ],
+  "homepage": "https://github.com/Denubis/cc-search-chats-plugin-python",
+  "repository": "https://github.com/Denubis/cc-search-chats-plugin-python",
   "license": "MIT",
-  "keywords": ["search", "chat-history", "sessions", "extraction", "llm-analysis", "claude-code"]
+  "keywords": ["search", "chat-history", "sessions", "context-recovery", "cross-reference", "claude-code"]
 }

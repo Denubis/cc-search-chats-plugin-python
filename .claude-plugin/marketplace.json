@@ -2,19 +2,25 @@
   "name": "cc-search-chats-marketplace",
   "description": "Marketplace for CC Search Chats plugin",
   "owner": {
-    "name": "pcvelz",
-    "email": "pcvelz@users.noreply.github.com"
+    "name": "Denubis",
+    "url": "https://github.com/Denubis"
   },
   "plugins": [
     {
-      "name": "search-chats",
-      "description": "Search and extract Claude Code chat history with keyword matching, session extraction, and local LLM analysis",
-      "version": "1.0.7",
+      "name": "cc-search-chats",
+      "description": "Context recovery and cross-referencing for Claude Code chat history — recover from compression, search sessions, extract conversations",
+      "version": "0.1.0",
       "source": "./",
-      "author": {
-        "name": "pcvelz",
-        "email": "pcvelz@users.noreply.github.com"
-      }
+      "author": [
+        {
+          "name": "pcvelz",
+          "email": "pcvelz@users.noreply.github.com"
+        },
+        {
+          "name": "Denubis",
+          "url": "https://github.com/Denubis"
+        }
+      ]
     }
   ]
 }
