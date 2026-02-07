@@ -19,19 +19,21 @@ This is a Claude Code plugin that provides context recovery and cross-referencin
 
 | Category | Required | Notes |
 |----------|----------|-------|
-| Language | Python 3.12+ | Modern idioms, type hints throughout |
+| Language | Python 3.14+ | Modern idioms, type hints, t-strings for safe output formatting |
 | Package manager | uv | For dependency management and virtual environments |
 | Testing | pytest | Property-based testing with Hypothesis where appropriate |
 | Linting | ruff | Format and lint |
 | Type checking | ty | Strict mode |
-| CLI framework | typer | For the standalone CLI |
-| Data validation | pydantic | For JSONL record models |
+| CLI framework | argparse (stdlib) | Zero dependencies — critical for fast `uvx` cold starts |
+| Data models | dataclasses (stdlib) | For JSONL record models |
+| Search index | sqlite3 FTS5 (stdlib) | JIT indexing into SQLite for full-text search |
 
 ## Technology Preferences
 
-- Prefer stdlib over dependencies where the stdlib solution is adequate
-- No ORMs or databases — this reads flat JSONL files
-- No async unless there's a clear performance justification (file I/O is the bottleneck, not concurrency)
+- **Zero external dependencies.** The package must install and run with no pip dependencies. This is a hard constraint for `uvx` invocation performance.
+- SQLite FTS5 for search indexing (stdlib `sqlite3` module)
+- No async unless there's a clear performance justification
+- Graceful degradation on malformed JSONL records (skip, don't crash)
 
 ## Forbidden
 
