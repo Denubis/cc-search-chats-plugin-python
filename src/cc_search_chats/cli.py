@@ -208,6 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="output results as JSON",
     )
 
+    _fmt = argparse.RawDescriptionHelpFormatter
     subparsers = parser.add_subparsers(dest="command", help="available commands")
 
     # search
@@ -215,6 +216,13 @@ def build_parser() -> argparse.ArgumentParser:
         "search",
         help="search chat history for a query",
         parents=[common_parser],
+        formatter_class=_fmt,
+        epilog=(
+            "Examples:\n"
+            '  cc-search-chats search "database migration"\n'
+            '  cc-search-chats search "auth" --epoch 0\n'
+            '  cc-search-chats search "deploy" --days 7 --json'
+        ),
     )
     search_parser.add_argument("query", type=str, help="search query string")
     search_parser.add_argument(
@@ -233,6 +241,13 @@ def build_parser() -> argparse.ArgumentParser:
         "extract",
         help="extract a conversation by session ID",
         parents=[common_parser],
+        formatter_class=_fmt,
+        epilog=(
+            "Examples:\n"
+            "  cc-search-chats extract\n"
+            "  cc-search-chats extract abc12345-6789-...\n"
+            "  cc-search-chats extract --epoch 0 --json"
+        ),
     )
     extract_parser.add_argument(
         "session_id",
@@ -254,6 +269,13 @@ def build_parser() -> argparse.ArgumentParser:
         "list",
         help="list sessions",
         parents=[common_parser],
+        formatter_class=_fmt,
+        epilog=(
+            "Examples:\n"
+            "  cc-search-chats list\n"
+            "  cc-search-chats list --days 30 --json\n"
+            "  cc-search-chats list --project /path/to/project"
+        ),
     )
     list_parser.add_argument(
         "--project", type=str, default=None, help="project path to list sessions for"
@@ -268,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
         "index",
         help="build or rebuild the search index",
         parents=[common_parser],
+        formatter_class=_fmt,
+        epilog=(
+            "Examples:\n"
+            "  cc-search-chats index\n"
+            "  cc-search-chats index --project /path/to/project"
+        ),
     )
     index_parser.add_argument(
         "--project", type=str, default=None, help="project path to index"
@@ -279,6 +307,12 @@ def build_parser() -> argparse.ArgumentParser:
         "context",
         help="show context around a message UUID",
         parents=[common_parser],
+        formatter_class=_fmt,
+        epilog=(
+            "Examples:\n"
+            "  cc-search-chats context abc12345-6789-... --depth 10\n"
+            "  cc-search-chats context abc12345-6789-... --json"
+        ),
     )
     context_parser.add_argument("uuid", type=str, help="message UUID")
     context_parser.add_argument(
