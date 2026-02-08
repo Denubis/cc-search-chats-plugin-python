@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -277,7 +278,7 @@ def sample_session_lines() -> list[str]:
 
 
 @pytest.fixture
-def db_conn(tmp_path: Path) -> sqlite3.Connection:
+def db_conn(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     """In-memory-style SQLite database with schema applied.
 
     Uses a temp file (not :memory:) so that WAL mode works correctly.
