@@ -22,6 +22,7 @@ from cc_search_chats.output import (
     format_session_list,
     json_context,
     json_extract,
+    json_index_result,
     json_search_results,
     json_session_list,
 )
@@ -165,7 +166,10 @@ def _handle_index(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     count = reindex_project(conn, project_path)
     update_all_keywords(conn)
 
-    print(f"Indexed {count} sessions for {project_path}", file=sys.stderr)
+    if args.json:
+        print(json_index_result(count, project_path))
+    else:
+        print(f"Indexed {count} sessions for {project_path}", file=sys.stderr)
     return 0
 
 

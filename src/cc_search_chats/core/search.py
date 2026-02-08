@@ -27,7 +27,7 @@ def build_search_query(
         "JOIN session s ON m.session_id = s.session_id",
         "WHERE message_fts MATCH ?",
     ]
-    params: list = [query]
+    params: list[str | int] = [query]
 
     if epoch is not None:
         sql_parts.append("AND m.epoch = ?")
@@ -61,7 +61,7 @@ def build_extract_query(
         "FROM message m",
         "WHERE m.session_id = ?",
     ]
-    params: list = [session_id]
+    params: list[str | int] = [session_id]
 
     if epoch is not None:
         sql_parts.append("AND m.epoch = ?")
@@ -129,7 +129,7 @@ def build_list_query(
         "LEFT JOIN epoch_summary es ON s.session_id = es.session_id",
         "WHERE 1=1",
     ]
-    params: list = []
+    params: list[str | int] = []
 
     if project is not None:
         sql_parts.append("AND s.project_path = ?")

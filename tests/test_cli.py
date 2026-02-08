@@ -296,6 +296,20 @@ class TestJsonOutput:
         assert SAMPLE_SESSION_ID in session_ids
         assert COMPRESSED_SESSION_ID in session_ids
 
+    def test_index_json(self, cli_env: sqlite3.Connection) -> None:
+        """Index --json produces valid JSON with sessions_indexed and project_path."""
+        exit_code, stdout, stderr = _run_cli(
+            ["index", "--project", FAKE_PROJECT_PATH, "--json"],
+            cli_env,
+        )
+        assert exit_code == 0
+        parsed = json.loads(stdout)
+        assert isinstance(parsed, dict)
+        assert "sessions_indexed" in parsed
+        assert "project_path" in parsed
+        assert parsed["project_path"] == FAKE_PROJECT_PATH
+        assert parsed["sessions_indexed"] >= 0
+
 
 # ============================================================
 # AC5.3: Human-readable output has role labels, epoch markers, timestamps

@@ -1,8 +1,8 @@
 """Output formatters for human-readable and JSON output.
 
-Imperative Shell — writes formatted strings. The formatting logic itself
-is pure (returns strings, no I/O). T-strings (PEP 750) are used for
-human-readable output to sanitise user-originated content.
+Functional Core — pure functions that format and return strings, no I/O.
+T-strings (PEP 750) are used for human-readable output to sanitise
+user-originated content. The Imperative Shell (cli.py) prints results.
 
 Both human and JSON formatters accept lists of dicts (or sqlite3.Row
 objects, which support dict-like access) and produce output strings.
@@ -356,6 +356,21 @@ def json_context(target: _Row, before: list, after: list) -> str:
             "target": _msg_dict(target),
             "before": [_msg_dict(r) for r in before],
             "after": [_msg_dict(r) for r in after],
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+def json_index_result(sessions_indexed: int, project_path: str) -> str:
+    """Format index result as JSON.
+
+    Returns a JSON object with sessions_indexed count and project_path.
+    """
+    return json.dumps(
+        {
+            "sessions_indexed": sessions_indexed,
+            "project_path": project_path,
         },
         indent=2,
         ensure_ascii=False,
