@@ -131,7 +131,7 @@ def _handle_extract(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     if args.json:
         print(json_extract(messages, compact_events, session_id))
     else:
-        output = format_extract(messages, compact_events)
+        output = format_extract(messages, compact_events, verbose=args.verbose)
         if output:
             print(output)
     return 0
@@ -196,7 +196,7 @@ def _handle_context(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     if args.json:
         print(json_context(target, before, after))
     else:
-        output = format_context(target, before, after)
+        output = format_context(target, before, after, verbose=args.verbose)
         if output:
             print(output)
     return 0
@@ -278,6 +278,12 @@ def build_parser() -> argparse.ArgumentParser:
     extract_parser.add_argument(
         "--project", type=str, default=None, help="project path"
     )
+    extract_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="show all messages including tool calls and empty content",
+    )
     extract_parser.set_defaults(func=_handle_extract)
 
     # list
@@ -336,6 +342,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="number of surrounding messages (default: 5)",
+    )
+    context_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="show all messages including tool calls and empty content",
     )
     context_parser.set_defaults(func=_handle_context)
 

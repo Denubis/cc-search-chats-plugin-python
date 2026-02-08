@@ -9,11 +9,15 @@ objects, which support dict-like access) and produce output strings.
 """
 
 import json
+import re
 import sqlite3
 from string.templatelib import Interpolation, Template
 
 # Type alias for row-like objects (dict or sqlite3.Row — both support [] access)
 type _Row = dict | sqlite3.Row
+
+# Pattern matching messages that are only tool call markers (no real text)
+_TOOL_ONLY_RE = re.compile(r"^(\[tool: [^\]]+\]\n?)+$")
 
 
 def render_safe(template: Template) -> str:
@@ -32,6 +36,24 @@ def render_safe(template: Template) -> str:
             value = value.replace("\x00", "")
             parts.append(value)
     return "".join(parts)
+
+
+def _is_noise(text_content: str) -> bool:
+    """Return True if a message is noise that should be filtered in default mode.
+
+    Noise = empty content or content that is only tool call markers.
+    """
+    stripped = text_content.strip()
+    if not stripped:
+        return True
+    if _TOOL_ONLY_RE.match(stripped):
+        return True
+    return False
+
+
+def _clean_text(text_content: str) -> str:
+    """Strip leading newlines from message text for cleaner output."""
+    return text_content.lstrip("\n")
 
 
 # ============================================================
@@ -68,8 +90,11 @@ def format_search_results(rows: list, *, verbose: bool = False) -> str:
     return "\n\n".join(blocks)
 
 
-def format_extract(rows: list, compact_events: list) -> str:
+def format_extract(rows: list, compact_events: list, *, verbose: bool = False) -> str:
     """Format a full session extract with epoch markers at compression boundaries.
+
+    By default, filters out noise (empty messages and tool-call-only messages).
+    Use verbose=True to include everything.
 
     Inserts epoch markers between epochs with compression info.
     Each message formatted as:
@@ -93,6 +118,10 @@ def format_extract(rows: list, compact_events: list) -> str:
         role = row["role"]
         text_content = row["text_content"]
 
+        # Filter noise unless verbose
+        if not verbose and _is_noise(text_content):
+            continue
+
         # Insert epoch marker when epoch changes (and it's not the first epoch)
         if epoch != current_epoch and current_epoch is not None:
             event = compact_by_epoch.get(epoch)
@@ -102,10 +131,13 @@ def format_extract(rows: list, compact_events: list) -> str:
 
         current_epoch = epoch
 
+        # Clean up text for display
+        display_text = text_content if verbose else _clean_text(text_content)
+
         # Format the role label with capitalised first letter
         role_label = role.capitalize() if role else "Unknown"
         header = render_safe(t"[{timestamp}] {role_label}:")
-        body = render_safe(t"{text_content}")
+        body = render_safe(t"{display_text}")
         output_parts.append(f"{header}\n{body}")
 
     return "\n\n".join(output_parts)
@@ -157,38 +189,49 @@ def format_session_list(rows: list) -> str:
     return "\n\n".join(blocks)
 
 
-def format_context(target: _Row, before: list, after: list) -> str:
+def format_context(
+    target: _Row, before: list, after: list, *, verbose: bool = False
+) -> str:
     """Format context around a message with a TARGET marker.
 
     Shows before messages, then >>> TARGET <<< marker, then after messages.
+    By default, filters noise and strips leading newlines. Use verbose=True
+    for raw output.
     """
     parts: list[str] = []
 
     for row in before:
+        text_content = row["text_content"]
+        if not verbose and _is_noise(text_content):
+            continue
+        display_text = text_content if verbose else _clean_text(text_content)
         timestamp = row["timestamp"]
         role = row["role"]
-        text_content = row["text_content"]
         role_label = role.capitalize() if role else "Unknown"
         header = render_safe(t"[{timestamp}] {role_label}:")
-        body = render_safe(t"{text_content}")
+        body = render_safe(t"{display_text}")
         parts.append(f"{header}\n{body}")
 
-    # Target message with marker
+    # Target message with marker (always shown, but still clean text)
+    text_content = target["text_content"]
+    display_text = text_content if verbose else _clean_text(text_content)
     timestamp = target["timestamp"]
     role = target["role"]
-    text_content = target["text_content"]
     role_label = role.capitalize() if role else "Unknown"
     header = render_safe(t">>> TARGET >>> [{timestamp}] {role_label}:")
-    body = render_safe(t"{text_content}")
+    body = render_safe(t"{display_text}")
     parts.append(f"{header}\n{body}")
 
     for row in after:
+        text_content = row["text_content"]
+        if not verbose and _is_noise(text_content):
+            continue
+        display_text = text_content if verbose else _clean_text(text_content)
         timestamp = row["timestamp"]
         role = row["role"]
-        text_content = row["text_content"]
         role_label = role.capitalize() if role else "Unknown"
         header = render_safe(t"[{timestamp}] {role_label}:")
-        body = render_safe(t"{text_content}")
+        body = render_safe(t"{display_text}")
         parts.append(f"{header}\n{body}")
 
     return "\n\n".join(parts)

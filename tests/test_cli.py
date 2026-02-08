@@ -618,3 +618,62 @@ class TestEpochFilters:
         parsed = json.loads(stdout)
         for ep in parsed["epochs"]:
             assert ep["epoch"] == 1
+
+
+# ============================================================
+# --verbose flag tests
+# ============================================================
+
+
+class TestVerboseFlag:
+    """Tests for --verbose flag on extract and context subcommands."""
+
+    def test_extract_accepts_verbose(self, cli_env: sqlite3.Connection) -> None:
+        """--verbose is accepted by the extract subcommand."""
+        exit_code, stdout, stderr = _run_cli(
+            [
+                "extract",
+                SAMPLE_SESSION_ID,
+                "--project",
+                FAKE_PROJECT_PATH,
+                "--verbose",
+            ],
+            cli_env,
+        )
+        assert exit_code == 0
+        assert len(stdout) > 0
+
+    def test_context_accepts_verbose(self, cli_env: sqlite3.Connection) -> None:
+        """--verbose is accepted by the context subcommand."""
+        row = cli_env.execute("SELECT uuid FROM message LIMIT 1").fetchone()
+        assert row is not None
+        uuid = row["uuid"]
+
+        exit_code, stdout, stderr = _run_cli(
+            ["context", uuid, "--verbose"],
+            cli_env,
+        )
+        assert exit_code == 0
+        assert len(stdout) > 0
+
+    def test_extract_verbose_help(self) -> None:
+        """--verbose appears in extract --help output."""
+        parser = build_parser()
+        stdout_buf = io.StringIO()
+        try:
+            with redirect_stdout(stdout_buf):
+                parser.parse_args(["extract", "--help"])
+        except SystemExit:
+            pass
+        assert "--verbose" in stdout_buf.getvalue()
+
+    def test_context_verbose_help(self) -> None:
+        """--verbose appears in context --help output."""
+        parser = build_parser()
+        stdout_buf = io.StringIO()
+        try:
+            with redirect_stdout(stdout_buf):
+                parser.parse_args(["context", "--help"])
+        except SystemExit:
+            pass
+        assert "--verbose" in stdout_buf.getvalue()

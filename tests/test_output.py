@@ -8,6 +8,8 @@ import json
 import pytest
 
 from cc_search_chats.output import (
+    _clean_text,
+    _is_noise,
     format_context,
     format_extract,
     format_search_results,
@@ -404,6 +406,159 @@ class TestFormatContext:
         target = _message_row(text_content="alone")
         output = format_context(target, [], [])
         assert "alone" in output
+
+    def test_noise_filtered_by_default(self) -> None:
+        """Context filtering: tool-only messages in before/after are skipped."""
+        target = _message_row(text_content="the target")
+        before = [
+            _message_row(uuid="b1", text_content="real before"),
+            _message_row(uuid="b2", text_content="[tool: Bash]\n[tool: Read]"),
+        ]
+        after = [
+            _message_row(uuid="a1", text_content=""),
+            _message_row(uuid="a2", text_content="real after"),
+        ]
+        output = format_context(target, before, after)
+        assert "real before" in output
+        assert "real after" in output
+        assert "[tool: Bash]" not in output
+
+    def test_verbose_preserves_all(self) -> None:
+        """Context verbose=True shows tool calls and empty messages."""
+        target = _message_row(text_content="target")
+        before = [_message_row(uuid="b1", text_content="[tool: Bash]")]
+        after = [_message_row(uuid="a1", text_content="")]
+        output = format_context(target, before, after, verbose=True)
+        assert "[tool: Bash]" in output
+
+    def test_leading_newlines_stripped(self) -> None:
+        """Context: leading newlines stripped from text unless verbose."""
+        target = _message_row(text_content="\n\nactual text")
+        output = format_context(target, [], [])
+        assert "\n\nactual text" not in output
+        assert "actual text" in output
+
+    def test_verbose_preserves_leading_newlines(self) -> None:
+        target = _message_row(text_content="\n\nactual text")
+        output = format_context(target, [], [], verbose=True)
+        assert "\n\nactual text" in output
+
+
+# ============================================================
+# Noise filtering tests
+# ============================================================
+
+
+class TestIsNoise:
+    """Tests for the _is_noise helper."""
+
+    def test_empty_string_is_noise(self) -> None:
+        assert _is_noise("") is True
+
+    def test_whitespace_only_is_noise(self) -> None:
+        assert _is_noise("   \n\t  ") is True
+
+    def test_single_tool_call_is_noise(self) -> None:
+        assert _is_noise("[tool: Bash]") is True
+
+    def test_multiple_tool_calls_is_noise(self) -> None:
+        assert _is_noise("[tool: Bash]\n[tool: Read]\n[tool: Write]") is True
+
+    def test_tool_call_with_trailing_newline_is_noise(self) -> None:
+        assert _is_noise("[tool: Bash]\n") is True
+
+    def test_real_text_is_not_noise(self) -> None:
+        assert _is_noise("How do I parse JSONL?") is False
+
+    def test_text_with_tool_call_is_not_noise(self) -> None:
+        assert _is_noise("Let me read that file.\n[tool: Read]") is False
+
+    def test_tool_call_surrounded_by_whitespace(self) -> None:
+        assert _is_noise("  [tool: Bash]\n  ") is True
+
+
+class TestCleanText:
+    """Tests for the _clean_text helper."""
+
+    def test_strips_leading_newlines(self) -> None:
+        assert _clean_text("\n\nhello") == "hello"
+
+    def test_preserves_internal_newlines(self) -> None:
+        assert _clean_text("\nline1\nline2") == "line1\nline2"
+
+    def test_preserves_non_newline_text(self) -> None:
+        assert _clean_text("hello world") == "hello world"
+
+    def test_empty_string(self) -> None:
+        assert _clean_text("") == ""
+
+
+class TestExtractFiltering:
+    """Tests for format_extract noise filtering and verbose mode."""
+
+    def test_tool_only_messages_filtered_by_default(self) -> None:
+        messages = [
+            _message_row(text_content="real message"),
+            _message_row(
+                uuid="msg-002",
+                text_content="[tool: Bash]\n[tool: Read]",
+                timestamp="2026-02-07T10:31:00.000Z",
+            ),
+            _message_row(
+                uuid="msg-003",
+                text_content="another real message",
+                timestamp="2026-02-07T10:32:00.000Z",
+            ),
+        ]
+        output = format_extract(messages, [])
+        assert "real message" in output
+        assert "another real message" in output
+        assert "[tool: Bash]" not in output
+
+    def test_empty_messages_filtered_by_default(self) -> None:
+        messages = [
+            _message_row(text_content="real message"),
+            _message_row(
+                uuid="msg-002",
+                text_content="",
+                timestamp="2026-02-07T10:31:00.000Z",
+            ),
+        ]
+        output = format_extract(messages, [])
+        # Only the real message should produce output, no empty block
+        blocks = [b for b in output.split("\n\n") if b.strip()]
+        assert len(blocks) == 1
+
+    def test_verbose_shows_tool_calls(self) -> None:
+        messages = [
+            _message_row(text_content="[tool: Bash]\n[tool: Read]"),
+        ]
+        output = format_extract(messages, [], verbose=True)
+        assert "[tool: Bash]" in output
+
+    def test_verbose_shows_empty_messages(self) -> None:
+        messages = [
+            _message_row(text_content="real"),
+            _message_row(
+                uuid="msg-002",
+                text_content="",
+                timestamp="2026-02-07T10:31:00.000Z",
+            ),
+        ]
+        output = format_extract(messages, [], verbose=True)
+        # Both messages should be present
+        assert "real" in output
+
+    def test_leading_newlines_stripped_by_default(self) -> None:
+        messages = [_message_row(text_content="\n\nactual content")]
+        output = format_extract(messages, [])
+        assert "\n\nactual content" not in output
+        assert "actual content" in output
+
+    def test_verbose_preserves_leading_newlines(self) -> None:
+        messages = [_message_row(text_content="\n\nactual content")]
+        output = format_extract(messages, [], verbose=True)
+        assert "\n\nactual content" in output
 
 
 # ============================================================
