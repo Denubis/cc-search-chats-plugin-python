@@ -7,7 +7,11 @@ Pure query-building logic lives in core/search.py.
 import os
 import sqlite3
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
+
+from cc_search_chats.core.models import CompactEvent, SessionMeta, SessionRecord
+from cc_search_chats.core.parser import parse_session
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
@@ -129,3 +133,201 @@ def ensure_fts5() -> bool:
         ) from exc
     finally:
         conn.close()
+
+
+# ============================================================
+# Indexing pipeline
+# ============================================================
+
+
+def _now_iso() -> str:
+    """Return current UTC time as ISO 8601 string."""
+    return datetime.now(UTC).isoformat()
+
+
+def _mtime_iso(mtime: float) -> str:
+    """Convert a Unix mtime float to ISO 8601 string."""
+    return datetime.fromtimestamp(mtime, tz=UTC).isoformat()
+
+
+def index_session(conn: sqlite3.Connection, session_meta: SessionMeta) -> None:
+    """Index a single session file into the database.
+
+    Deletes any existing data for this session_id (CASCADE), then re-indexes
+    from the JSONL file. Epoch assignment: epoch starts at 0 and increments
+    at each CompactEvent. The user message immediately following a
+    CompactEvent is treated as the compression summary.
+
+    Commits after the entire session is indexed.
+    """
+    sid = session_meta.session_id
+
+    # 1. Delete existing data (CASCADE removes messages and compact_events)
+    conn.execute("DELETE FROM session WHERE session_id = ?", (sid,))
+
+    # 2. Insert session row
+    conn.execute(
+        "INSERT INTO session (session_id, project_path, file_path, file_size, "
+        "modified_at, indexed_at, summary) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+        (
+            sid,
+            session_meta.project_path,
+            session_meta.file_path,
+            session_meta.file_size,
+            _mtime_iso(session_meta.modified_at),
+            _now_iso(),
+        ),
+    )
+
+    # 3. Stream through parse_session
+    file_path = Path(session_meta.file_path)
+    with file_path.open(encoding="utf-8", errors="replace") as fh:
+        lines = fh
+
+        epoch = 0
+        awaiting_summary = False  # True after a CompactEvent, until next user message
+        last_compact_uuid: str | None = None
+
+        for record in parse_session(lines, sid):
+            if isinstance(record, CompactEvent):
+                epoch += 1
+                conn.execute(
+                    "INSERT INTO compact_event "
+                    "(uuid, session_id, epoch, timestamp, trigger, pre_tokens, summary_text) "
+                    "VALUES (?, ?, ?, ?, ?, ?, NULL)",
+                    (
+                        record.uuid,
+                        sid,
+                        epoch,
+                        record.timestamp,
+                        record.trigger,
+                        record.pre_tokens,
+                    ),
+                )
+                awaiting_summary = True
+                last_compact_uuid = record.uuid
+
+            elif isinstance(record, SessionRecord):
+                if record.record_type == "summary":
+                    # Update session.summary with latest summary text
+                    conn.execute(
+                        "UPDATE session SET summary = ? WHERE session_id = ?",
+                        (record.text_content, sid),
+                    )
+                elif record.role in ("user", "assistant"):
+                    # Determine if this is a compression summary
+                    is_summary = 0
+                    if (
+                        awaiting_summary
+                        and record.role == "user"
+                        and last_compact_uuid is not None
+                    ):
+                        # Heuristic: first user message after compact_boundary
+                        # is the compression summary
+                        is_summary = 1
+                        # Store summary text on the compact_event
+                        conn.execute(
+                            "UPDATE compact_event SET summary_text = ? WHERE uuid = ?",
+                            (record.text_content, last_compact_uuid),
+                        )
+                        awaiting_summary = False
+                        last_compact_uuid = None
+
+                    conn.execute(
+                        "INSERT INTO message "
+                        "(uuid, session_id, parent_uuid, epoch, timestamp, role, "
+                        "text_content, is_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            record.uuid,
+                            sid,
+                            record.parent_uuid,
+                            epoch,
+                            record.timestamp,
+                            record.role,
+                            record.text_content,
+                            is_summary,
+                        ),
+                    )
+
+    conn.commit()
+
+
+def needs_reindex(conn: sqlite3.Connection, session_meta: SessionMeta) -> bool:
+    """Check whether a session file needs (re-)indexing.
+
+    Returns True if the session is not in the DB or the file's mtime is
+    newer than what was recorded at last index time.
+    """
+    row = conn.execute(
+        "SELECT modified_at FROM session WHERE session_id = ?",
+        (session_meta.session_id,),
+    ).fetchone()
+
+    if row is None:
+        return True
+
+    indexed_mtime = row["modified_at"]
+    current_mtime = _mtime_iso(session_meta.modified_at)
+    return current_mtime > indexed_mtime
+
+
+def reindex_project(
+    conn: sqlite3.Connection,
+    project_path: str,
+    include_subagents: bool = False,
+) -> int:
+    """Full reindex for a project. Indexes all session files.
+
+    Returns count of sessions (re-)indexed.
+    """
+    from cc_search_chats.core.discovery import (
+        encode_project_path,
+        get_claude_projects_dir,
+        list_session_files,
+    )
+
+    projects_dir = get_claude_projects_dir()
+    encoded = encode_project_path(project_path)
+    sessions = list_session_files(projects_dir, encoded, include_subagents)
+
+    # Sort by mtime descending (newest first)
+    sessions.sort(key=lambda s: s.modified_at, reverse=True)
+
+    count = 0
+    for meta in sessions:
+        index_session(conn, meta)
+        count += 1
+
+    return count
+
+
+def jit_reindex(
+    conn: sqlite3.Connection,
+    project_path: str,
+    include_subagents: bool = False,
+) -> int:
+    """JIT (just-in-time) reindex: only re-indexes stale sessions.
+
+    Called by search/list/extract before executing queries.
+    Returns count of sessions reindexed.
+    """
+    from cc_search_chats.core.discovery import (
+        encode_project_path,
+        get_claude_projects_dir,
+        list_session_files,
+    )
+
+    projects_dir = get_claude_projects_dir()
+    encoded = encode_project_path(project_path)
+    sessions = list_session_files(projects_dir, encoded, include_subagents)
+
+    # Sort by mtime descending (newest first)
+    sessions.sort(key=lambda s: s.modified_at, reverse=True)
+
+    count = 0
+    for meta in sessions:
+        if needs_reindex(conn, meta):
+            index_session(conn, meta)
+            count += 1
+
+    return count
