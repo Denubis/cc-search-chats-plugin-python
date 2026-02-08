@@ -20,7 +20,7 @@ Claude Code plugin for context recovery and cross-referencing of chat history. S
 
 ## Commands
 
-- `uvx cc-search-chats` — Primary CLI invocation
+- `cc-search-chats` — Primary CLI invocation (install via `uv tool install` from git or editable local)
   - `search "query"` — full-text search
   - `extract [SESSION_ID]` — extract conversation (auto-discovers if no ID)
   - `list` — list sessions
@@ -45,7 +45,7 @@ Claude Code plugin for context recovery and cross-referencing of chat history. S
   - `storage/` — SQLite persistence
     - `schema.sql` — DDL for all tables and FTS5 indexes
     - `index.py` — Database operations (indexing, search, extraction)
-- `commands/search-chat.md` — Claude Code slash command (delegates to `uvx cc-search-chats`)
+- `commands/search-chat.md` — Claude Code slash command (delegates to `cc-search-chats` CLI)
 - `skills/search-chat/SKILL.md` — Progressive search workflow skill
 - `tests/` — pytest test suite
 - `.claude-plugin/` — Plugin manifest and marketplace config

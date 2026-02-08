@@ -1,6 +1,6 @@
 ---
 description: "Search previous sessions, chat history, last session, earlier conversation, before I made, what we discussed, find where we talked about, previous chat, old session, yesterday's session, recover context, lost context, compression"
-allowed-tools: ["Bash(uvx cc-search-chats:*)"]
+allowed-tools: ["Bash(cc-search-chats:*)"]
 ---
 
 # Search Chat History
@@ -16,7 +16,7 @@ Determine the user's intent and route to the appropriate subcommand. Always use 
 ### "search X" / "find where we discussed X"
 
 ```bash
-uvx cc-search-chats search "X" --json
+cc-search-chats search "X" --json
 ```
 
 Optional flags: `--epoch N` (filter to epoch), `--days N` (limit recency), `--project PATH`.
@@ -24,7 +24,7 @@ Optional flags: `--epoch N` (filter to epoch), `--days N` (limit recency), `--pr
 ### "what was in my last session" / "recover context"
 
 ```bash
-uvx cc-search-chats extract --json
+cc-search-chats extract --json
 ```
 
 With no session ID, auto-discovers the most recent substantial session. Optional: `--epoch 0` for pre-compression content.
@@ -32,7 +32,7 @@ With no session ID, auto-discovers the most recent substantial session. Optional
 ### "show my recent sessions"
 
 ```bash
-uvx cc-search-chats list --json
+cc-search-chats list --json
 ```
 
 Optional: `--days N` (default: all), `--project PATH`.
@@ -40,7 +40,7 @@ Optional: `--days N` (default: all), `--project PATH`.
 ### "show context around message X"
 
 ```bash
-uvx cc-search-chats context UUID --json
+cc-search-chats context UUID --json
 ```
 
 Optional: `--depth N` (surrounding messages, default 5).
@@ -48,7 +48,7 @@ Optional: `--depth N` (surrounding messages, default 5).
 ### "rebuild the index"
 
 ```bash
-uvx cc-search-chats index --json
+cc-search-chats index --json
 ```
 
 Force a full reindex of the current project.

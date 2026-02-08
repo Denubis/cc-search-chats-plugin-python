@@ -2,7 +2,7 @@
 name: search-chat
 description: "Search and recover context from Claude Code chat history — use when asked about previous conversations, lost context, cross-referencing sessions, what we discussed, earlier today, yesterday's session, find where we talked about, recover from compression"
 user-invocable: true
-allowed-tools: ["Bash(uvx cc-search-chats:*)"]
+allowed-tools: ["Bash(cc-search-chats:*)"]
 ---
 
 # Progressive Search Workflow
@@ -26,19 +26,19 @@ Run the appropriate command with `--json` for structured output:
 
 ```bash
 # Topic search
-uvx cc-search-chats search "query" --json
+cc-search-chats search "query" --json
 
 # Recovery / temporal (auto-discovers most recent session)
-uvx cc-search-chats extract --json
+cc-search-chats extract --json
 
 # List recent sessions
-uvx cc-search-chats list --days 7 --json
+cc-search-chats list --days 7 --json
 
 # Pre-compression content specifically
-uvx cc-search-chats extract --epoch 0 --json
+cc-search-chats extract --epoch 0 --json
 
 # Hybrid: topic + recency
-uvx cc-search-chats search "query" --days 3 --json
+cc-search-chats search "query" --days 3 --json
 ```
 
 ## Step 3: Interpret Results
@@ -62,10 +62,10 @@ If the initial search returns nothing:
 
 ```bash
 # Broader search
-uvx cc-search-chats search "query" --days 90 --json
+cc-search-chats search "query" --days 90 --json
 
 # See what exists
-uvx cc-search-chats list --json
+cc-search-chats list --json
 ```
 
 ## Step 5: Drill Down
@@ -74,16 +74,16 @@ When the user wants more detail on a specific result:
 
 ```bash
 # Full conversation from a session
-uvx cc-search-chats extract SESSION_ID --json
+cc-search-chats extract SESSION_ID --json
 
 # Pre-compression content only
-uvx cc-search-chats extract SESSION_ID --epoch 0 --json
+cc-search-chats extract SESSION_ID --epoch 0 --json
 
 # Context around a specific message
-uvx cc-search-chats context MESSAGE_UUID --json
+cc-search-chats context MESSAGE_UUID --json
 
 # More surrounding context
-uvx cc-search-chats context MESSAGE_UUID --depth 10 --json
+cc-search-chats context MESSAGE_UUID --depth 10 --json
 ```
 
 ## Key Concepts

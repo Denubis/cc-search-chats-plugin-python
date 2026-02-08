@@ -25,10 +25,14 @@ Or from inside Claude Code, use `/plugin` and navigate to **Discover** to browse
 ### Standalone CLI
 
 ```bash
-uvx cc-search-chats
+# Install from git (requires Python 3.14+)
+uv tool install git+https://github.com/Denubis/cc-search-chats-plugin-python
+
+# Then use directly
+cc-search-chats
 ```
 
-No dependencies to install -- the package uses only Python's standard library.
+No runtime dependencies -- the package uses only Python's standard library.
 
 ## Quick Start
 
