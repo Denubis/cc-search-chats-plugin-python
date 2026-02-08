@@ -130,6 +130,25 @@ SESSION_ID_A = "aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa"
 SESSION_ID_B = "bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb"
 
 
+def _write_session_file(
+    tmp_path: Path,
+    session_id: str,
+    lines: list[str],
+    project_path: str = "/home/brian/project",
+) -> SessionMeta:
+    """Write JSONL lines to a temp file and return SessionMeta."""
+    session_file = tmp_path / f"{session_id}.jsonl"
+    session_file.write_text("\n".join(lines), encoding="utf-8")
+    stat = session_file.stat()
+    return SessionMeta(
+        session_id=session_id,
+        file_path=str(session_file),
+        project_path=project_path,
+        file_size=stat.st_size,
+        modified_at=stat.st_mtime,
+    )
+
+
 def _make_session_lines(
     session_id: str,
     *,

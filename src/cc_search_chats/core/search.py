@@ -11,7 +11,7 @@ def build_search_query(
     epoch: int | None = None,
     project: str | None = None,
     days: int | None = None,
-) -> tuple[str, list]:
+) -> tuple[str, list[str | int]]:
     """Build an FTS5 search query with optional filters.
 
     Returns (sql, params) for execution against the index database.
@@ -50,7 +50,7 @@ def build_extract_query(
     session_id: str,
     *,
     epoch: int | None = None,
-) -> tuple[str, list]:
+) -> tuple[str, list[str | int]]:
     """Build a query to extract all messages from a session.
 
     Results are ordered by timestamp. Optional epoch filter.
@@ -75,7 +75,7 @@ def build_extract_query(
 def build_context_query(
     uuid: str,
     depth: int = 5,
-) -> tuple[str, list]:
+) -> tuple[str, list[str | int]]:
     """Build a query to get N messages before and after a given message.
 
     Uses a subquery to find the target message's session_id and timestamp,
@@ -114,7 +114,7 @@ def build_list_query(
     *,
     project: str | None = None,
     days: int | None = None,
-) -> tuple[str, list]:
+) -> tuple[str, list[str | int]]:
     """Build a query to list sessions with summary info.
 
     Joins with epoch_summary for epoch count and message counts.

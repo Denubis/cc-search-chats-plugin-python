@@ -182,7 +182,16 @@ def index_session(conn: sqlite3.Connection, session_meta: SessionMeta) -> None:
 
     # 3. Stream through parse_session
     file_path = Path(session_meta.file_path)
-    with file_path.open(encoding="utf-8", errors="replace") as fh:
+    try:
+        fh = file_path.open(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(
+            f"Warning: Could not open session file {file_path}: {exc.__class__.__name__}: {exc}. Skipping.",
+            file=sys.stderr,
+        )
+        return
+
+    try:
         lines = fh
 
         epoch = 0
@@ -249,6 +258,8 @@ def index_session(conn: sqlite3.Connection, session_meta: SessionMeta) -> None:
                             is_summary,
                         ),
                     )
+    finally:
+        fh.close()
 
     conn.commit()
 
@@ -399,18 +410,20 @@ def compute_epoch_keywords(
     # (number of distinct messages containing each term, across ALL sessions)
     terms = {row[0] for row in epoch_tf_rows}
     df_map: dict[str, int] = {}
-    # Batch query — use a single query counting distinct docs per term.
-    df_rows = conn.execute(
-        """
-        SELECT term, COUNT(DISTINCT doc) AS df
-        FROM message_fts_vocab
-        WHERE LENGTH(term) >= ?
-        GROUP BY term
-        """,
-        (_MIN_TERM_LENGTH,),
-    ).fetchall()
-    for row in df_rows:
-        if row[0] in terms:
+    # Batch query — restrict to only the terms that appeared in this session
+    # using a WHERE term IN clause.
+    if terms:
+        placeholders = ",".join("?" * len(terms))
+        df_rows = conn.execute(
+            f"""
+            SELECT term, COUNT(DISTINCT doc) AS df
+            FROM message_fts_vocab
+            WHERE LENGTH(term) >= ? AND term IN ({placeholders})
+            GROUP BY term
+            """,
+            [_MIN_TERM_LENGTH, *sorted(terms)],
+        ).fetchall()
+        for row in df_rows:
             df_map[row[0]] = row[1]
 
     # 4. Compute TF-IDF per (epoch, term) and select top N per epoch.

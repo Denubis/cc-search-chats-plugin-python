@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 
-from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.storage.index import (
     extract_context,
     extract_session,
@@ -27,26 +26,12 @@ from cc_search_chats.storage.index import (
     list_sessions,
     search,
 )
-from tests.conftest import SESSION_ID_A, SESSION_ID_B, _make_session_lines
-
-
-def _write_session_file(
-    tmp_path: Path,
-    session_id: str,
-    lines: list[str],
-    project_path: str = "/home/brian/project",
-) -> SessionMeta:
-    """Write JSONL lines to a temp file and return SessionMeta."""
-    session_file = tmp_path / f"{session_id}.jsonl"
-    session_file.write_text("\n".join(lines), encoding="utf-8")
-    stat = session_file.stat()
-    return SessionMeta(
-        session_id=session_id,
-        file_path=str(session_file),
-        project_path=project_path,
-        file_size=stat.st_size,
-        modified_at=stat.st_mtime,
-    )
+from tests.conftest import (
+    SESSION_ID_A,
+    SESSION_ID_B,
+    _make_session_lines,
+    _write_session_file,
+)
 
 
 class TestSearch:
@@ -160,21 +145,24 @@ class TestSearchDaysFilter:
     def test_days_filter_excludes_old_messages(
         self, db_conn: sqlite3.Connection, tmp_path: Path
     ) -> None:
-        """Search with days=1 excludes messages older than 1 day.
+        """Search with days=0 excludes messages older than today.
 
-        Our sample messages have timestamps from 2026-02-07, which is in
-        the past relative to 'now'. With days=0 we should get nothing since
-        the messages are not from today.
+        Our sample messages have timestamps from 2026-02-07. If today is
+        after that date, days=0 (today only) should exclude them.
+        days=99999 (very long period) should include them.
         """
         lines = _make_session_lines(SESSION_ID_A, compact_boundaries=0)
         meta = _write_session_file(tmp_path, SESSION_ID_A, lines)
         index_session(db_conn, meta)
 
-        # days=0 means only today's messages. Our fixture timestamps are
-        # 2026-02-07, so if today is different, we get nothing.
-        # This test is time-dependent but validates the filter works.
+        # Without filter, should find results
         results_no_filter = search(db_conn, "database")
         assert len(results_no_filter) > 0
+
+        # days=0 means only today's messages. Our fixture timestamps are
+        # 2026-02-07, so this should return empty list (no messages from today).
+        results_today = search(db_conn, "database", days=0)
+        assert len(results_today) == 0, "days=0 should exclude old fixture messages"
 
         # With an extremely large days value, should still find results
         results_large = search(db_conn, "database", days=99999)

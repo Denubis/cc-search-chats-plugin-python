@@ -21,25 +21,7 @@ from cc_search_chats.storage.index import (
     needs_reindex,
     update_all_keywords,
 )
-from tests.conftest import SESSION_ID_A, _make_session_lines
-
-
-def _write_session_file(
-    tmp_path: Path,
-    session_id: str,
-    lines: list[str],
-) -> SessionMeta:
-    """Write JSONL lines to a temp file and return SessionMeta."""
-    session_file = tmp_path / f"{session_id}.jsonl"
-    session_file.write_text("\n".join(lines), encoding="utf-8")
-    stat = session_file.stat()
-    return SessionMeta(
-        session_id=session_id,
-        file_path=str(session_file),
-        project_path="/home/brian/project",
-        file_size=stat.st_size,
-        modified_at=stat.st_mtime,
-    )
+from tests.conftest import SESSION_ID_A, _make_session_lines, _write_session_file
 
 
 class TestIndexSessionBasic:
