@@ -1,73 +1,121 @@
-# CC Search Chats
+# cc-search-chats
 
-A Claude Code plugin for searching and extracting chat history from previous sessions.
+Search and recover context from Claude Code chat history.
 
-## Features
+## The Problem
 
-- **Session Search**: Find sessions by keywords with match counting
-- **Content Extraction**: Extract full conversation content from session IDs
-- **Auto-Extract**: Automatically extract top matching sessions
-- **Cross-Project Search**: Search across different project histories
-- **Local LLM Analysis**: Pipe extracted content to llama.cpp for analysis
-- **Session Deletion**: Remove specific sessions from history
+Claude Code compresses conversation context when sessions grow large. Earlier context is summarised and the original messages become inaccessible through normal conversation. This tool recovers that content by indexing the underlying JSONL session files that Claude Code stores on disk.
 
 ## Installation
 
-### Via Marketplace (Recommended)
+### As a Claude Code Plugin (Recommended)
+
+Install from the marketplace, or directly:
 
 ```bash
-/plugin marketplace add pcvelz/cc-search-chats-plugin
-/plugin install search-chats@cc-search-chats-marketplace
+claude plugin add github:Denubis/cc-search-chats-plugin-python
 ```
 
-### Via Direct URL
+### Standalone CLI
 
 ```bash
-/plugin install --source url https://github.com/pcvelz/cc-search-chats-plugin.git
+uvx cc-search-chats
 ```
 
-## Usage
+No dependencies to install -- the package uses only Python's standard library.
 
-### Basic Search
+## Quick Start
 
 ```bash
-/search-chat "keyword"
-/search-chat "API integration" --context
+# Find discussions about a topic
+cc-search-chats search "database migration"
+
+# Recover the most recent substantial session
+cc-search-chats extract
+
+# Get pre-compression content (epoch 0 = before compression)
+cc-search-chats extract --epoch 0
+
+# Show recent sessions
+cc-search-chats list --days 7
+
+# Context around a specific message
+cc-search-chats context MESSAGE_UUID
 ```
 
-### Extract Session
+## Commands
+
+| Command | Description | Key Flags |
+|---------|-------------|-----------|
+| `search "query"` | Full-text search across chat history | `--epoch N`, `--days N`, `--project PATH` |
+| `extract [SESSION_ID]` | Extract a conversation (auto-discovers if no ID given) | `--epoch N`, `--verbose` |
+| `list` | List sessions with metadata | `--days N`, `--project PATH` |
+| `context UUID` | Show messages around a specific message | `--depth N` |
+| `index` | Force a full reindex of the current project | `--project PATH` |
+
+All commands support `--json` for structured output suitable for programmatic consumption.
+
+## How It Works
+
+Chat sessions are stored by Claude Code as JSONL files in `~/.claude/projects/`. Each file contains timestamped messages with roles, content, and metadata.
+
+**cc-search-chats** builds a local SQLite FTS5 (full-text search) index over these files. The index is created just-in-time on first access and updated incrementally when session files change. Sessions are indexed in reverse chronological order so the most recent content is available first.
+
+### Epoch Model
+
+When Claude Code compresses a session, it inserts a `compact_boundary` marker. cc-search-chats uses these markers to segment sessions into **epochs**:
+
+- **Epoch 0**: Messages from before the first compression -- the "lost context" that most users want to recover
+- **Epoch 1+**: Content after each successive compression event
+
+You can filter searches and extractions to specific epochs with `--epoch N`.
+
+### Known Limitations
+
+- **Project path decoding is lossy.** Claude Code encodes project paths by replacing `/` with `-`. This encoding is not reversible when the original path contains hyphens. Project paths displayed in output may differ from the actual filesystem path in these cases.
+- **Python 3.14+ required.** The package uses language features introduced in Python 3.14.
+
+## Compression Recovery
+
+This is the primary use case. When Claude Code compresses a long session:
+
+1. The original messages are still on disk in the JSONL file
+2. Claude Code inserts a `compact_boundary` marker with metadata about how many tokens were compressed
+3. A summary of the compressed content appears in the next message
+
+To recover the pre-compression content:
 
 ```bash
-/search-chat --extract <session-id>
-/search-chat "staging" --extract-matches
+# See what sessions exist
+cc-search-chats list
+
+# Extract pre-compression content from a session
+cc-search-chats extract SESSION_ID --epoch 0
+
+# Or search for specific content across all pre-compression epochs
+cc-search-chats search "that thing we discussed" --epoch 0
 ```
 
-### Options
+## For Subagents
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--limit N` | Maximum sessions to return | 10 |
-| `--context` | Show matching text snippets | false |
-| `--project PATH` | Search in specific project | current |
-| `--extract ID` | Extract specific session | - |
-| `--extract-matches` | Auto-extract top matches | false |
-| `--extract-limit N` | Number to extract | 5 |
-| `--max-lines N` | Max lines per extraction | 500 |
-| `--analyze "prompt"` | Analyze via llama.cpp | - |
-| `--delete ID` | Delete session (destructive) | - |
+All commands support `--json` output for programmatic consumption. Use this when building workflows that consume search results:
 
-### Analysis Templates
+```bash
+# Structured search results
+cc-search-chats search "auth" --json
 
-When using `--analyze`, these templates are available:
-- `summarize` - Summarize key points
-- `commands` - Extract all commands mentioned
-- `files` - List all file paths discussed
-- `errors` - Identify errors and root causes
-- `ssh` - Extract SSH connection details
+# Structured session list
+cc-search-chats list --days 7 --json
 
-## Tip: Add to your CLAUDE.md
+# Structured extraction
+cc-search-chats extract --json
+```
 
-Adding a line to your project's `CLAUDE.md` makes Claude automatically reach for `/search-chat` when you casually reference something from a previous session. Without it, Claude won't know the plugin exists.
+JSON output includes session IDs, epoch numbers, timestamps, and message content -- everything needed to drill down further.
+
+## Tip: Add to Your CLAUDE.md
+
+Adding a line to your project's `CLAUDE.md` makes Claude automatically use `/search-chat` when you casually reference something from a previous session:
 
 ```markdown
 ## Chat History
@@ -75,53 +123,19 @@ Adding a line to your project's `CLAUDE.md` makes Claude automatically reach for
 When I reference a previous conversation, earlier discussion, or ask to continue/revisit a topic from another session, use `/search-chat` to find it.
 ```
 
-That's it. Now you can say things like *"that staging bug from the other day"* or *"the auth issue we brainstormed about"* and Claude will search your chat history instead of asking you to explain from scratch.
-
-### Leveraging the Max 20x plan
-
-If you're on a Claude Max plan with 20x usage, you can add a few extra lines to your `CLAUDE.md` to unlock a more powerful workflow. Instead of spending your own time maintaining context documents, Claude will send out an opus subagent per chat match to search through old session logs and summarize the gist of each one. It's token-heavy — but on an unlimited plan you can afford to be lavish with Claude's budget instead of your own time. You can just tell Claude *"that issue related to album recovery, I want to brainstorm some more about it"* and it'll dig through your history, summarize what happened, and pick up where you left off.
-
-Add these lines to the Chat History section in your `CLAUDE.md`:
-
-```markdown
-When I want to brainstorm or continue a previous discussion, go beyond basic search:
-
-1. Run `/search-chat "<topic>" --extract-matches --extract-limit 5` to find and extract relevant sessions
-2. For each extracted session, spawn an opus subagent (Task tool, model: opus) to summarize:
-   - What was discussed and decided
-   - What was left unresolved
-   - Key code changes or commands run
-3. Synthesize all summaries into a brief overview before continuing the conversation
-
-Previous chats ARE the documentation — no need to maintain separate notes.
-```
+Now you can say things like *"that staging bug from the other day"* and Claude will search your chat history instead of asking you to explain from scratch.
 
 ## Requirements
 
-- Claude Code CLI
-- Python 3 (for JSONL parsing)
-- Optional: llama.cpp server for analysis features
+- Python 3.14+
+- SQLite with FTS5 support (included in standard Python builds)
+- Zero external dependencies
 
-## How It Works
+## Acknowledgements
 
-Chat sessions are stored in `~/.claude/projects/` as JSONL files. This plugin:
-1. Converts project paths to Claude's directory format
-2. Searches session files for keyword matches
-3. Parses JSONL to extract conversation content
-4. Optionally pipes content to local LLM for analysis
+- [pcvelz/cc-search-chats-plugin](https://github.com/pcvelz/cc-search-chats-plugin) -- original bash implementation that this project is forked from
+- [akatz-ai/cc-conversation-search](https://github.com/akatz-ai/cc-conversation-search) -- validated the SQLite FTS5 + JIT indexing approach
 
-## Updating
-
-```bash
-/plugin update search-chats
-```
-
-## Uninstall
-
-```bash
-/plugin uninstall search-chats
-```
-
-## License
+## Licence
 
 MIT
