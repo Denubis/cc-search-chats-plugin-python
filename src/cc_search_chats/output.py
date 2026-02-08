@@ -113,7 +113,7 @@ def _format_epoch_marker(event: dict) -> str:
     timestamp = event["timestamp"]
     trigger = event["trigger"]
     pre_tokens = event["pre_tokens"]
-    summary_text = event.get("summary_text")
+    summary_text = event["summary_text"]
 
     marker = f"--- Epoch {epoch} (compression at {timestamp}, trigger: {trigger}, ~{pre_tokens} tokens) ---"
     if summary_text:
@@ -269,7 +269,7 @@ def json_extract(rows: list, compact_events: list, session_id: str) -> str:
                 "timestamp": event["timestamp"],
                 "trigger": event["trigger"],
                 "pre_tokens": event["pre_tokens"],
-                "summary_text": event.get("summary_text"),
+                "summary_text": event["summary_text"],
             }
 
         epochs.append(epoch_obj)
