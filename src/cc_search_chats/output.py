@@ -119,7 +119,9 @@ def _format_epoch_marker(event: dict) -> str:
     pre_tokens = event["pre_tokens"]
     summary_text = event["summary_text"]
 
-    marker = render_safe(t"--- Epoch {epoch} (compression at {timestamp}, trigger: {trigger}, ~{pre_tokens} tokens) ---")
+    marker = render_safe(
+        t"--- Epoch {epoch} (compression at {timestamp}, trigger: {trigger}, ~{pre_tokens} tokens) ---"
+    )
     if summary_text:
         marker += "\n" + render_safe(t"Summary: {summary_text}")
     return marker
@@ -143,7 +145,9 @@ def format_session_list(rows: list) -> str:
         total_messages = row["total_messages"]
 
         header = render_safe(t"{session_id}")
-        details = render_safe(t"  project:  {project_path}\n  size:     {file_size} bytes\n  modified: {modified_at}\n  epochs:   {epoch_count}  messages: {total_messages}")
+        details = render_safe(
+            t"  project:  {project_path}\n  size:     {file_size} bytes\n  modified: {modified_at}\n  epochs:   {epoch_count}  messages: {total_messages}"
+        )
         if summary:
             summary_line = render_safe(t"  summary:  {summary}")
             blocks.append(f"{header}\n{details}\n{summary_line}")
