@@ -38,9 +38,7 @@ def build_search_query(
         params.append(project)
 
     if days is not None:
-        sql_parts.append(
-            "AND m.timestamp >= datetime('now', '-' || ? || ' days')"
-        )
+        sql_parts.append("AND m.timestamp >= datetime('now', '-' || ? || ' days')")
         params.append(days)
 
     sql_parts.append("ORDER BY rank")
@@ -138,9 +136,7 @@ def build_list_query(
         params.append(project)
 
     if days is not None:
-        sql_parts.append(
-            "AND s.modified_at >= datetime('now', '-' || ? || ' days')"
-        )
+        sql_parts.append("AND s.modified_at >= datetime('now', '-' || ? || ' days')")
         params.append(days)
 
     sql_parts.append("GROUP BY s.session_id")

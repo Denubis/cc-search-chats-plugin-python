@@ -394,9 +394,7 @@ def extract_context(
     from cc_search_chats.core.search import build_context_query
 
     # Verify message exists
-    row = conn.execute(
-        "SELECT uuid FROM message WHERE uuid = ?", (uuid,)
-    ).fetchone()
+    row = conn.execute("SELECT uuid FROM message WHERE uuid = ?", (uuid,)).fetchone()
     if row is None:
         raise ValueError(f"Message not found: {uuid}")
 
