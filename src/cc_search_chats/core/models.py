@@ -5,8 +5,6 @@ All fields use basic types (str, int, float, None) to keep models
 serialisation-friendly and pure.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 

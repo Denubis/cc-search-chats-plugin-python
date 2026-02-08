@@ -1,7 +1,5 @@
 """CLI entry point for cc-search-chats."""
 
-from __future__ import annotations
-
 import argparse
 import sys
 
@@ -45,11 +43,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="output results as JSON",
     )
 
+    # Create a parent parser for shared flags across all subcommands.
+    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="output results as JSON",
+    )
+
     subparsers = parser.add_subparsers(dest="command", help="available commands")
 
     # search
     search_parser = subparsers.add_parser(
-        "search", help="search chat history for a query"
+        "search",
+        help="search chat history for a query",
+        parents=[common_parser],
     )
     search_parser.add_argument("query", type=str, help="search query string")
     search_parser.add_argument(
@@ -65,7 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # extract
     extract_parser = subparsers.add_parser(
-        "extract", help="extract a conversation by session ID"
+        "extract",
+        help="extract a conversation by session ID",
+        parents=[common_parser],
     )
     extract_parser.add_argument(
         "session_id",
@@ -80,7 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
     extract_parser.set_defaults(func=_handle_extract)
 
     # list
-    list_parser = subparsers.add_parser("list", help="list sessions")
+    list_parser = subparsers.add_parser(
+        "list",
+        help="list sessions",
+        parents=[common_parser],
+    )
     list_parser.add_argument(
         "--project", type=str, default=None, help="project path to list sessions for"
     )
@@ -91,7 +106,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # index
     index_parser = subparsers.add_parser(
-        "index", help="build or rebuild the search index"
+        "index",
+        help="build or rebuild the search index",
+        parents=[common_parser],
     )
     index_parser.add_argument(
         "--project", type=str, default=None, help="project path to index"
@@ -100,7 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # context
     context_parser = subparsers.add_parser(
-        "context", help="show context around a message UUID"
+        "context",
+        help="show context around a message UUID",
+        parents=[common_parser],
     )
     context_parser.add_argument("uuid", type=str, help="message UUID")
     context_parser.add_argument(

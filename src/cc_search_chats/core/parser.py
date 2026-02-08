@@ -4,8 +4,6 @@ Pure functions over data -- no file I/O. The caller is responsible for
 opening files and providing lines. This is the Functional Core.
 """
 
-from __future__ import annotations
-
 import json
 from collections.abc import Iterable, Iterator
 from typing import Any
@@ -127,12 +125,19 @@ def _parse_compact_boundary(
     trigger = metadata.get("trigger", "")
     pre_tokens = metadata.get("preTokens", 0)
 
+    # Coerce pre_tokens to int, handling various malformed types.
+    try:
+        pre_tokens_int = int(pre_tokens)
+    except ValueError, TypeError:
+        # Non-numeric string (e.g., "many"), non-coercible type (e.g., [1,2,3])
+        pre_tokens_int = 0
+
     return CompactEvent(
         uuid=str(data.get("uuid", "")),
         session_id=session_id,
         timestamp=str(data.get("timestamp", "")),
         trigger=str(trigger),
-        pre_tokens=int(pre_tokens),
+        pre_tokens=pre_tokens_int,
     )
 
 
@@ -151,30 +156,35 @@ def parse_record(
     """
     try:
         data = json.loads(line)
-    except json.JSONDecodeError, ValueError:
+
+        if not isinstance(data, dict):
+            return None
+
+        record_type = data.get("type")
+        if not isinstance(record_type, str):
+            return None
+
+        if record_type in ("user", "assistant"):
+            return _parse_message_record(data, record_type, session_id)
+
+        if record_type == "summary":
+            return _parse_summary_record(data, session_id)
+
+        if record_type == "system":
+            subtype = data.get("subtype")
+            if subtype == "compact_boundary":
+                return _parse_compact_boundary(data, session_id)
+            return None
+
+        # Unknown type (progress, queue-operation, file-history-snapshot, etc.)
         return None
-
-    if not isinstance(data, dict):
+    except json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError:
+        # json.JSONDecodeError: malformed JSON
+        # ValueError: could arise from type conversions
+        # TypeError: type mismatches in nested structures
+        # KeyError: should not happen (we use .get()), but defensive
+        # AttributeError: method calls on unexpected types
         return None
-
-    record_type = data.get("type")
-    if not isinstance(record_type, str):
-        return None
-
-    if record_type in ("user", "assistant"):
-        return _parse_message_record(data, record_type, session_id)
-
-    if record_type == "summary":
-        return _parse_summary_record(data, session_id)
-
-    if record_type == "system":
-        subtype = data.get("subtype")
-        if subtype == "compact_boundary":
-            return _parse_compact_boundary(data, session_id)
-        return None
-
-    # Unknown type (progress, queue-operation, file-history-snapshot, etc.)
-    return None
 
 
 def parse_session(

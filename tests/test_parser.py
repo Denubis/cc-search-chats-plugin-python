@@ -11,8 +11,6 @@ Acceptance criteria coverage:
 - AC1.8: BLNS / adversarial strings (Hypothesis)
 """
 
-from __future__ import annotations
-
 import json
 
 from hypothesis import given, settings
