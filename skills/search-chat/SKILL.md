@@ -1,7 +1,8 @@
 ---
 name: search-chat
-description: "Search and recover context from Claude Code chat history -- use when asked about previous conversations, lost context, or cross-referencing sessions"
+description: "Search and recover context from Claude Code chat history — use when asked about previous conversations, lost context, cross-referencing sessions, what we discussed, earlier today, yesterday's session, find where we talked about, recover from compression"
 user-invocable: true
+allowed-tools: ["Bash(uvx cc-search-chats:*)"]
 ---
 
 # Progressive Search Workflow

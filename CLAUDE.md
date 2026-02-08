@@ -71,5 +71,4 @@ Sessions are stored as JSONL files at `~/.claude/projects/<encoded-path>/<sessio
 
 ## Boundaries
 
-- Safe to edit: everything except `.claude-plugin/marketplace.json` (marketplace structure)
 - Never touch: `~/.claude/projects/` data files (read-only access to chat history)
