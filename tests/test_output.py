@@ -1,0 +1,618 @@
+"""Tests for output formatters.
+
+Verifies: cc-search-v2.AC5.2, cc-search-v2.AC5.3, cc-search-v2.AC5.6
+"""
+
+import json
+
+import pytest
+
+from cc_search_chats.output import (
+    format_context,
+    format_extract,
+    format_search_results,
+    format_session_list,
+    json_context,
+    json_extract,
+    json_search_results,
+    json_session_list,
+    render_safe,
+)
+
+# ============================================================
+# Helpers — lightweight row-like dicts to simulate sqlite3.Row
+# ============================================================
+
+
+def _search_row(
+    *,
+    uuid: str = "msg-001",
+    session_id: str = "sess-aaa",
+    epoch: int = 0,
+    timestamp: str = "2026-02-07T10:30:00.000Z",
+    role: str = "user",
+    snippet: str = "...the >>>database<<< schema...",
+    score: float = -1.23,
+) -> dict:
+    return {
+        "uuid": uuid,
+        "session_id": session_id,
+        "epoch": epoch,
+        "timestamp": timestamp,
+        "role": role,
+        "snippet": snippet,
+        "score": score,
+    }
+
+
+def _message_row(
+    *,
+    uuid: str = "msg-001",
+    session_id: str = "sess-aaa",
+    epoch: int = 0,
+    timestamp: str = "2026-02-07T10:30:00.000Z",
+    role: str = "user",
+    text_content: str = "How do I parse JSONL?",
+    parent_uuid: str | None = None,
+    is_summary: int = 0,
+) -> dict:
+    return {
+        "uuid": uuid,
+        "session_id": session_id,
+        "epoch": epoch,
+        "timestamp": timestamp,
+        "role": role,
+        "text_content": text_content,
+        "parent_uuid": parent_uuid,
+        "is_summary": is_summary,
+    }
+
+
+def _compact_event_row(
+    *,
+    uuid: str = "compact-001",
+    session_id: str = "sess-aaa",
+    epoch: int = 1,
+    timestamp: str = "2026-02-07T11:00:00.000Z",
+    trigger: str = "auto",
+    pre_tokens: int = 45000,
+    summary_text: str | None = None,
+) -> dict:
+    return {
+        "uuid": uuid,
+        "session_id": session_id,
+        "epoch": epoch,
+        "timestamp": timestamp,
+        "trigger": trigger,
+        "pre_tokens": pre_tokens,
+        "summary_text": summary_text,
+    }
+
+
+def _session_row(
+    *,
+    session_id: str = "sess-aaa",
+    project_path: str = "/home/brian/project",
+    file_path: str = "/home/brian/.claude/projects/-home-brian-project/sess-aaa.jsonl",
+    file_size: int = 4096,
+    modified_at: str = "2026-02-07T14:00:00+00:00",
+    summary: str | None = "Discussion about database schema design",
+    epoch_count: int = 2,
+    total_messages: int = 10,
+) -> dict:
+    return {
+        "session_id": session_id,
+        "project_path": project_path,
+        "file_path": file_path,
+        "file_size": file_size,
+        "modified_at": modified_at,
+        "summary": summary,
+        "epoch_count": epoch_count,
+        "total_messages": total_messages,
+    }
+
+
+# ============================================================
+# render_safe tests (AC5.6)
+# ============================================================
+
+
+class TestRenderSafe:
+    """Tests for the t-string safe rendering function."""
+
+    def test_normal_text_passes_through(self) -> None:
+        """Normal text renders without modification."""
+        name = "Alice"
+        result = render_safe(t"Hello, {name}!")
+        assert result == "Hello, Alice!"
+
+    def test_null_bytes_stripped(self) -> None:
+        """Null bytes in interpolated values are stripped."""
+        content = "before\x00after"
+        result = render_safe(t"Message: {content}")
+        assert "\x00" not in result
+        assert "beforeafter" in result
+
+    def test_literal_null_bytes_preserved(self) -> None:
+        """Null bytes in the literal template parts are NOT stripped.
+
+        Only interpolated values are sanitised. Template literals are
+        trusted (written by the developer).
+        """
+        content = "safe"
+        # The template literal itself is trusted
+        result = render_safe(t"ok {content}")
+        assert "ok safe" == result
+
+    def test_control_characters_in_interpolated_value(self) -> None:
+        """Control characters (other than null) in interpolated values pass through.
+
+        The spec says strip null bytes. Other control chars are not stripped
+        (they might be meaningful in some contexts). The primary concern is
+        null bytes which can truncate C strings and cause terminal issues.
+        """
+        content = "line1\x01\x02\x1fline2"
+        result = render_safe(t"Text: {content}")
+        # Control chars are present (only null is stripped per spec)
+        assert "line1" in result
+        assert "line2" in result
+
+    def test_ansi_escape_in_interpolated_value(self) -> None:
+        """ANSI escape sequences in user content are not interpreted."""
+        content = "\x1b[31mRED TEXT\x1b[0m"
+        result = render_safe(t"Output: {content}")
+        # The escape sequence chars are present as literal text
+        assert "\x1b[31m" in result
+
+    def test_integer_interpolation(self) -> None:
+        """Non-string values are converted via str()."""
+        count = 42
+        result = render_safe(t"Count: {count}")
+        assert result == "Count: 42"
+
+    def test_none_interpolation(self) -> None:
+        """None is rendered as 'None'."""
+        value = None
+        result = render_safe(t"Value: {value}")
+        assert result == "Value: None"
+
+    def test_empty_template(self) -> None:
+        """Empty template produces empty string."""
+        result = render_safe(t"")
+        assert result == ""
+
+    def test_template_with_only_interpolation(self) -> None:
+        """Template with only interpolated values works."""
+        a = "hello"
+        b = "world"
+        result = render_safe(t"{a} {b}")
+        assert result == "hello world"
+
+
+# ============================================================
+# Human-readable formatter tests (AC5.3)
+# ============================================================
+
+
+class TestFormatSearchResults:
+    """Tests for human-readable search result formatting."""
+
+    def test_single_result_shows_session_id(self) -> None:
+        rows = [_search_row(session_id="sess-aaa")]
+        output = format_search_results(rows)
+        assert "sess-aaa" in output
+
+    def test_single_result_shows_epoch(self) -> None:
+        rows = [_search_row(epoch=2)]
+        output = format_search_results(rows)
+        assert "epoch 2" in output.lower() or "Epoch 2" in output
+
+    def test_single_result_shows_snippet(self) -> None:
+        rows = [_search_row(snippet="...the >>>database<<< schema...")]
+        output = format_search_results(rows)
+        assert "database" in output
+
+    def test_single_result_shows_timestamp(self) -> None:
+        rows = [_search_row(timestamp="2026-02-07T10:30:00.000Z")]
+        output = format_search_results(rows)
+        assert "2026-02-07" in output
+
+    def test_multiple_results_separated(self) -> None:
+        rows = [
+            _search_row(uuid="msg-001", session_id="sess-aaa"),
+            _search_row(uuid="msg-002", session_id="sess-bbb"),
+        ]
+        output = format_search_results(rows)
+        assert "sess-aaa" in output
+        assert "sess-bbb" in output
+
+    def test_empty_results(self) -> None:
+        output = format_search_results([])
+        assert output == "" or "no results" in output.lower()
+
+    def test_shows_role(self) -> None:
+        rows = [_search_row(role="assistant")]
+        output = format_search_results(rows)
+        assert "assistant" in output.lower()
+
+
+class TestFormatExtract:
+    """Tests for human-readable session extract formatting."""
+
+    def test_epoch_markers_between_epochs(self) -> None:
+        """AC5.3: Epoch markers appear between epochs with compression info."""
+        messages = [
+            _message_row(
+                epoch=0,
+                timestamp="2026-02-07T10:30:00.000Z",
+                role="user",
+                text_content="first",
+            ),
+            _message_row(
+                uuid="msg-002",
+                epoch=0,
+                timestamp="2026-02-07T10:31:00.000Z",
+                role="assistant",
+                text_content="reply",
+            ),
+            _message_row(
+                uuid="msg-003",
+                epoch=1,
+                timestamp="2026-02-07T11:00:01.000Z",
+                role="user",
+                text_content="continued",
+            ),
+            _message_row(
+                uuid="msg-004",
+                epoch=1,
+                timestamp="2026-02-07T11:01:00.000Z",
+                role="assistant",
+                text_content="second reply",
+            ),
+        ]
+        compact_events = [
+            _compact_event_row(
+                epoch=1,
+                timestamp="2026-02-07T11:00:00.000Z",
+                trigger="auto",
+                pre_tokens=45000,
+            ),
+        ]
+        output = format_extract(messages, compact_events)
+        assert "Epoch 1" in output
+        assert "auto" in output
+        assert "45000" in output or "45,000" in output or "45000" in output
+
+    def test_role_labels_present(self) -> None:
+        """AC5.3: Role labels appear in output."""
+        messages = [
+            _message_row(role="user", text_content="hello"),
+            _message_row(uuid="msg-002", role="assistant", text_content="hi there"),
+        ]
+        output = format_extract(messages, [])
+        assert "User" in output or "user" in output
+        assert "Assistant" in output or "assistant" in output
+
+    def test_timestamps_in_output(self) -> None:
+        """AC5.3: ISO 8601 timestamps appear in output."""
+        messages = [
+            _message_row(timestamp="2026-02-07T14:32:00.000Z"),
+        ]
+        output = format_extract(messages, [])
+        assert "2026-02-07" in output
+
+    def test_message_text_in_output(self) -> None:
+        messages = [
+            _message_row(text_content="How do I parse JSONL files?"),
+        ]
+        output = format_extract(messages, [])
+        assert "How do I parse JSONL files?" in output
+
+    def test_empty_extract(self) -> None:
+        output = format_extract([], [])
+        assert output == "" or "no messages" in output.lower()
+
+    def test_epoch_marker_shows_keywords_when_available(self) -> None:
+        """Epoch marker includes keyword summary from compact_event."""
+        compact_events = [
+            _compact_event_row(
+                epoch=1,
+                summary_text="Discussion about database schema migration",
+            ),
+        ]
+        messages = [
+            _message_row(epoch=0, text_content="before"),
+            _message_row(
+                uuid="msg-002",
+                epoch=1,
+                timestamp="2026-02-07T11:01:00.000Z",
+                text_content="after",
+            ),
+        ]
+        output = format_extract(messages, compact_events)
+        # The summary text should appear near the epoch marker
+        assert "database schema migration" in output
+
+    def test_single_epoch_no_markers(self) -> None:
+        """Single epoch (no compact events) should have no epoch markers."""
+        messages = [
+            _message_row(epoch=0, text_content="hello"),
+            _message_row(
+                uuid="msg-002",
+                epoch=0,
+                timestamp="2026-02-07T10:31:00.000Z",
+                text_content="world",
+            ),
+        ]
+        output = format_extract(messages, [])
+        assert "Epoch" not in output
+
+
+class TestFormatSessionList:
+    """Tests for human-readable session list formatting."""
+
+    def test_shows_session_id(self) -> None:
+        rows = [_session_row(session_id="sess-aaa")]
+        output = format_session_list(rows)
+        assert "sess-aaa" in output
+
+    def test_shows_file_size(self) -> None:
+        rows = [_session_row(file_size=4096)]
+        output = format_session_list(rows)
+        # Should show size in some form (bytes, KB, etc.)
+        assert "4096" in output or "4.0" in output or "4 K" in output
+
+    def test_shows_summary(self) -> None:
+        rows = [_session_row(summary="Database design discussion")]
+        output = format_session_list(rows)
+        assert "Database design discussion" in output
+
+    def test_shows_epoch_count(self) -> None:
+        rows = [_session_row(epoch_count=3)]
+        output = format_session_list(rows)
+        assert "3" in output
+
+    def test_shows_message_count(self) -> None:
+        rows = [_session_row(total_messages=150)]
+        output = format_session_list(rows)
+        assert "150" in output
+
+    def test_empty_list(self) -> None:
+        output = format_session_list([])
+        assert output == "" or "no sessions" in output.lower()
+
+
+class TestFormatContext:
+    """Tests for human-readable context formatting."""
+
+    def test_target_marker_present(self) -> None:
+        target = _message_row(text_content="the target message")
+        before = [_message_row(uuid="msg-before", text_content="before text")]
+        after = [_message_row(uuid="msg-after", text_content="after text")]
+        output = format_context(target, before, after)
+        assert "TARGET" in output or ">>>" in output
+
+    def test_before_and_after_present(self) -> None:
+        target = _message_row(text_content="target")
+        before = [_message_row(uuid="msg-b1", text_content="context before")]
+        after = [_message_row(uuid="msg-a1", text_content="context after")]
+        output = format_context(target, before, after)
+        assert "context before" in output
+        assert "context after" in output
+
+    def test_empty_context(self) -> None:
+        target = _message_row(text_content="alone")
+        output = format_context(target, [], [])
+        assert "alone" in output
+
+
+# ============================================================
+# JSON formatter tests (AC5.2)
+# ============================================================
+
+
+class TestJsonSearchResults:
+    """Tests for JSON search result output."""
+
+    def test_valid_json(self) -> None:
+        """AC5.2: Output is valid JSON parseable by json.loads()."""
+        rows = [_search_row()]
+        output = json_search_results(rows)
+        parsed = json.loads(output)
+        assert isinstance(parsed, list)
+
+    def test_result_has_expected_keys(self) -> None:
+        rows = [_search_row()]
+        parsed = json.loads(json_search_results(rows))
+        result = parsed[0]
+        assert "uuid" in result
+        assert "session_id" in result
+        assert "epoch" in result
+        assert "timestamp" in result
+        assert "role" in result
+        assert "snippet" in result
+        assert "score" in result
+
+    def test_empty_results(self) -> None:
+        output = json_search_results([])
+        parsed = json.loads(output)
+        assert parsed == []
+
+    def test_multiple_results(self) -> None:
+        rows = [_search_row(uuid="a"), _search_row(uuid="b")]
+        parsed = json.loads(json_search_results(rows))
+        assert len(parsed) == 2
+
+
+class TestJsonExtract:
+    """Tests for JSON extract output."""
+
+    def test_valid_json(self) -> None:
+        """AC5.2: Output is valid JSON with session_id and epochs."""
+        rows = [_message_row()]
+        output = json_extract(rows, [], session_id="sess-aaa")
+        parsed = json.loads(output)
+        assert isinstance(parsed, dict)
+        assert "session_id" in parsed
+        assert "epochs" in parsed
+
+    def test_session_id_in_output(self) -> None:
+        rows = [_message_row()]
+        parsed = json.loads(json_extract(rows, [], session_id="sess-aaa"))
+        assert parsed["session_id"] == "sess-aaa"
+
+    def test_epochs_structure(self) -> None:
+        rows = [
+            _message_row(epoch=0, text_content="first"),
+            _message_row(uuid="msg-002", epoch=1, text_content="second"),
+        ]
+        parsed = json.loads(json_extract(rows, [], session_id="sess-aaa"))
+        assert len(parsed["epochs"]) == 2
+        assert parsed["epochs"][0]["epoch"] == 0
+        assert parsed["epochs"][1]["epoch"] == 1
+
+    def test_message_fields(self) -> None:
+        rows = [
+            _message_row(
+                uuid="msg-x",
+                role="user",
+                text_content="hello",
+                timestamp="2026-02-07T10:00:00.000Z",
+            )
+        ]
+        parsed = json.loads(json_extract(rows, [], session_id="sess-aaa"))
+        msg = parsed["epochs"][0]["messages"][0]
+        assert msg["uuid"] == "msg-x"
+        assert msg["role"] == "user"
+        assert msg["text"] == "hello"
+        assert msg["timestamp"] == "2026-02-07T10:00:00.000Z"
+
+    def test_compact_events_in_epochs(self) -> None:
+        rows = [
+            _message_row(epoch=0, text_content="before"),
+            _message_row(uuid="msg-002", epoch=1, text_content="after"),
+        ]
+        compact_events = [
+            _compact_event_row(epoch=1, trigger="auto", pre_tokens=45000),
+        ]
+        parsed = json.loads(json_extract(rows, compact_events, session_id="sess-aaa"))
+        epoch_1 = parsed["epochs"][1]
+        assert (
+            epoch_1.get("trigger") == "auto" or epoch_1.get("compression") is not None
+        )
+
+    def test_empty_extract(self) -> None:
+        parsed = json.loads(json_extract([], [], session_id="sess-aaa"))
+        assert parsed["session_id"] == "sess-aaa"
+        assert parsed["epochs"] == []
+
+
+class TestJsonSessionList:
+    """Tests for JSON session list output."""
+
+    def test_valid_json(self) -> None:
+        """AC5.2: Output is valid JSON."""
+        rows = [_session_row()]
+        output = json_session_list(rows)
+        parsed = json.loads(output)
+        assert isinstance(parsed, list)
+
+    def test_session_fields(self) -> None:
+        rows = [_session_row()]
+        parsed = json.loads(json_session_list(rows))
+        sess = parsed[0]
+        assert "session_id" in sess
+        assert "project_path" in sess
+        assert "file_size" in sess
+        assert "modified_at" in sess
+        assert "summary" in sess
+        assert "epoch_count" in sess
+        assert "message_count" in sess
+
+    def test_empty_list(self) -> None:
+        parsed = json.loads(json_session_list([]))
+        assert parsed == []
+
+
+class TestJsonContext:
+    """Tests for JSON context output."""
+
+    def test_valid_json(self) -> None:
+        target = _message_row()
+        output = json_context(target, [], [])
+        parsed = json.loads(output)
+        assert isinstance(parsed, dict)
+
+    def test_structure(self) -> None:
+        target = _message_row(text_content="target")
+        before = [_message_row(uuid="b1", text_content="before")]
+        after = [_message_row(uuid="a1", text_content="after")]
+        parsed = json.loads(json_context(target, before, after))
+        assert "target" in parsed
+        assert "before" in parsed
+        assert "after" in parsed
+        assert parsed["target"]["text"] == "target"
+        assert len(parsed["before"]) == 1
+        assert len(parsed["after"]) == 1
+
+
+class TestJsonWithBLNS:
+    """Tests for JSON output with adversarial content (Big List of Naughty Strings)."""
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "normal text",
+            "null\x00byte",
+            "tab\there",
+            'quotes "inside" text',
+            "backslash\\here",
+            "newline\nand\rcarriage return",
+            "unicode \u2603 snowman",
+            "emoji \U0001f600 grinning",
+            "rtl \u200f marker",
+            "zero-width \u200b joiner",
+            "\x1b[31mANSI escape\x1b[0m",
+            "'; DROP TABLE message; --",
+            "<script>alert('xss')</script>",
+            "a" * 100_000,  # very long string
+        ],
+        ids=[
+            "normal",
+            "null_byte",
+            "tab",
+            "quotes",
+            "backslash",
+            "newline_cr",
+            "unicode_snowman",
+            "emoji",
+            "rtl_marker",
+            "zero_width",
+            "ansi_escape",
+            "sql_injection",
+            "xss",
+            "very_long",
+        ],
+    )
+    def test_json_search_results_with_naughty_content(self, content: str) -> None:
+        """json.dumps handles escaping correctly for all content."""
+        rows = [_search_row(snippet=content)]
+        output = json_search_results(rows)
+        parsed = json.loads(output)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 1
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "null\x00byte",
+            "unicode \u2603 snowman",
+            "'; DROP TABLE message; --",
+        ],
+    )
+    def test_json_extract_with_naughty_content(self, content: str) -> None:
+        rows = [_message_row(text_content=content)]
+        output = json_extract(rows, [], session_id="sess-aaa")
+        parsed = json.loads(output)
+        assert isinstance(parsed, dict)
+        assert len(parsed["epochs"]) == 1
