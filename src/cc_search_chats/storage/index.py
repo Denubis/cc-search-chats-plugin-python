@@ -331,3 +331,87 @@ def jit_reindex(
             count += 1
 
     return count
+
+
+# ============================================================
+# Query execution (Imperative Shell wrappers)
+# ============================================================
+
+
+def search(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    epoch: int | None = None,
+    project: str | None = None,
+    days: int | None = None,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    """Execute an FTS5 search query with optional filters.
+
+    Returns matching rows. Empty list if no matches (never raises for
+    empty results).
+    """
+    from cc_search_chats.core.search import build_search_query
+
+    sql, params = build_search_query(query, epoch=epoch, project=project, days=days)
+    sql += f"\nLIMIT {int(limit)}"
+    return conn.execute(sql, params).fetchall()
+
+
+def extract_session(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    epoch: int | None = None,
+) -> list[sqlite3.Row]:
+    """Extract all messages from a session.
+
+    Raises ValueError if the session_id is not found in the database.
+    """
+    from cc_search_chats.core.search import build_extract_query
+
+    # Verify session exists
+    row = conn.execute(
+        "SELECT session_id FROM session WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"Session not found: {session_id}")
+
+    sql, params = build_extract_query(session_id, epoch=epoch)
+    return conn.execute(sql, params).fetchall()
+
+
+def extract_context(
+    conn: sqlite3.Connection,
+    uuid: str,
+    depth: int = 5,
+) -> list[sqlite3.Row]:
+    """Extract surrounding context for a message.
+
+    Raises ValueError if the uuid is not found in the database.
+    """
+    from cc_search_chats.core.search import build_context_query
+
+    # Verify message exists
+    row = conn.execute(
+        "SELECT uuid FROM message WHERE uuid = ?", (uuid,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"Message not found: {uuid}")
+
+    sql, params = build_context_query(uuid, depth)
+    return conn.execute(sql, params).fetchall()
+
+
+def list_sessions(
+    conn: sqlite3.Connection,
+    *,
+    project: str | None = None,
+    days: int | None = None,
+) -> list[sqlite3.Row]:
+    """List sessions with summary info."""
+    from cc_search_chats.core.search import build_list_query
+
+    sql, params = build_list_query(project=project, days=days)
+    return conn.execute(sql, params).fetchall()
