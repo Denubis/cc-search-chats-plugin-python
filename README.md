@@ -10,11 +10,17 @@ Claude Code compresses conversation context when sessions grow large. Earlier co
 
 ### As a Claude Code Plugin (Recommended)
 
-Install from the marketplace, or directly:
+Add the marketplace and install:
 
 ```bash
-claude plugin add github:Denubis/cc-search-chats-plugin-python
+# Add the plugin marketplace (once)
+/plugin marketplace add Denubis/cc-search-chats-plugin-python
+
+# Install the plugin
+claude plugin install cc-search-chats@cc-search-chats-marketplace
 ```
+
+Or from inside Claude Code, use `/plugin` and navigate to **Discover** to browse and install.
 
 ### Standalone CLI
 
