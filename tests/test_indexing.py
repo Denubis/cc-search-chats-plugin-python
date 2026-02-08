@@ -361,15 +361,12 @@ class TestKeywordExtraction:
             assert row["keywords"] is not None
             assert len(row["keywords"]) > 0
 
-    def test_epoch_0_keywords_match_topic(
-        self, indexed_db: sqlite3.Connection
-    ) -> None:
+    def test_epoch_0_keywords_match_topic(self, indexed_db: sqlite3.Connection) -> None:
         """Epoch 0 (database/schema topic) produces relevant keywords."""
         compute_epoch_keywords(indexed_db, SESSION_ID_A)
 
         row = indexed_db.execute(
-            "SELECT keywords FROM epoch_summary "
-            "WHERE session_id = ? AND epoch = 0",
+            "SELECT keywords FROM epoch_summary WHERE session_id = ? AND epoch = 0",
             (SESSION_ID_A,),
         ).fetchone()
         keywords = row["keywords"].lower()
@@ -379,15 +376,12 @@ class TestKeywordExtraction:
         found = {w for w in topic_words if w in keywords}
         assert len(found) >= 1, f"Expected topic words in '{keywords}', found none"
 
-    def test_epoch_1_keywords_match_topic(
-        self, indexed_db: sqlite3.Connection
-    ) -> None:
+    def test_epoch_1_keywords_match_topic(self, indexed_db: sqlite3.Connection) -> None:
         """Epoch 1 (authentication/OAuth topic) produces relevant keywords."""
         compute_epoch_keywords(indexed_db, SESSION_ID_A)
 
         row = indexed_db.execute(
-            "SELECT keywords FROM epoch_summary "
-            "WHERE session_id = ? AND epoch = 1",
+            "SELECT keywords FROM epoch_summary WHERE session_id = ? AND epoch = 1",
             (SESSION_ID_A,),
         ).fetchone()
         keywords = row["keywords"].lower()
@@ -396,9 +390,7 @@ class TestKeywordExtraction:
         found = {w for w in topic_words if w in keywords}
         assert len(found) >= 1, f"Expected topic words in '{keywords}', found none"
 
-    def test_keywords_are_comma_separated(
-        self, indexed_db: sqlite3.Connection
-    ) -> None:
+    def test_keywords_are_comma_separated(self, indexed_db: sqlite3.Connection) -> None:
         """Keywords are stored as comma-separated values."""
         compute_epoch_keywords(indexed_db, SESSION_ID_A)
 
@@ -412,9 +404,7 @@ class TestKeywordExtraction:
             parts = [p.strip() for p in kw.split(",")]
             assert len(parts) >= 2, f"Expected multiple keywords, got: {kw}"
 
-    def test_keywords_limited_to_top_n(
-        self, indexed_db: sqlite3.Connection
-    ) -> None:
+    def test_keywords_limited_to_top_n(self, indexed_db: sqlite3.Connection) -> None:
         """Keywords are limited to top_n terms."""
         top_n = 5
         compute_epoch_keywords(indexed_db, SESSION_ID_A, top_n=top_n)
@@ -441,8 +431,7 @@ class TestKeywordExtractionGenericContent:
         compute_epoch_keywords(db_conn, SESSION_ID_A)
 
         row = db_conn.execute(
-            "SELECT keywords FROM epoch_summary "
-            "WHERE session_id = ? AND epoch = 0",
+            "SELECT keywords FROM epoch_summary WHERE session_id = ? AND epoch = 0",
             (SESSION_ID_A,),
         ).fetchone()
         assert row is not None
@@ -453,9 +442,7 @@ class TestKeywordExtractionGenericContent:
 class TestUpdateAllKeywords:
     """update_all_keywords batch keyword computation."""
 
-    def test_update_single_session(
-        self, indexed_db: sqlite3.Connection
-    ) -> None:
+    def test_update_single_session(self, indexed_db: sqlite3.Connection) -> None:
         """update_all_keywords with session_id populates that session's keywords."""
         update_all_keywords(indexed_db, session_id=SESSION_ID_A)
 

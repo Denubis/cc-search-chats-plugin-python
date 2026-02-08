@@ -358,9 +358,7 @@ def compute_epoch_keywords(
     The caller decides when to trigger it.
     """
     # 1. Get total message count across the entire corpus (for IDF).
-    total_messages = conn.execute(
-        "SELECT COUNT(*) FROM message"
-    ).fetchone()[0]
+    total_messages = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
 
     if total_messages == 0:
         return
@@ -436,8 +434,7 @@ def compute_epoch_keywords(
         keywords = ", ".join(top_terms)
 
         conn.execute(
-            "UPDATE epoch_summary SET keywords = ? "
-            "WHERE session_id = ? AND epoch = ?",
+            "UPDATE epoch_summary SET keywords = ? WHERE session_id = ? AND epoch = ?",
             (keywords, session_id, epoch),
         )
 
