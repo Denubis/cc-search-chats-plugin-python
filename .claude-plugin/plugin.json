@@ -1,12 +1,16 @@
 {
   "name": "cc-search-chats",
   "description": "Context recovery and cross-referencing for Claude Code chat history — recover from compression, search sessions, extract conversations",
-  "version": "0.1.0",
+  "version": "2.0.0a1",
   "author": [
     {
       "name": "pcvelz",
       "email": "pcvelz@users.noreply.github.com",
       "url": "https://github.com/pcvelz/cc-search-chats-plugin"
+    },
+    {
+      "name": "akatz-ai",
+      "url": "https://github.com/akatz-ai/cc-conversation-search"
     },
     {
       "name": "Denubis",
@@ -16,5 +20,5 @@
   "homepage": "https://github.com/Denubis/cc-search-chats-plugin-python",
   "repository": "https://github.com/Denubis/cc-search-chats-plugin-python",
   "license": "MIT",
-  "keywords": ["search", "chat-history", "sessions", "context-recovery", "cross-reference", "claude-code"]
+  "keywords": ["search", "chat-history", "sessions", "context-recovery", "cross-reference", "claude-code", "compression", "fts5"]
 }
