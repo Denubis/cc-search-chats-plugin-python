@@ -1,4 +1,7 @@
-"""CLI entry point for cc-search-chats."""
+"""CLI entry point for cc-search-chats.
+
+Imperative Shell — parses arguments and orchestrates storage/output layers.
+"""
 
 import argparse
 import os
@@ -6,6 +9,7 @@ import sqlite3
 import sys
 
 from cc_search_chats.core.discovery import (
+    decode_project_path,
     encode_project_path,
     get_claude_projects_dir,
     list_session_files,
@@ -42,6 +46,16 @@ def _resolve_project(args: argparse.Namespace) -> str:
     return os.getcwd()
 
 
+def _db_project_path(project_path: str) -> str:
+    """Convert a real project path to the form stored in the database.
+
+    The database stores project_path as decode_project_path(encode_project_path(path)),
+    which is lossy for paths containing hyphens. Query filters must use this
+    same form to match.
+    """
+    return decode_project_path(encode_project_path(project_path))
+
+
 def _validate_project_dir(project_path: str) -> None:
     """Validate that the Claude Code projects directory exists for this project.
 
@@ -70,7 +84,7 @@ def _handle_search(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
         conn,
         args.query,
         epoch=args.epoch,
-        project=project_path,
+        project=_db_project_path(project_path),
         days=args.days,
     )
 
@@ -130,7 +144,9 @@ def _handle_list(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
 
     jit_reindex(conn, project_path)
 
-    results = list_sessions(conn, project=project_path, days=args.days)
+    results = list_sessions(
+        conn, project=_db_project_path(project_path), days=args.days
+    )
 
     if args.json:
         print(json_session_list(results))

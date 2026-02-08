@@ -9,7 +9,11 @@ objects, which support dict-like access) and produce output strings.
 """
 
 import json
+import sqlite3
 from string.templatelib import Interpolation, Template
+
+# Type alias for row-like objects (dict or sqlite3.Row — both support [] access)
+type _Row = dict | sqlite3.Row
 
 
 def render_safe(template: Template) -> str:
@@ -115,9 +119,9 @@ def _format_epoch_marker(event: dict) -> str:
     pre_tokens = event["pre_tokens"]
     summary_text = event["summary_text"]
 
-    marker = f"--- Epoch {epoch} (compression at {timestamp}, trigger: {trigger}, ~{pre_tokens} tokens) ---"
+    marker = render_safe(t"--- Epoch {epoch} (compression at {timestamp}, trigger: {trigger}, ~{pre_tokens} tokens) ---")
     if summary_text:
-        marker += f"\nSummary: {summary_text}"
+        marker += "\n" + render_safe(t"Summary: {summary_text}")
     return marker
 
 
@@ -139,12 +143,7 @@ def format_session_list(rows: list) -> str:
         total_messages = row["total_messages"]
 
         header = render_safe(t"{session_id}")
-        details = (
-            f"  project:  {project_path}\n"
-            f"  size:     {file_size} bytes\n"
-            f"  modified: {modified_at}\n"
-            f"  epochs:   {epoch_count}  messages: {total_messages}"
-        )
+        details = render_safe(t"  project:  {project_path}\n  size:     {file_size} bytes\n  modified: {modified_at}\n  epochs:   {epoch_count}  messages: {total_messages}")
         if summary:
             summary_line = render_safe(t"  summary:  {summary}")
             blocks.append(f"{header}\n{details}\n{summary_line}")
@@ -154,7 +153,7 @@ def format_session_list(rows: list) -> str:
     return "\n\n".join(blocks)
 
 
-def format_context(target: dict, before: list, after: list) -> str:
+def format_context(target: _Row, before: list, after: list) -> str:
     """Format context around a message with a TARGET marker.
 
     Shows before messages, then >>> TARGET <<< marker, then after messages.
@@ -194,17 +193,6 @@ def format_context(target: dict, before: list, after: list) -> str:
 # ============================================================
 # JSON formatters
 # ============================================================
-
-
-def _row_to_dict(row: dict) -> dict:
-    """Convert a sqlite3.Row or dict to a plain dict.
-
-    sqlite3.Row supports dict(row) but also subscript access.
-    If already a dict, return as-is.
-    """
-    if isinstance(row, dict):
-        return row
-    return dict(row)
 
 
 def json_search_results(rows: list) -> str:
@@ -302,13 +290,13 @@ def json_session_list(rows: list) -> str:
     return json.dumps(results, indent=2, ensure_ascii=False)
 
 
-def json_context(target: dict, before: list, after: list) -> str:
+def json_context(target: _Row, before: list, after: list) -> str:
     """Format context around a message as JSON.
 
     Returns a JSON object with target, before, and after arrays.
     """
 
-    def _msg_dict(row: dict) -> dict:
+    def _msg_dict(row: _Row) -> dict:
         return {
             "uuid": row["uuid"],
             "role": row["role"],

@@ -16,6 +16,7 @@ import json
 import shutil
 import sqlite3
 import sys
+from collections.abc import Generator
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -89,7 +90,9 @@ def _run_cli(
 
 
 @pytest.fixture
-def cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
+def cli_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[sqlite3.Connection]:
     """Set up a fully isolated CLI test environment.
 
     Creates:
@@ -416,7 +419,7 @@ class TestLargeSession:
     @pytest.fixture
     def large_session_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> sqlite3.Connection:
+    ) -> Generator[sqlite3.Connection]:
         """Create a ~8MB JSONL session file and index it."""
         projects_dir = tmp_path / "claude" / "projects"
         encoded = encode_project_path(FAKE_PROJECT_PATH)
@@ -428,7 +431,7 @@ class TestLargeSession:
 
         # Generate ~8MB of JSONL lines (~200 bytes per line, ~40000 lines)
         lines = []
-        for i in range(20000):
+        for i in range(45000):
             # Alternate user/assistant
             if i % 2 == 0:
                 line = json.dumps(
@@ -467,7 +470,7 @@ class TestLargeSession:
 
         session_file.write_text("\n".join(lines), encoding="utf-8")
         file_size = session_file.stat().st_size
-        assert file_size > 4_000_000, f"Expected >4MB, got {file_size}"
+        assert file_size > 8_000_000, f"Expected >8MB, got {file_size}"
 
         monkeypatch.setattr(
             "cc_search_chats.core.discovery.get_claude_projects_dir",
