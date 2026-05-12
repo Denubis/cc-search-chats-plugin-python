@@ -201,8 +201,12 @@ def index_session(conn: sqlite3.Connection, session_meta: SessionMeta) -> None:
         for record in parse_session(lines, sid):
             if isinstance(record, CompactEvent):
                 epoch += 1
+                # OR IGNORE: Claude Code can rewrite the same record into a
+                # JSONL on resume/replay (uuid is the record identity); first
+                # write wins. Removing this clause re-introduces an
+                # IntegrityError on the uuid PK.
                 conn.execute(
-                    "INSERT INTO compact_event "
+                    "INSERT OR IGNORE INTO compact_event "
                     "(uuid, session_id, epoch, timestamp, trigger, pre_tokens, summary_text) "
                     "VALUES (?, ?, ?, ?, ?, ?, NULL)",
                     (
@@ -243,8 +247,10 @@ def index_session(conn: sqlite3.Connection, session_meta: SessionMeta) -> None:
                         awaiting_summary = False
                         last_compact_uuid = None
 
+                    # OR IGNORE: see compact_event INSERT above. Same writer
+                    # behaviour applies to user/assistant records.
                     conn.execute(
-                        "INSERT INTO message "
+                        "INSERT OR IGNORE INTO message "
                         "(uuid, session_id, parent_uuid, epoch, timestamp, role, "
                         "text_content, is_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (

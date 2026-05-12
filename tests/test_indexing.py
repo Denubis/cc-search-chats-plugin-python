@@ -11,6 +11,7 @@ Acceptance criteria coverage:
 - cc-search-v2.AC7.4: Corrupted DB recovery (covered in test_index.py)
 """
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -21,7 +22,12 @@ from cc_search_chats.storage.index import (
     needs_reindex,
     update_all_keywords,
 )
-from tests.conftest import SESSION_ID_A, _make_session_lines, _write_session_file
+from tests.conftest import (
+    SESSION_ID_A,
+    SESSION_ID_B,
+    _make_session_lines,
+    _write_session_file,
+)
 
 
 class TestIndexSessionBasic:
@@ -463,3 +469,113 @@ class TestUpdateAllKeywords:
             "SELECT COUNT(*) FROM epoch_summary WHERE keywords IS NULL"
         ).fetchone()[0]
         assert null_count == 0
+
+
+# ============================================================
+# Duplicate UUID handling (regression for intra-file double-logging
+# observed in real Claude Code session files)
+# ============================================================
+
+
+def _user_message_record(
+    session_id: str,
+    uuid: str,
+    timestamp: str,
+    content: str,
+    parent_uuid: str | None = None,
+) -> str:
+    """Build a JSONL line for a type=user message."""
+    return json.dumps(
+        {
+            "type": "user",
+            "uuid": uuid,
+            "parentUuid": parent_uuid,
+            "timestamp": timestamp,
+            "sessionId": session_id,
+            "message": {"role": "user", "content": content},
+        }
+    )
+
+
+class TestDuplicateUuidHandling:
+    """Regression: real Claude Code session files contain duplicate message
+    UUIDs (the same logical message rewritten into the same JSONL on a later
+    run, differing only in writer-version fields). The indexer must not crash
+    on this input.
+    """
+
+    def test_intra_file_duplicate_message_uuids_does_not_crash(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Two identical message records in the same JSONL must not raise."""
+        dup_uuid = "dup-msg-0001"
+        lines = [
+            _user_message_record(
+                SESSION_ID_A, dup_uuid, "2026-02-07T10:00:00.000Z", "hello world"
+            ),
+            _user_message_record(
+                SESSION_ID_A, dup_uuid, "2026-02-07T10:00:00.000Z", "hello world"
+            ),
+        ]
+        meta = _write_session_file(tmp_path, SESSION_ID_A, lines)
+
+        index_session(db_conn, meta)
+
+        rows = db_conn.execute(
+            "SELECT COUNT(*) FROM message WHERE session_id = ?",
+            (SESSION_ID_A,),
+        ).fetchone()
+        assert rows[0] == 1, "duplicate UUID should be absorbed, leaving one row"
+
+    def test_cross_session_duplicate_message_uuids_does_not_crash(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """A UUID shared by two different session JSONLs must not raise."""
+        shared_uuid = "shared-msg-0001"
+        lines_a = [
+            _user_message_record(
+                SESSION_ID_A, shared_uuid, "2026-02-07T10:00:00.000Z", "first"
+            ),
+        ]
+        lines_b = [
+            _user_message_record(
+                SESSION_ID_B, shared_uuid, "2026-02-07T11:00:00.000Z", "second"
+            ),
+        ]
+        meta_a = _write_session_file(tmp_path, SESSION_ID_A, lines_a)
+        meta_b = _write_session_file(tmp_path, SESSION_ID_B, lines_b)
+
+        index_session(db_conn, meta_a)
+        index_session(db_conn, meta_b)
+
+        sessions = db_conn.execute("SELECT COUNT(*) FROM session").fetchone()[0]
+        assert sessions == 2, "both session rows should be present"
+
+        msg_rows = db_conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+        assert msg_rows == 1, "first-seen UUID wins; the second is ignored"
+
+    def test_intra_file_duplicate_compact_boundary_does_not_crash(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Two identical compact_boundary records in the same JSONL must not raise."""
+        dup_uuid = "dup-compact-0001"
+        boundary = json.dumps(
+            {
+                "type": "system",
+                "subtype": "compact_boundary",
+                "uuid": dup_uuid,
+                "timestamp": "2026-02-07T10:00:00.000Z",
+                "sessionId": SESSION_ID_A,
+                "compactMetadata": {"trigger": "auto", "preTokens": 1000},
+            }
+        )
+        lines = [boundary, boundary]
+        meta = _write_session_file(tmp_path, SESSION_ID_A, lines)
+
+        index_session(db_conn, meta)
+
+        rows = db_conn.execute(
+            "SELECT COUNT(*) FROM compact_event WHERE session_id = ?",
+            (SESSION_ID_A,),
+        ).fetchone()
+        assert rows[0] == 1, "duplicate compact_boundary should be absorbed"
