@@ -5,3 +5,10 @@ __pycache__/
 dist/
 build/
 .venv/
+.hypothesis/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.commit-msg.tmp
