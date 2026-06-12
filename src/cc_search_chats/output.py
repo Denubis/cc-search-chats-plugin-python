@@ -375,3 +375,20 @@ def json_index_result(sessions_indexed: int, project_path: str) -> str:
         indent=2,
         ensure_ascii=False,
     )
+
+
+def json_index_all_result(counts: dict[str, int]) -> str:
+    """Format an ``index --all`` result as JSON.
+
+    Returns a JSON object with the number of projects scanned and the
+    sessions indexed (new/changed) versus skipped (already current).
+    """
+    return json.dumps(
+        {
+            "projects": counts["projects"],
+            "sessions_indexed": counts["indexed"],
+            "sessions_skipped": counts["skipped"],
+        },
+        indent=2,
+        ensure_ascii=False,
+    )

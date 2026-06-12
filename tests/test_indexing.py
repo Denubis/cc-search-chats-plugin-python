@@ -18,8 +18,10 @@ from pathlib import Path
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.storage.index import (
     compute_epoch_keywords,
+    index_all_projects,
     index_session,
     needs_reindex,
+    search,
     update_all_keywords,
 )
 from tests.conftest import (
@@ -312,6 +314,92 @@ class TestReindexIdempotent:
         ).fetchone()[0]
         # With 1 compact_boundary: 4 + 5 = 9 messages
         assert msg_count == 9
+
+
+class TestIndexAllProjects:
+    """index --all: incrementally index every project under the projects dir."""
+
+    def _make_project(
+        self, projects_dir: Path, encoded: str, session_id: str
+    ) -> None:
+        proj = projects_dir / encoded
+        proj.mkdir(parents=True)
+        lines = _make_session_lines(session_id, compact_boundaries=0)
+        (proj / f"{session_id}.jsonl").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+
+    def test_indexes_every_project_dir(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Every project directory is discovered and its sessions indexed."""
+        projects = tmp_path / "projects"
+        self._make_project(projects, "-home-brian-alpha", SESSION_ID_A)
+        self._make_project(projects, "-home-brian-beta", SESSION_ID_B)
+
+        counts = index_all_projects(db_conn, projects_dir=projects)
+
+        assert counts["projects"] == 2
+        assert counts["indexed"] == 2
+        assert counts["skipped"] == 0
+        proj_paths = {
+            r["project_path"]
+            for r in db_conn.execute(
+                "SELECT DISTINCT project_path FROM session"
+            ).fetchall()
+        }
+        assert proj_paths == {"/home/brian/alpha", "/home/brian/beta"}
+
+    def test_content_searchable_across_projects(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """After index --all, a project=None search spans every project."""
+        projects = tmp_path / "projects"
+        self._make_project(projects, "-home-brian-alpha", SESSION_ID_A)
+        self._make_project(projects, "-home-brian-beta", SESSION_ID_B)
+        index_all_projects(db_conn, projects_dir=projects)
+
+        results = search(db_conn, "database")  # project=None -> all projects
+        session_ids = {r["session_id"] for r in results}
+        assert SESSION_ID_A in session_ids
+        assert SESSION_ID_B in session_ids
+
+    def test_reindex_is_incremental(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """A second pass skips unchanged sessions."""
+        projects = tmp_path / "projects"
+        self._make_project(projects, "-home-brian-alpha", SESSION_ID_A)
+
+        first = index_all_projects(db_conn, projects_dir=projects)
+        assert first["indexed"] == 1
+        assert first["skipped"] == 0
+
+        second = index_all_projects(db_conn, projects_dir=projects)
+        assert second["indexed"] == 0
+        assert second["skipped"] == 1
+
+    def test_empty_projects_dir(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """An empty projects dir indexes nothing."""
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        assert index_all_projects(db_conn, projects_dir=projects) == {
+            "projects": 0,
+            "indexed": 0,
+            "skipped": 0,
+        }
+
+    def test_missing_projects_dir(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """A nonexistent projects dir is handled gracefully."""
+        assert index_all_projects(db_conn, projects_dir=tmp_path / "nope") == {
+            "projects": 0,
+            "indexed": 0,
+            "skipped": 0,
+        }
 
 
 # ============================================================

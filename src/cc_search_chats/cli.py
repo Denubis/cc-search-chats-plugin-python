@@ -22,6 +22,7 @@ from cc_search_chats.output import (
     format_session_list,
     json_context,
     json_extract,
+    json_index_all_result,
     json_index_result,
     json_search_results,
     json_session_list,
@@ -31,6 +32,7 @@ from cc_search_chats.storage.index import (
     ensure_fts5,
     extract_context,
     extract_session,
+    index_all_projects,
     jit_reindex,
     list_sessions,
     open_db,
@@ -160,6 +162,20 @@ def _handle_list(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
 
 def _handle_index(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     """Build or rebuild the search index."""
+    if args.all:
+        counts = index_all_projects(conn)
+        update_all_keywords(conn)
+        if args.json:
+            print(json_index_all_result(counts))
+        else:
+            print(
+                f"Indexed {counts['indexed']} sessions "
+                f"({counts['skipped']} already current) "
+                f"across {counts['projects']} projects",
+                file=sys.stderr,
+            )
+        return 0
+
     project_path = _resolve_project(args)
     _validate_project_dir(project_path)
 
@@ -320,11 +336,18 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  cc-search-chats index\n"
+            "  cc-search-chats index --all\n"
             "  cc-search-chats index --project /path/to/project"
         ),
     )
     index_parser.add_argument(
         "--project", type=str, default=None, help="project path to index"
+    )
+    index_parser.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help="index every project under ~/.claude/projects (incremental)",
     )
     index_parser.set_defaults(func=_handle_index)
 

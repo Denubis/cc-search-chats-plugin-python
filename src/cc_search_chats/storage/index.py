@@ -351,6 +351,57 @@ def jit_reindex(
     return count
 
 
+def index_all_projects(
+    conn: sqlite3.Connection,
+    projects_dir: Path | None = None,
+    include_subagents: bool = False,
+) -> dict[str, int]:
+    """Incrementally index every project under the Claude projects directory.
+
+    Walks each immediate subdirectory of ``projects_dir`` (each encodes one
+    project path), discovers its session files, and indexes only those whose
+    file mtime is newer than what is stored (via :func:`needs_reindex`). The
+    first run parses every session once; later runs skip unchanged files, so
+    it is cheap to re-run from cron.
+
+    Args:
+        conn: Open index database connection.
+        projects_dir: Claude projects directory. Defaults to
+            :func:`get_claude_projects_dir` (injectable for tests).
+        include_subagents: If True, also index nested ``subagents/`` files.
+
+    Returns:
+        Counts dict: ``projects`` scanned, sessions ``indexed`` (new/changed),
+        ``skipped`` (already current).
+    """
+    from cc_search_chats.core.discovery import (
+        get_claude_projects_dir,
+        list_session_files,
+    )
+
+    if projects_dir is None:
+        projects_dir = get_claude_projects_dir()
+
+    counts = {"projects": 0, "indexed": 0, "skipped": 0}
+    if not projects_dir.is_dir():
+        return counts
+
+    for child in sorted(projects_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        counts["projects"] += 1
+        sessions = list_session_files(projects_dir, child.name, include_subagents)
+        sessions.sort(key=lambda s: s.modified_at, reverse=True)
+        for meta in sessions:
+            if needs_reindex(conn, meta):
+                index_session(conn, meta)
+                counts["indexed"] += 1
+            else:
+                counts["skipped"] += 1
+
+    return counts
+
+
 # ============================================================
 # Deferred epoch keyword extraction via fts5vocab
 # ============================================================

@@ -25,7 +25,8 @@ import pytest
 from cc_search_chats.cli import build_parser
 from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
-from cc_search_chats.storage.index import close_db, index_session, open_db
+from cc_search_chats.storage.index import close_db, index_session, open_db, search
+from tests.conftest import SESSION_ID_A, _make_session_lines
 
 # ============================================================
 # Fixture paths
@@ -137,6 +138,46 @@ def cli_env(
 
     yield conn
     close_db(conn)
+
+
+class TestIndexAll:
+    """index --all walks every project under the projects dir."""
+
+    def test_index_all_runs(self, cli_env: sqlite3.Connection) -> None:
+        exit_code, stdout, stderr = _run_cli(["index", "--all"], cli_env)
+        assert exit_code == 0
+        assert "project" in stderr.lower()
+
+    def test_index_all_json(self, cli_env: sqlite3.Connection) -> None:
+        exit_code, stdout, stderr = _run_cli(
+            ["index", "--all", "--json"], cli_env
+        )
+        assert exit_code == 0
+        payload = json.loads(stdout)
+        assert payload["projects"] >= 1
+        assert "sessions_indexed" in payload
+        assert "sessions_skipped" in payload
+
+    def test_index_all_picks_up_new_project(
+        self, cli_env: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """A not-yet-indexed project dir is discovered and made searchable."""
+        projects_dir = tmp_path / "claude" / "projects"
+        new_proj = projects_dir / "-home-testuser-other"
+        new_proj.mkdir(parents=True)
+        lines = _make_session_lines(SESSION_ID_A, compact_boundaries=0)
+        (new_proj / f"{SESSION_ID_A}.jsonl").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+
+        exit_code, stdout, _ = _run_cli(["index", "--all", "--json"], cli_env)
+        assert exit_code == 0
+        payload = json.loads(stdout)
+        assert payload["projects"] == 2  # original fixture project + new one
+        assert payload["sessions_indexed"] >= 1  # the new session
+
+        results = search(cli_env, "database")
+        assert SESSION_ID_A in {r["session_id"] for r in results}
 
 
 # ============================================================
