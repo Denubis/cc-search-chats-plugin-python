@@ -14,6 +14,7 @@ Acceptance criteria coverage:
 - cc-search-v2.AC4.6: Extract from session with no compression -> epoch 0
 """
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.core.search import sanitize_fts5_query
 from cc_search_chats.storage.index import (
     extract_context,
@@ -28,6 +30,7 @@ from cc_search_chats.storage.index import (
     index_session,
     list_sessions,
     search,
+    search_full_content,
 )
 from tests.conftest import (
     SESSION_ID_A,
@@ -285,6 +288,64 @@ class TestSanitizeFts5Query:
                 ).fetchall()
         finally:
             conn.close()
+
+
+class TestSearchFullContent:
+    """search_full_content scans thinking + tool I/O without persisting."""
+
+    def _thinking_session(
+        self, tmp_path: Path, session_id: str, project_path: str, thinking: str
+    ) -> SessionMeta:
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "uuid": f"a-{session_id}",
+                "timestamp": "2026-02-07T10:00:00.000Z",
+                "sessionId": session_id,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": thinking},
+                        {"type": "text", "text": "ordinary visible text"},
+                    ],
+                },
+            }
+        )
+        f = tmp_path / f"{session_id}.jsonl"
+        f.write_text(line, encoding="utf-8")
+        stat = f.stat()
+        return SessionMeta(
+            session_id=session_id,
+            file_path=str(f),
+            project_path=project_path,
+            file_size=stat.st_size,
+            modified_at=stat.st_mtime,
+        )
+
+    def test_finds_thinking_content(self, tmp_path: Path) -> None:
+        meta = self._thinking_session(
+            tmp_path, SESSION_ID_A, "/p/a", "secretwombat reasoning"
+        )
+        results = search_full_content([meta], "secretwombat")
+        assert len(results) > 0
+        assert results[0]["project_path"] == "/p/a"
+
+    def test_normal_index_misses_thinking(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """The persistent (clean) index does not contain thinking text."""
+        meta = self._thinking_session(
+            tmp_path, SESSION_ID_A, "/p/a", "secretwombat reasoning"
+        )
+        index_session(db_conn, meta)  # full_content defaults to False
+        assert search(db_conn, "secretwombat") == []
+
+    def test_visible_text_still_matches(self, tmp_path: Path) -> None:
+        meta = self._thinking_session(tmp_path, SESSION_ID_A, "/p/a", "secretwombat")
+        assert len(search_full_content([meta], "ordinary visible")) > 0
+
+    def test_empty_sessions_returns_empty(self) -> None:
+        assert search_full_content([], "anything") == []
 
 
 class TestExtractSession:

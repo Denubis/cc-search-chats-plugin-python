@@ -151,13 +151,22 @@ def _mtime_iso(mtime: float) -> str:
     return datetime.fromtimestamp(mtime, tz=UTC).isoformat()
 
 
-def index_session(conn: sqlite3.Connection, session_meta: SessionMeta) -> None:
+def index_session(
+    conn: sqlite3.Connection,
+    session_meta: SessionMeta,
+    *,
+    full_content: bool = False,
+) -> None:
     """Index a single session file into the database.
 
     Deletes any existing data for this session_id (CASCADE), then re-indexes
     from the JSONL file. Epoch assignment: epoch starts at 0 and increments
     at each CompactEvent. The user message immediately following a
     CompactEvent is treated as the compression summary.
+
+    When ``full_content`` is True, each message's ``text_content`` carries the
+    full searchable text (thinking + tool I/O). This is used only for the
+    transient in-memory ``--everything`` index, never the persistent one.
 
     Commits after the entire session is indexed.
     """
@@ -198,7 +207,7 @@ def index_session(conn: sqlite3.Connection, session_meta: SessionMeta) -> None:
         awaiting_summary = False  # True after a CompactEvent, until next user message
         last_compact_uuid: str | None = None
 
-        for record in parse_session(lines, sid):
+        for record in parse_session(lines, sid, full_content=full_content):
             if isinstance(record, CompactEvent):
                 epoch += 1
                 # OR IGNORE: Claude Code can rewrite the same record into a
@@ -558,6 +567,36 @@ def search(
     sql, params = build_search_query(query, epoch=epoch, project=project, days=days)
     sql += f"\nLIMIT {int(limit)}"
     return conn.execute(sql, params).fetchall()
+
+
+def search_full_content(
+    sessions: list[SessionMeta],
+    query: str,
+    *,
+    epoch: int | None = None,
+    days: int | None = None,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    """Search the FULL content of given sessions (text + thinking + tool I/O).
+
+    Builds a throwaway in-memory index from each session's full content, runs
+    the standard :func:`search` against it, and discards it. Nothing is
+    written to the persistent index. Reuses the query sanitiser, FTS5 ranking,
+    and snippet machinery of the normal path.
+
+    This is a live read of the raw JSONL files, so cost scales with the number
+    of sessions in scope -- intended for the rare, opt-in ``--everything`` path.
+    """
+    if not sessions:
+        return []
+
+    mem = open_db(Path(":memory:"))
+    try:
+        for meta in sessions:
+            index_session(mem, meta, full_content=True)
+        return search(mem, query, epoch=epoch, project=None, days=days, limit=limit)
+    finally:
+        close_db(mem)
 
 
 def extract_session(

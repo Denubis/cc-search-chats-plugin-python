@@ -283,6 +283,57 @@ class TestSearchScope:
         assert parsed["results"] == []
 
 
+class TestSearchEverything:
+    """--everything runs a live full-content scan (thinking + tool calls)."""
+
+    def _write_thinking_session(self, tmp_path: Path) -> None:
+        proj = (
+            tmp_path / "claude" / "projects" / encode_project_path(FAKE_PROJECT_PATH)
+        )
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a-think",
+                "timestamp": "2026-02-07T10:00:00.000Z",
+                "sessionId": SESSION_ID_A,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "secretwombat in thoughts"},
+                    ],
+                },
+            }
+        )
+        (proj / f"{SESSION_ID_A}.jsonl").write_text(line, encoding="utf-8")
+
+    def test_normal_search_misses_thinking(
+        self, cli_env: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        self._write_thinking_session(tmp_path)
+        _, stdout, _ = _run_cli(
+            ["search", "secretwombat", "--project", FAKE_PROJECT_PATH, "--json"],
+            cli_env,
+        )
+        assert json.loads(stdout)["results"] == []
+
+    def test_everything_finds_thinking(
+        self, cli_env: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        self._write_thinking_session(tmp_path)
+        _, stdout, _ = _run_cli(
+            [
+                "search",
+                "secretwombat",
+                "--everything",
+                "--project",
+                FAKE_PROJECT_PATH,
+                "--json",
+            ],
+            cli_env,
+        )
+        assert len(json.loads(stdout)["results"]) > 0
+
+
 # ============================================================
 # AC5.1: All five subcommands accessible and produce output
 # ============================================================

@@ -15,6 +15,7 @@ from cc_search_chats.core.discovery import (
     list_session_files,
     rank_sessions,
 )
+from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.output import (
     format_context,
     format_extract,
@@ -38,6 +39,7 @@ from cc_search_chats.storage.index import (
     open_db,
     reindex_project,
     search,
+    search_full_content,
     update_all_keywords,
 )
 
@@ -82,14 +84,88 @@ def _validate_project_dir(project_path: str) -> None:
         sys.exit(1)
 
 
+def _emit_search(
+    args: argparse.Namespace,
+    results: list[sqlite3.Row],
+    *,
+    scope: str,
+    searched_project: str | None,
+    project_count: int,
+    empty_hint: str | None = None,
+) -> None:
+    """Render search results as JSON or human text (shared by both paths)."""
+    if args.json:
+        print(
+            json_search_results(
+                results,
+                scope=scope,
+                searched_project=searched_project,
+                project_count=project_count,
+            )
+        )
+    else:
+        output = format_search_results(
+            results,
+            scope=scope,
+            searched_project=searched_project,
+            project_count=project_count,
+        )
+        if output:
+            print(output)
+        elif empty_hint:
+            print(empty_hint, file=sys.stderr)
+
+
+def _collect_everything_sessions(
+    args: argparse.Namespace,
+) -> tuple[list[SessionMeta], str, str | None]:
+    """Resolve which sessions the --everything live scan should cover."""
+    projects_dir = get_claude_projects_dir()
+    if getattr(args, "all", False):
+        sessions: list[SessionMeta] = []
+        if projects_dir.is_dir():
+            for child in sorted(projects_dir.iterdir()):
+                if child.is_dir():
+                    sessions.extend(list_session_files(projects_dir, child.name))
+        return sessions, "all", None
+    project_path = args.project if args.project is not None else os.getcwd()
+    encoded = encode_project_path(project_path)
+    return list_session_files(projects_dir, encoded), "local", project_path
+
+
 def _handle_search(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     """Search chat history, local-first with broaden-on-miss.
 
     Default: search the current project; if it has no hits, widen to every
     indexed project. ``--all`` searches everything up front; ``--project``
     narrows to one project and never broadens; running from a directory that
-    is not a Claude project also searches everything.
+    is not a Claude project also searches everything. ``--everything`` instead
+    runs a live full-content scan (text + thinking + tool I/O) over the
+    in-scope sessions via a throwaway in-memory index.
     """
+    if getattr(args, "everything", False):
+        sessions, scope, searched_project = _collect_everything_sessions(args)
+        project_count = len({s.project_path for s in sessions})
+        results = search_full_content(
+            sessions, args.query, epoch=args.epoch, days=args.days
+        )
+        if not sessions and scope == "local":
+            hint = (
+                "No sessions for the current project. "
+                "Use --everything --all to search every project."
+            )
+        else:
+            hint = "No matches in full content (thinking + tool calls)."
+        _emit_search(
+            args,
+            results,
+            scope=scope,
+            searched_project=searched_project,
+            project_count=project_count,
+            empty_hint=hint,
+        )
+        return 0
+
     explicit_project = getattr(args, "project", None) is not None
     search_all = getattr(args, "all", False)
 
@@ -127,30 +203,20 @@ def _handle_search(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
                 scope, searched_project = "widened", project_path
                 project_count = _indexed_project_count(conn)
 
-    if args.json:
-        print(
-            json_search_results(
-                results,
-                scope=scope,
-                searched_project=searched_project,
-                project_count=project_count,
-            )
+    empty_hint = None
+    if scope in ("widened", "all"):
+        empty_hint = (
+            "No matches across any indexed project. "
+            "Run `cc-search-chats index --all` to index all projects."
         )
-    else:
-        output = format_search_results(
-            results,
-            scope=scope,
-            searched_project=searched_project,
-            project_count=project_count,
-        )
-        if output:
-            print(output)
-        elif scope in ("widened", "all"):
-            print(
-                "No matches across any indexed project. "
-                "Run `cc-search-chats index --all` to index all projects.",
-                file=sys.stderr,
-            )
+    _emit_search(
+        args,
+        results,
+        scope=scope,
+        searched_project=searched_project,
+        project_count=project_count,
+        empty_hint=empty_hint,
+    )
     return 0
 
 
@@ -324,6 +390,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="search every indexed project (skip local-first / broaden-on-miss)",
+    )
+    search_parser.add_argument(
+        "--everything",
+        action="store_true",
+        default=False,
+        help="live full-content scan incl. thinking and tool calls (not persisted)",
     )
     search_parser.add_argument(
         "--epoch", type=int, default=None, help="epoch number to search within"
