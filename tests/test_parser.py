@@ -486,3 +486,84 @@ class TestParseSession:
 
         result = parse_session([user_message_line], SESSION_ID)
         assert isinstance(result, types.GeneratorType)
+
+
+class TestFullContentExtraction:
+    """full_content=True captures thinking, tool_use input, and tool_result."""
+
+    def _assistant_line(self) -> str:
+        return json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "timestamp": "2026-02-07T10:00:00.000Z",
+                "sessionId": SESSION_ID,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "pondering zebracode quietly"},
+                        {"type": "text", "text": "hello there"},
+                        {
+                            "type": "tool_use",
+                            "name": "Grep",
+                            "input": {"pattern": "foobarbaz"},
+                        },
+                    ],
+                },
+            }
+        )
+
+    def _user_tool_result_line(self) -> str:
+        return json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "timestamp": "2026-02-07T10:00:05.000Z",
+                "sessionId": SESSION_ID,
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "content": "quuxresult appeared here"},
+                    ],
+                },
+            }
+        )
+
+    def test_full_captures_thinking(self) -> None:
+        rec = parse_record(self._assistant_line(), SESSION_ID, full_content=True)
+        assert isinstance(rec, SessionRecord)
+        assert "zebracode" in rec.text_content
+
+    def test_full_captures_tool_use_input(self) -> None:
+        rec = parse_record(self._assistant_line(), SESSION_ID, full_content=True)
+        assert isinstance(rec, SessionRecord)
+        assert "foobarbaz" in rec.text_content
+        assert "Grep" in rec.text_content
+
+    def test_full_captures_tool_result(self) -> None:
+        rec = parse_record(
+            self._user_tool_result_line(), SESSION_ID, full_content=True
+        )
+        assert isinstance(rec, SessionRecord)
+        assert "quuxresult" in rec.text_content
+
+    def test_default_excludes_thinking_and_tool_io(self) -> None:
+        rec = parse_record(self._assistant_line(), SESSION_ID)
+        assert isinstance(rec, SessionRecord)
+        assert "hello there" in rec.text_content  # text kept
+        assert "zebracode" not in rec.text_content  # thinking dropped
+        assert "foobarbaz" not in rec.text_content  # tool input dropped
+
+    def test_default_drops_user_tool_result(self) -> None:
+        rec = parse_record(self._user_tool_result_line(), SESSION_ID)
+        assert isinstance(rec, SessionRecord)
+        assert rec.text_content == ""  # list content on a user msg -> empty today
+
+    def test_parse_session_threads_full_content(self) -> None:
+        lines = [self._assistant_line(), self._user_tool_result_line()]
+        records = list(parse_session(lines, SESSION_ID, full_content=True))
+        joined = " ".join(
+            r.text_content for r in records if isinstance(r, SessionRecord)
+        )
+        assert "zebracode" in joined
+        assert "quuxresult" in joined

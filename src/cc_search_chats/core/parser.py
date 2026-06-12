@@ -53,12 +53,72 @@ def _extract_text_content_list(content: Any) -> str:
     return "\n".join(parts)
 
 
+def _stringify(value: Any) -> str:
+    """Flatten a tool_use input or tool_result value into searchable text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            else:
+                parts.append(json.dumps(item, ensure_ascii=False))
+        return "\n".join(parts)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _extract_full_content_list(content: Any) -> str:
+    """Extract full searchable text from list content.
+
+    Unlike :func:`_extract_text_content_list` (the clean conversation view),
+    this also includes thinking blocks, tool_use inputs, and tool_result
+    outputs. Used only by the transient ``--everything`` index; never
+    persisted.
+    """
+    if not isinstance(content, list):
+        return ""
+
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "text":
+            text = item.get("text", "")
+            if isinstance(text, str):
+                parts.append(text)
+        elif item_type == "thinking":
+            thinking = item.get("thinking", "")
+            if isinstance(thinking, str):
+                parts.append(thinking)
+        elif item_type == "tool_use":
+            name = item.get("name", "unknown")
+            parts.append(f"[tool: {name}]")
+            parts.append(_stringify(item.get("input")))
+        elif item_type == "tool_result":
+            parts.append(_stringify(item.get("content")))
+
+    return "\n".join(p for p in parts if p)
+
+
 def _parse_message_record(
     data: dict[str, Any],
     record_type: str,
     session_id: str,
+    *,
+    full_content: bool = False,
 ) -> SessionRecord:
-    """Parse a user or assistant message record."""
+    """Parse a user or assistant message record.
+
+    When ``full_content`` is True, list content is flattened with
+    :func:`_extract_full_content_list` (thinking + tool I/O included) rather
+    than the clean conversation view.
+    """
     message = data.get("message")
     if not isinstance(message, dict):
         # No message field -- produce record with empty content
@@ -76,7 +136,12 @@ def _parse_message_record(
     content = message.get("content", "")
     role = message.get("role", record_type)
 
-    if record_type == "assistant":
+    if full_content:
+        if isinstance(content, list):
+            text_content = _extract_full_content_list(content)
+        else:
+            text_content = _extract_text_content_string(content)
+    elif record_type == "assistant":
         text_content = _extract_text_content_list(content)
     else:
         text_content = _extract_text_content_string(content)
@@ -144,6 +209,8 @@ def _parse_compact_boundary(
 def parse_record(
     line: str,
     session_id: str,
+    *,
+    full_content: bool = False,
 ) -> SessionRecord | CompactEvent | None:
     """Parse a single JSONL line.
 
@@ -151,6 +218,9 @@ def parse_record(
         SessionRecord for user, assistant, summary types.
         CompactEvent for system type with subtype=compact_boundary.
         None for malformed JSON, unknown types, or records without a type field.
+
+    When ``full_content`` is True, message records carry the full searchable
+    text (thinking + tool I/O) instead of the clean conversation view.
 
     Never raises exceptions.
     """
@@ -165,7 +235,9 @@ def parse_record(
             return None
 
         if record_type in ("user", "assistant"):
-            return _parse_message_record(data, record_type, session_id)
+            return _parse_message_record(
+                data, record_type, session_id, full_content=full_content
+            )
 
         if record_type == "summary":
             return _parse_summary_record(data, session_id)
@@ -190,6 +262,8 @@ def parse_record(
 def parse_session(
     lines: Iterable[str],
     session_id: str,
+    *,
+    full_content: bool = False,
 ) -> Iterator[SessionRecord | CompactEvent]:
     """Parse an iterable of JSONL lines, yielding valid records.
 
@@ -197,9 +271,10 @@ def parse_session(
     This is a generator -- no memory accumulation.
 
     The caller is responsible for file I/O (opening the file, reading lines).
-    This function is a pure transformation over an iterable.
+    This function is a pure transformation over an iterable. When
+    ``full_content`` is True, records carry the full searchable text.
     """
     for line in lines:
-        result = parse_record(line, session_id)
+        result = parse_record(line, session_id, full_content=full_content)
         if result is not None:
             yield result
