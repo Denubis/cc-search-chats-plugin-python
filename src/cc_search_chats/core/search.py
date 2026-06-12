@@ -46,7 +46,8 @@ def build_search_query(
     sql_parts = [
         "SELECT m.uuid, m.session_id, m.epoch, m.timestamp, m.role,",
         "  snippet(message_fts, 0, '>>>', '<<<', '...', 20) AS snippet,",
-        "  rank AS score",
+        "  rank AS score,",
+        "  s.project_path",
         "FROM message_fts",
         "JOIN message m ON message_fts.rowid = m.rowid",
         "JOIN session s ON m.session_id = s.session_id",

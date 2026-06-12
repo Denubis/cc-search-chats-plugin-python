@@ -59,6 +59,12 @@ def _db_project_path(project_path: str) -> str:
     return decode_project_path(encode_project_path(project_path))
 
 
+def _indexed_project_count(conn: sqlite3.Connection) -> int:
+    """Number of distinct projects currently present in the index."""
+    row = conn.execute("SELECT COUNT(DISTINCT project_path) FROM session").fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def _validate_project_dir(project_path: str) -> None:
     """Validate that the Claude Code projects directory exists for this project.
 
@@ -77,26 +83,74 @@ def _validate_project_dir(project_path: str) -> None:
 
 
 def _handle_search(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
-    """Search chat history for a query."""
-    project_path = _resolve_project(args)
-    _validate_project_dir(project_path)
+    """Search chat history, local-first with broaden-on-miss.
 
-    jit_reindex(conn, project_path)
+    Default: search the current project; if it has no hits, widen to every
+    indexed project. ``--all`` searches everything up front; ``--project``
+    narrows to one project and never broadens; running from a directory that
+    is not a Claude project also searches everything.
+    """
+    explicit_project = getattr(args, "project", None) is not None
+    search_all = getattr(args, "all", False)
 
-    results = search(
-        conn,
-        args.query,
-        epoch=args.epoch,
-        project=_db_project_path(project_path),
-        days=args.days,
-    )
+    def _run(project: str | None) -> list[sqlite3.Row]:
+        return search(
+            conn, args.query, epoch=args.epoch, project=project, days=args.days
+        )
+
+    if search_all:
+        results = _run(None)
+        scope, searched_project = "all", None
+        project_count = _indexed_project_count(conn)
+    elif explicit_project:
+        project_path = args.project
+        _validate_project_dir(project_path)
+        jit_reindex(conn, project_path)
+        results = _run(_db_project_path(project_path))
+        scope, searched_project, project_count = "local", project_path, 1
+    else:
+        project_path = os.getcwd()
+        encoded = encode_project_path(project_path)
+        if not (get_claude_projects_dir() / encoded).is_dir():
+            # cwd is not a Claude project -> search everything
+            results = _run(None)
+            scope, searched_project = "all", None
+            project_count = _indexed_project_count(conn)
+        else:
+            jit_reindex(conn, project_path)
+            results = _run(_db_project_path(project_path))
+            if results:
+                scope, searched_project, project_count = "local", project_path, 1
+            else:
+                # broaden on miss
+                results = _run(None)
+                scope, searched_project = "widened", project_path
+                project_count = _indexed_project_count(conn)
 
     if args.json:
-        print(json_search_results(results))
+        print(
+            json_search_results(
+                results,
+                scope=scope,
+                searched_project=searched_project,
+                project_count=project_count,
+            )
+        )
     else:
-        output = format_search_results(results)
+        output = format_search_results(
+            results,
+            scope=scope,
+            searched_project=searched_project,
+            project_count=project_count,
+        )
         if output:
             print(output)
+        elif scope in ("widened", "all"):
+            print(
+                "No matches across any indexed project. "
+                "Run `cc-search-chats index --all` to index all projects.",
+                file=sys.stderr,
+            )
     return 0
 
 
@@ -257,12 +311,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             '  cc-search-chats search "database migration"\n'
             '  cc-search-chats search "auth" --epoch 0\n'
-            '  cc-search-chats search "deploy" --days 7 --json'
+            '  cc-search-chats search "deploy" --days 7 --json\n'
+            '  cc-search-chats search "decision rule" --all'
         ),
     )
     search_parser.add_argument("query", type=str, help="search query string")
     search_parser.add_argument(
         "--project", type=str, default=None, help="project path to search"
+    )
+    search_parser.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help="search every indexed project (skip local-first / broaden-on-miss)",
     )
     search_parser.add_argument(
         "--epoch", type=int, default=None, help="epoch number to search within"

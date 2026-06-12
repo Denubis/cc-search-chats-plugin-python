@@ -61,15 +61,35 @@ def _clean_text(text_content: str) -> str:
 # ============================================================
 
 
-def format_search_results(rows: list, *, verbose: bool = False) -> str:
+def format_search_results(
+    rows: list,
+    *,
+    verbose: bool = False,
+    scope: str = "local",
+    searched_project: str | None = None,
+    project_count: int = 1,
+) -> str:
     """Format search results with session_id, epoch, timestamp, role, snippet.
 
-    One result per block separated by blank lines.
+    One result per block separated by blank lines. When ``scope`` is
+    ``widened`` a leading note explains that the search broadened after a
+    local miss. Results carry a project label whenever the scope spans more
+    than the current project (``widened`` or ``all``).
     """
     if not rows:
         return ""
 
+    show_project = scope in ("widened", "all")
+
     blocks: list[str] = []
+    if scope == "widened" and searched_project is not None:
+        blocks.append(
+            render_safe(
+                t"No matches in {searched_project}; widened to all "
+                t"{project_count} indexed projects."
+            )
+        )
+
     for row in rows:
         session_id = row["session_id"]
         epoch = row["epoch"]
@@ -78,7 +98,15 @@ def format_search_results(rows: list, *, verbose: bool = False) -> str:
         snippet = row["snippet"]
         score = row["score"]
 
-        header = render_safe(t"[{timestamp}] {session_id} epoch {epoch} ({role})")
+        if show_project:
+            project = row["project_path"]
+            header = render_safe(
+                t"[{timestamp}] {session_id} epoch {epoch} ({role}) — {project}"
+            )
+        else:
+            header = render_safe(
+                t"[{timestamp}] {session_id} epoch {epoch} ({role})"
+            )
         snippet_line = render_safe(t"  {snippet}")
 
         if verbose:
@@ -242,10 +270,19 @@ def format_context(
 # ============================================================
 
 
-def json_search_results(rows: list) -> str:
+def json_search_results(
+    rows: list,
+    *,
+    scope: str = "local",
+    searched_project: str | None = None,
+    project_count: int = 1,
+) -> str:
     """Format search results as JSON.
 
-    Returns a JSON array of result objects.
+    Returns an object ``{scope, searched_project, project_count, results}``.
+    ``scope`` is ``local`` (current project), ``widened`` (broadened after a
+    local miss), or ``all`` (machine-wide). ``results`` is the match array,
+    each entry carrying its originating ``project_path``.
     """
     results = []
     for row in rows:
@@ -258,9 +295,19 @@ def json_search_results(rows: list) -> str:
                 "role": row["role"],
                 "snippet": row["snippet"],
                 "score": row["score"],
+                "project_path": row["project_path"],
             }
         )
-    return json.dumps(results, indent=2, ensure_ascii=False)
+    return json.dumps(
+        {
+            "scope": scope,
+            "searched_project": searched_project,
+            "project_count": project_count,
+            "results": results,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
 
 
 def json_extract(rows: list, compact_events: list, session_id: str) -> str:

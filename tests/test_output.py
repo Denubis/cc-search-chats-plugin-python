@@ -35,6 +35,7 @@ def _search_row(
     role: str = "user",
     snippet: str = "...the >>>database<<< schema...",
     score: float = -1.23,
+    project_path: str = "/home/brian/project",
 ) -> dict:
     return {
         "uuid": uuid,
@@ -44,6 +45,7 @@ def _search_row(
         "role": role,
         "snippet": snippet,
         "score": score,
+        "project_path": project_path,
     }
 
 
@@ -236,6 +238,27 @@ class TestFormatSearchResults:
         rows = [_search_row(role="assistant")]
         output = format_search_results(rows)
         assert "assistant" in output.lower()
+
+    def test_widened_scope_shows_note(self) -> None:
+        rows = [_search_row()]
+        output = format_search_results(
+            rows,
+            scope="widened",
+            searched_project="/home/brian/alpha",
+            project_count=5,
+        )
+        assert "No matches in /home/brian/alpha" in output
+        assert "5 indexed projects" in output
+
+    def test_project_label_shown_when_scope_spans_projects(self) -> None:
+        rows = [_search_row(project_path="/home/x/proj")]
+        output = format_search_results(rows, scope="all")
+        assert "/home/x/proj" in output
+
+    def test_no_project_label_in_local_scope(self) -> None:
+        rows = [_search_row(project_path="/home/x/proj")]
+        output = format_search_results(rows, scope="local")
+        assert "/home/x/proj" not in output
 
 
 class TestFormatExtract:
@@ -574,12 +597,24 @@ class TestJsonSearchResults:
         rows = [_search_row()]
         output = json_search_results(rows)
         parsed = json.loads(output)
-        assert isinstance(parsed, list)
+        assert isinstance(parsed, dict)
+        assert isinstance(parsed["results"], list)
+
+    def test_wrapper_has_scope_metadata(self) -> None:
+        rows = [_search_row()]
+        parsed = json.loads(
+            json_search_results(
+                rows, scope="widened", searched_project="/p", project_count=7
+            )
+        )
+        assert parsed["scope"] == "widened"
+        assert parsed["searched_project"] == "/p"
+        assert parsed["project_count"] == 7
 
     def test_result_has_expected_keys(self) -> None:
         rows = [_search_row()]
         parsed = json.loads(json_search_results(rows))
-        result = parsed[0]
+        result = parsed["results"][0]
         assert "uuid" in result
         assert "session_id" in result
         assert "epoch" in result
@@ -587,16 +622,17 @@ class TestJsonSearchResults:
         assert "role" in result
         assert "snippet" in result
         assert "score" in result
+        assert "project_path" in result
 
     def test_empty_results(self) -> None:
         output = json_search_results([])
         parsed = json.loads(output)
-        assert parsed == []
+        assert parsed["results"] == []
 
     def test_multiple_results(self) -> None:
         rows = [_search_row(uuid="a"), _search_row(uuid="b")]
         parsed = json.loads(json_search_results(rows))
-        assert len(parsed) == 2
+        assert len(parsed["results"]) == 2
 
 
 class TestJsonExtract:
@@ -754,8 +790,8 @@ class TestJsonWithBLNS:
         rows = [_search_row(snippet=content)]
         output = json_search_results(rows)
         parsed = json.loads(output)
-        assert isinstance(parsed, list)
-        assert len(parsed) == 1
+        assert isinstance(parsed["results"], list)
+        assert len(parsed["results"]) == 1
 
     @pytest.mark.parametrize(
         "content",

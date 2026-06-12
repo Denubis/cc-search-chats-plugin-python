@@ -26,7 +26,7 @@ from cc_search_chats.cli import build_parser
 from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.storage.index import close_db, index_session, open_db, search
-from tests.conftest import SESSION_ID_A, _make_session_lines
+from tests.conftest import SESSION_ID_A, SESSION_ID_B, _make_session_lines
 
 # ============================================================
 # Fixture paths
@@ -88,6 +88,39 @@ def _run_cli(
             exit_code = 1
 
     return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+
+def _index_session_with_text(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+    project_path: str,
+    session_id: str,
+    text: str,
+) -> None:
+    """Index a one-message session carrying ``text`` under ``project_path``."""
+    line = json.dumps(
+        {
+            "type": "user",
+            "uuid": f"u-{session_id}",
+            "parentUuid": None,
+            "timestamp": "2026-02-07T09:00:00.000Z",
+            "sessionId": session_id,
+            "message": {"role": "user", "content": text},
+        }
+    )
+    session_file = tmp_path / f"{session_id}.jsonl"
+    session_file.write_text(line, encoding="utf-8")
+    stat = session_file.stat()
+    index_session(
+        conn,
+        SessionMeta(
+            session_id=session_id,
+            file_path=str(session_file),
+            project_path=project_path,
+            file_size=stat.st_size,
+            modified_at=stat.st_mtime,
+        ),
+    )
 
 
 @pytest.fixture
@@ -180,6 +213,76 @@ class TestIndexAll:
         assert SESSION_ID_A in {r["session_id"] for r in results}
 
 
+class TestSearchScope:
+    """Local-first search with broaden-on-miss across projects."""
+
+    def test_all_flag_searches_everything(
+        self, cli_env: sqlite3.Connection
+    ) -> None:
+        _, stdout, _ = _run_cli(["search", "database", "--all", "--json"], cli_env)
+        parsed = json.loads(stdout)
+        assert parsed["scope"] == "all"
+        assert len(parsed["results"]) > 0
+
+    def test_local_hit_when_cwd_is_a_project(
+        self, cli_env: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("os.getcwd", lambda: FAKE_PROJECT_PATH)
+        _, stdout, _ = _run_cli(["search", "database", "--json"], cli_env)
+        parsed = json.loads(stdout)
+        assert parsed["scope"] == "local"
+        assert len(parsed["results"]) > 0
+
+    def test_broaden_on_miss_finds_other_project(
+        self,
+        cli_env: sqlite3.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A term absent locally is found by widening to all projects."""
+        _index_session_with_text(
+            cli_env, tmp_path, "/home/other/proj", SESSION_ID_B, "a wandering pelican"
+        )
+        monkeypatch.setattr("os.getcwd", lambda: FAKE_PROJECT_PATH)
+        _, stdout, _ = _run_cli(["search", "pelican", "--json"], cli_env)
+        parsed = json.loads(stdout)
+        assert parsed["scope"] == "widened"
+        assert parsed["searched_project"] == FAKE_PROJECT_PATH
+        assert "/home/other/proj" in {r["project_path"] for r in parsed["results"]}
+
+    def test_cwd_not_a_project_searches_all(
+        self, cli_env: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("os.getcwd", lambda: "/not/a/claude/project/xyz")
+        _, stdout, _ = _run_cli(["search", "database", "--json"], cli_env)
+        parsed = json.loads(stdout)
+        assert parsed["scope"] == "all"
+        assert len(parsed["results"]) > 0
+
+    def test_widened_miss_hints_index_all(
+        self, cli_env: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A machine-wide miss tells the user to run index --all (human mode)."""
+        monkeypatch.setattr("os.getcwd", lambda: FAKE_PROJECT_PATH)
+        _, stdout, stderr = _run_cli(["search", "zzqxnope98765term"], cli_env)
+        assert stdout == ""
+        assert "index --all" in stderr
+
+    def test_explicit_project_does_not_broaden(
+        self, cli_env: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """--project narrows and never widens, even on a miss."""
+        _index_session_with_text(
+            cli_env, tmp_path, "/home/other/proj", SESSION_ID_B, "a wandering pelican"
+        )
+        _, stdout, _ = _run_cli(
+            ["search", "pelican", "--project", FAKE_PROJECT_PATH, "--json"], cli_env
+        )
+        parsed = json.loads(stdout)
+        assert parsed["scope"] == "local"
+        assert parsed["results"] == []
+
+
 # ============================================================
 # AC5.1: All five subcommands accessible and produce output
 # ============================================================
@@ -268,7 +371,8 @@ class TestJsonOutput:
         )
         assert exit_code == 0
         parsed = json.loads(stdout)
-        assert isinstance(parsed, list)
+        assert isinstance(parsed, dict)
+        assert isinstance(parsed["results"], list)
 
     def test_extract_json(self, cli_env: sqlite3.Connection) -> None:
         exit_code, stdout, stderr = _run_cli(
@@ -313,7 +417,8 @@ class TestJsonOutput:
         )
         assert exit_code == 0
         parsed = json.loads(stdout)
-        assert parsed == []
+        assert parsed["results"] == []
+        assert parsed["scope"] == "local"  # explicit --project never broadens
 
     def test_extract_json_has_messages(self, cli_env: sqlite3.Connection) -> None:
         """Extract JSON includes actual messages."""
@@ -560,8 +665,8 @@ class TestLargeSession:
         )
         assert exit_code == 0
         parsed = json.loads(stdout)
-        assert isinstance(parsed, list)
-        assert len(parsed) > 0
+        assert isinstance(parsed["results"], list)
+        assert len(parsed["results"]) > 0
 
     def test_extract_large_session(self, large_session_env: sqlite3.Connection) -> None:
         """Extract a large session completes within reasonable time."""
@@ -634,7 +739,7 @@ class TestEpochFilters:
         )
         assert exit_code == 0
         parsed = json.loads(stdout)
-        for result in parsed:
+        for result in parsed["results"]:
             assert result["epoch"] == 0
 
     def test_extract_epoch_0(self, cli_env: sqlite3.Connection) -> None:
