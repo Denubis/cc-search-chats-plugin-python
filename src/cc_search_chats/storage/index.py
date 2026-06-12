@@ -497,7 +497,12 @@ def search(
     Returns matching rows. Empty list if no matches (never raises for
     empty results).
     """
-    from cc_search_chats.core.search import build_search_query
+    from cc_search_chats.core.search import build_search_query, sanitize_fts5_query
+
+    # A query with no searchable terms sanitises to an empty MATCH expression,
+    # which FTS5 rejects as a syntax error. Treat it as "no results".
+    if not sanitize_fts5_query(query):
+        return []
 
     sql, params = build_search_query(query, epoch=epoch, project=project, days=days)
     sql += f"\nLIMIT {int(limit)}"

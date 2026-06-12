@@ -18,7 +18,10 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+from cc_search_chats.core.search import sanitize_fts5_query
 from cc_search_chats.storage.index import (
     extract_context,
     extract_session,
@@ -182,6 +185,106 @@ class TestSearchNoMatches:
         # Just verify no exception -- the assert above covers the return value
         results = search(indexed_db, "zyxwvu987654")
         assert isinstance(results, list)
+
+
+class TestSearchPunctuation:
+    """Free-text queries with punctuation must not crash FTS5.
+
+    Regression: user input was passed verbatim into ``message_fts MATCH``,
+    so FTS5 interpreted query punctuation as its own operator DSL. Decimal
+    numbers (``0.90``) raised ``fts5: syntax error near "."`` and a colon
+    (``pole:``) raised ``no such column: pole``.
+    """
+
+    def test_decimal_numbers_do_not_raise(
+        self, indexed_db: sqlite3.Connection
+    ) -> None:
+        """The exact query that crashed: decimals trigger no FTS5 syntax error."""
+        results = search(
+            indexed_db, "true agreement 0.90 passes 0.70 fails 19 times in 20"
+        )
+        assert isinstance(results, list)
+
+    def test_colon_does_not_raise(self, indexed_db: sqlite3.Connection) -> None:
+        """A colon must not be parsed as an FTS5 column filter."""
+        results = search(indexed_db, "pole: Ellie")
+        assert isinstance(results, list)
+
+    @pytest.mark.parametrize(
+        "query",
+        ['"unterminated quote', "(decision)", "foo*bar", "a^b", "x AND/OR y"],
+    )
+    def test_operator_punctuation_does_not_raise(
+        self, indexed_db: sqlite3.Connection, query: str
+    ) -> None:
+        """Assorted FTS5 operator characters are treated as literal text."""
+        assert isinstance(search(indexed_db, query), list)
+
+    def test_punctuation_still_matches_terms(
+        self, indexed_db: sqlite3.Connection
+    ) -> None:
+        """Sanitisation neutralises punctuation without dropping real terms."""
+        plain = search(indexed_db, "database")
+        trailing_period = search(indexed_db, "database.")
+        assert len(plain) > 0
+        assert len(trailing_period) == len(plain)
+
+    def test_blank_query_returns_empty(
+        self, indexed_db: sqlite3.Connection
+    ) -> None:
+        """A query with no searchable terms returns [] rather than erroring."""
+        assert search(indexed_db, "") == []
+        assert search(indexed_db, "   ") == []
+
+
+class TestSanitizeFts5Query:
+    """Unit tests for the pure FTS5 query sanitiser."""
+
+    def test_quotes_each_whitespace_term(self) -> None:
+        assert sanitize_fts5_query("alpha beta") == '"alpha" "beta"'
+
+    def test_single_term(self) -> None:
+        assert sanitize_fts5_query("pole") == '"pole"'
+
+    def test_decimal_term_is_quoted(self) -> None:
+        assert sanitize_fts5_query("0.90") == '"0.90"'
+
+    def test_internal_quotes_are_doubled(self) -> None:
+        # Each embedded " becomes "" inside the surrounding quotes.
+        assert sanitize_fts5_query('say "hi"') == '"say" """hi"""'
+
+    def test_blank_returns_empty_string(self) -> None:
+        assert sanitize_fts5_query("") == ""
+        assert sanitize_fts5_query("   ") == ""
+
+    @settings(max_examples=200)
+    @given(
+        query=st.text(
+            alphabet=st.characters(min_codepoint=32, max_codepoint=126),
+            max_size=80,
+        )
+    )
+    def test_output_never_raises_fts5_syntax_error(self, query: str) -> None:
+        """Property: no ASCII query can produce an FTS5 syntax error.
+
+        Either the sanitised expression is empty (caller short-circuits) or
+        it executes cleanly against an FTS5 table using the production
+        tokeniser.
+        """
+        match = sanitize_fts5_query(query)
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE t USING "
+                "fts5(body, tokenize='unicode61 remove_diacritics 0')"
+            )
+            conn.execute("INSERT INTO t(body) VALUES ('alpha 0.90 pole Ellie')")
+            if match:
+                conn.execute(
+                    "SELECT rowid FROM t WHERE t MATCH ?", (match,)
+                ).fetchall()
+        finally:
+            conn.close()
 
 
 class TestExtractSession:

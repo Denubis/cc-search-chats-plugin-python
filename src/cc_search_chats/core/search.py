@@ -5,6 +5,27 @@ no I/O. The Imperative Shell (storage/index.py) executes these queries.
 """
 
 
+def sanitize_fts5_query(query: str) -> str:
+    """Convert free-text input into a safe FTS5 MATCH expression.
+
+    User queries are natural-language keywords, but FTS5 reads its MATCH
+    argument as a query DSL where ``.`` ``:`` ``*`` ``(`` ``^`` ``"`` and
+    friends are operators. Passing raw input therefore raises syntax errors
+    (e.g. ``0.90`` -> ``fts5: syntax error near "."``) or silently changes
+    meaning (``cats OR dogs`` becomes a boolean OR).
+
+    Each whitespace-delimited term is wrapped in a double-quoted FTS5 string
+    so its contents are matched literally; embedded ``"`` are doubled per
+    FTS5 escaping. Terms are joined with spaces, giving implicit-AND keyword
+    semantics.
+
+    Returns ``""`` when the input contains no searchable terms. Callers must
+    treat an empty result as "match nothing": an empty MATCH expression is
+    itself an FTS5 syntax error, so it must never reach ``execute``.
+    """
+    return " ".join('"' + term.replace('"', '""') + '"' for term in query.split())
+
+
 def build_search_query(
     query: str,
     *,
@@ -17,6 +38,10 @@ def build_search_query(
     Returns (sql, params) for execution against the index database.
     Results are ordered by BM25 rank (ascending — more negative = better).
     Includes snippet extraction for result previews.
+
+    The query is sanitised via :func:`sanitize_fts5_query` so free-text input
+    never reaches FTS5 as raw query syntax. A blank query yields an empty
+    MATCH param; the shell must short-circuit before executing it.
     """
     sql_parts = [
         "SELECT m.uuid, m.session_id, m.epoch, m.timestamp, m.role,",
@@ -27,7 +52,7 @@ def build_search_query(
         "JOIN session s ON m.session_id = s.session_id",
         "WHERE message_fts MATCH ?",
     ]
-    params: list[str | int] = [query]
+    params: list[str | int] = [sanitize_fts5_query(query)]
 
     if epoch is not None:
         sql_parts.append("AND m.epoch = ?")
