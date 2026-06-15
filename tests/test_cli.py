@@ -443,7 +443,8 @@ class TestJsonOutput:
         )
         assert exit_code == 0
         parsed = json.loads(stdout)
-        assert isinstance(parsed, list)
+        assert isinstance(parsed, dict)
+        assert isinstance(parsed["sessions"], list)
 
     def test_context_json(self, cli_env: sqlite3.Connection) -> None:
         row = cli_env.execute("SELECT uuid FROM message LIMIT 1").fetchone()
@@ -489,7 +490,7 @@ class TestJsonOutput:
             cli_env,
         )
         parsed = json.loads(stdout)
-        session_ids = {s["session_id"] for s in parsed}
+        session_ids = {s["session_id"] for s in parsed["sessions"]}
         assert SAMPLE_SESSION_ID in session_ids
         assert COMPRESSED_SESSION_ID in session_ids
 

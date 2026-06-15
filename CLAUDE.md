@@ -26,7 +26,7 @@ Claude Code plugin for context recovery and cross-referencing of chat history. S
   - `list` — list sessions
   - `context UUID` — show context around a message
   - `index` — rebuild the current project's index; `index --all` incrementally indexes every project under `~/.claude/projects/`
-  - All subcommands accept `--json`. Note: `search --json` is an object `{scope, searched_project, project_count, results}` (parse `.results`); the other subcommands return arrays/objects as before
+  - All subcommands accept `--json`. Every payload is an extensible object carrying `schema_version` (currently 1): `search` → `.results`, `list` → `.sessions`, `extract` → `.epochs`, `context` → `.target`/`.before`/`.after`
 - `uv run pytest` — Run tests
 - `uv run ruff check .` — Lint
 - `uv run ruff format .` — Format
@@ -70,6 +70,7 @@ Sessions are stored as JSONL files at `~/.claude/projects/<encoded-path>/<sessio
 - Claude Code plugin conventions: commands in `commands/*.md`, skills in `skills/*/SKILL.md`
 - Design-first: use starting-a-design-plan workflow before implementation
 - Zero external dependencies: stdlib only for runtime, dev deps in dependency-groups
+- JSON output contract: every `--json` payload is an extensible object carrying `schema_version` (`output.SCHEMA_VERSION`). Evolve additively — add fields, never remove/rename/reshape — and bump `SCHEMA_VERSION` only on an unavoidable break. The search-chat skill asserts the version, so a CLI/plugin mismatch fails loudly instead of mis-parsing.
 
 ## Boundaries
 

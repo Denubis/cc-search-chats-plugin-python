@@ -49,11 +49,20 @@ cc-search-chats search "query" --everything --json
 
 ## Step 3: Interpret Results
 
-Parse the JSON output and present to the user:
+**Check `schema_version` first.** Every `--json` payload is an object carrying `schema_version`. This skill targets `schema_version: 1`. If it is missing or a different number, the installed `cc-search-chats` CLI is out of sync with this plugin — **stop, do not interpret the output**, and tell the user to update the CLI:
 
-- **Search results**: the payload is an object `{scope, searched_project, project_count, results}` — read the `results` array. When `scope` is `widened` or `all`, tell the user the match came from another project and show each result's `project_path`. Show matching snippets with session IDs, timestamps, and epoch numbers. Explain that epoch 0 is pre-compression content.
-- **Extract output**: Show the conversation with role labels. Note epoch boundaries if compression occurred.
-- **Session list**: Show dates, message counts, and epoch counts for each session.
+```bash
+uv tool install --reinstall git+https://github.com/Denubis/cc-search-chats-plugin-python
+```
+
+(or update the plugin via `/plugin` if the CLI is the newer one).
+
+Then parse and present to the user:
+
+- **Search results**: read the `results` array. When `scope` is `widened` or `all`, tell the user the match came from another project and show each result's `project_path`. Show matching snippets with session IDs, timestamps, and epoch numbers. Explain that epoch 0 is pre-compression content.
+- **Extract output**: read `epochs`. Show the conversation with role labels. Note epoch boundaries if compression occurred.
+- **Session list**: read the `sessions` array. Show dates, message counts, and epoch counts for each session.
+- **Context**: read `target` / `before` / `after`. Show the target message with surrounding conversation.
 
 Always include session IDs so the user can drill down further.
 

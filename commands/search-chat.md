@@ -59,11 +59,11 @@ Reindexes the current project. Use `cc-search-chats index --all` to (incremental
 
 2. Classify the user's request and run the appropriate command above with `--json`.
 
-3. Parse the JSON output and present results in a readable format:
-   - For **search results**: the payload is an object `{scope, searched_project, project_count, results}` — read the `results` array. If `scope` is `widened` or `all`, note the matches came from outside the current project and show each result's `project_path`. Show snippets with session IDs, epoch info, and timestamps. Offer to extract specific sessions.
-   - For **extract**: show the conversation with role labels. Mention epoch boundaries if present.
-   - For **list**: show a table of sessions with dates, message counts, and epoch counts.
-   - For **context**: show the target message with surrounding conversation.
+3. **Check `schema_version` first.** Every `--json` payload is an object carrying `schema_version` (currently `1`). If it is missing or different, the `cc-search-chats` CLI and this plugin are out of sync — stop and tell the user to reinstall the CLI (`uv tool install --reinstall git+https://github.com/Denubis/cc-search-chats-plugin-python`) or update the plugin via `/plugin`. Otherwise parse and present:
+   - For **search results**: read the `results` array. If `scope` is `widened` or `all`, note the matches came from outside the current project and show each result's `project_path`. Show snippets with session IDs, epoch info, and timestamps. Offer to extract specific sessions.
+   - For **extract**: read `epochs`; show the conversation with role labels. Mention epoch boundaries if present.
+   - For **list**: read the `sessions` array; show a table of sessions with dates, message counts, and epoch counts.
+   - For **context**: read `target`/`before`/`after`; show the target message with surrounding conversation.
 
 4. Include session IDs in output so the user can drill down further (e.g. `extract <session-id>`).
 

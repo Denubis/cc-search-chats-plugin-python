@@ -13,6 +13,13 @@ import re
 import sqlite3
 from string.templatelib import Interpolation, Template
 
+# Version of the --json output contract. Every JSON payload carries this as
+# `schema_version`. Evolve the JSON additively (add fields; never remove,
+# rename, or reshape) so old consumers keep working. Bump ONLY on an
+# unavoidable breaking change. The search-chat skill asserts this value, so a
+# CLI/plugin version mismatch fails loudly instead of silently mis-parsing.
+SCHEMA_VERSION = 1
+
 # Type alias for row-like objects (dict or sqlite3.Row — both support [] access)
 type _Row = dict | sqlite3.Row
 
@@ -300,6 +307,7 @@ def json_search_results(
         )
     return json.dumps(
         {
+            "schema_version": SCHEMA_VERSION,
             "scope": scope,
             "searched_project": searched_project,
             "project_count": project_count,
@@ -357,7 +365,11 @@ def json_extract(rows: list, compact_events: list, session_id: str) -> str:
         epochs.append(epoch_obj)
 
     return json.dumps(
-        {"session_id": session_id, "epochs": epochs},
+        {
+            "schema_version": SCHEMA_VERSION,
+            "session_id": session_id,
+            "epochs": epochs,
+        },
         indent=2,
         ensure_ascii=False,
     )
@@ -366,11 +378,12 @@ def json_extract(rows: list, compact_events: list, session_id: str) -> str:
 def json_session_list(rows: list) -> str:
     """Format session list as JSON.
 
-    Returns a JSON array of session objects.
+    Returns an object ``{schema_version, sessions}`` where ``sessions`` is the
+    array of session objects.
     """
-    results = []
+    sessions = []
     for row in rows:
-        results.append(
+        sessions.append(
             {
                 "session_id": row["session_id"],
                 "project_path": row["project_path"],
@@ -381,7 +394,11 @@ def json_session_list(rows: list) -> str:
                 "message_count": row["total_messages"],
             }
         )
-    return json.dumps(results, indent=2, ensure_ascii=False)
+    return json.dumps(
+        {"schema_version": SCHEMA_VERSION, "sessions": sessions},
+        indent=2,
+        ensure_ascii=False,
+    )
 
 
 def json_context(target: _Row, before: list, after: list) -> str:
@@ -400,6 +417,7 @@ def json_context(target: _Row, before: list, after: list) -> str:
 
     return json.dumps(
         {
+            "schema_version": SCHEMA_VERSION,
             "target": _msg_dict(target),
             "before": [_msg_dict(r) for r in before],
             "after": [_msg_dict(r) for r in after],
@@ -416,6 +434,7 @@ def json_index_result(sessions_indexed: int, project_path: str) -> str:
     """
     return json.dumps(
         {
+            "schema_version": SCHEMA_VERSION,
             "sessions_indexed": sessions_indexed,
             "project_path": project_path,
         },
@@ -432,6 +451,7 @@ def json_index_all_result(counts: dict[str, int]) -> str:
     """
     return json.dumps(
         {
+            "schema_version": SCHEMA_VERSION,
             "projects": counts["projects"],
             "sessions_indexed": counts["indexed"],
             "sessions_skipped": counts["skipped"],

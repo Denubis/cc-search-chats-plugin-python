@@ -63,7 +63,7 @@ cc-search-chats context MESSAGE_UUID
 | `context UUID` | Show messages around a specific message | `--depth N` |
 | `index` | Reindex the current project, or every project with `--all` | `--all`, `--project PATH` |
 
-All commands support `--json` for structured output suitable for programmatic consumption. Note that `search --json` returns an object `{scope, searched_project, project_count, results}` — read the `results` array.
+All commands support `--json` for structured output suitable for programmatic consumption. Every payload is an object carrying `schema_version`; e.g. `search` → `results`, `list` → `sessions`.
 
 ## How It Works
 
@@ -164,7 +164,7 @@ cc-search-chats list --days 7 --json
 cc-search-chats extract --json
 ```
 
-JSON output includes session IDs, epoch numbers, timestamps, and message content -- everything needed to drill down further. `search --json` wraps its matches in an object -- `{"scope": ..., "searched_project": ..., "project_count": N, "results": [...]}` -- so read the `results` array; `scope` tells you whether the search stayed local, widened after a miss, or spanned every project.
+JSON output includes session IDs, epoch numbers, timestamps, and message content -- everything needed to drill down further. Every `--json` payload is an object carrying `schema_version` (currently `1`): read `search` results from `.results`, `list` from `.sessions`, `extract` from `.epochs`, and `context` from `.target`/`.before`/`.after`. The search payload also carries `scope` (`local` / `widened` / `all`). Check `schema_version` before parsing — if it differs from what your consumer expects, the CLI and the consumer are out of sync. Evolution is additive within a `schema_version`, so new fields may appear over time.
 
 ## Tip: Add to Your CLAUDE.md
 
