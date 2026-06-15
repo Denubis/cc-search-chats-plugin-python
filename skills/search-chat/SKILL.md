@@ -39,13 +39,19 @@ cc-search-chats extract --epoch 0 --json
 
 # Hybrid: topic + recency
 cc-search-chats search "query" --days 3 --json
+
+# Search every indexed project up front (instead of waiting for a local miss)
+cc-search-chats search "query" --all --json
+
+# Include thinking + tool calls (live full-content scan, not persisted)
+cc-search-chats search "query" --everything --json
 ```
 
 ## Step 3: Interpret Results
 
 Parse the JSON output and present to the user:
 
-- **Search results**: Show matching snippets with session IDs, timestamps, and epoch numbers. Explain that epoch 0 is pre-compression content.
+- **Search results**: the payload is an object `{scope, searched_project, project_count, results}` — read the `results` array. When `scope` is `widened` or `all`, tell the user the match came from another project and show each result's `project_path`. Show matching snippets with session IDs, timestamps, and epoch numbers. Explain that epoch 0 is pre-compression content.
 - **Extract output**: Show the conversation with role labels. Note epoch boundaries if compression occurred.
 - **Session list**: Show dates, message counts, and epoch counts for each session.
 
@@ -53,16 +59,25 @@ Always include session IDs so the user can drill down further.
 
 ## Step 4: Broaden if No Results
 
-If the initial search returns nothing:
+Search already broadens to **every indexed project** automatically when the current project has no hits (the result `scope` will be `widened`). If it still finds nothing:
 
 1. **Remove epoch filter** if one was set (search across all epochs)
 2. **Increase `--days` range** (try 30, then 90)
-3. **Try alternative keywords** (synonyms, related terms)
-4. **Fall back to `list`** to show what sessions exist for the project
+3. **Run `index --all`** if the global index may be incomplete — a project you never opened is not indexed until then
+4. **Add `--everything`** to also search thinking and tool calls
+5. **Try alternative keywords** (synonyms, related terms)
+6. **Fall back to `list`** to show what sessions exist
 
 ```bash
-# Broader search
+# Broader search across all epochs and days
 cc-search-chats search "query" --days 90 --json
+
+# Make sure every project is indexed, then search everything
+cc-search-chats index --all
+cc-search-chats search "query" --all --json
+
+# Include reasoning + tool calls
+cc-search-chats search "query" --everything --json
 
 # See what exists
 cc-search-chats list --json
@@ -90,5 +105,6 @@ cc-search-chats context MESSAGE_UUID --depth 10 --json
 
 - **Epoch 0**: Content from before Claude Code's compression. This is the "lost context" that users most commonly want to recover.
 - **Compression boundary**: When Claude Code compresses a session, it creates a new epoch. The boundary marks where context was summarised.
-- **JIT indexing**: The tool indexes sessions on first access. The first search for a project may take a moment.
-- **Project scope**: By default, searches the current project. Use `--project PATH` to search another project's history.
+- **JIT indexing**: The tool indexes the current project's sessions on first access. `index --all` builds a global index across every project (incremental, cron-friendly).
+- **Project scope**: Search looks at the current project first and broadens to all indexed projects on a miss (`scope`: local / widened / all). `--all` forces machine-wide; `--project PATH` pins one project and never broadens.
+- **Full-content scan**: `--everything` searches the full text — thinking blocks and tool inputs/outputs — via a throwaway in-memory index. The persistent index keeps only the clean conversation.

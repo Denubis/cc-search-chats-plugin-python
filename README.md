@@ -57,19 +57,62 @@ cc-search-chats context MESSAGE_UUID
 
 | Command | Description | Key Flags |
 |---------|-------------|-----------|
-| `search "query"` | Full-text search across chat history | `--epoch N`, `--days N`, `--project PATH` |
+| `search "query"` | Full-text search; current project first, broadens to all indexed projects on a miss | `--all`, `--everything`, `--epoch N`, `--days N`, `--project PATH` |
 | `extract [SESSION_ID]` | Extract a conversation (auto-discovers if no ID given) | `--epoch N`, `--verbose` |
 | `list` | List sessions with metadata | `--days N`, `--project PATH` |
 | `context UUID` | Show messages around a specific message | `--depth N` |
-| `index` | Force a full reindex of the current project | `--project PATH` |
+| `index` | Reindex the current project, or every project with `--all` | `--all`, `--project PATH` |
 
-All commands support `--json` for structured output suitable for programmatic consumption.
+All commands support `--json` for structured output suitable for programmatic consumption. Note that `search --json` returns an object `{scope, searched_project, project_count, results}` — read the `results` array.
 
 ## How It Works
 
 Chat sessions are stored by Claude Code as JSONL files in `~/.claude/projects/`. Each file contains timestamped messages with roles, content, and metadata.
 
 **cc-search-chats** builds a local SQLite FTS5 (full-text search) index over these files. The index is created just-in-time on first access and updated incrementally when session files change. Sessions are indexed in reverse chronological order so the most recent content is available first.
+
+### Cross-Project Search
+
+By default `search` looks at the current project (the one matching your working directory). If that turns up nothing, it automatically widens to **every indexed project** and tells you it did (`scope: widened`). Use `--all` to search everything up front, or `--project PATH` to pin a single project (which never broadens).
+
+The index only contains projects it has already seen. To make the whole machine searchable, build the global index once:
+
+```bash
+cc-search-chats index --all
+```
+
+This walks every project under `~/.claude/projects/` and indexes it. It is incremental — re-runs only touch new or changed sessions — so it is cheap to schedule. To keep the global index warm, add a cron entry or a systemd user timer:
+
+```bash
+# crontab -e  (hourly)
+0 * * * * ~/.local/bin/cc-search-chats index --all >/dev/null 2>&1
+```
+
+```ini
+# ~/.config/systemd/user/cc-search-index.service
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cc-search-chats index --all
+
+# ~/.config/systemd/user/cc-search-index.timer
+# enable with: systemctl --user enable --now cc-search-index.timer
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+### Searching Thinking and Tool Calls
+
+The persistent index stores the clean conversation only. To search reasoning and tool inputs/outputs as well, add `--everything`:
+
+```bash
+cc-search-chats search "that regex we tried" --everything
+```
+
+This is a live scan: it builds a throwaway in-memory index over the in-scope sessions' full content and discards it afterwards — nothing extra is stored. It defaults to the current project; add `--all` to scan every project (slower, since it re-reads the raw files).
 
 ### Epoch Model
 
@@ -121,7 +164,7 @@ cc-search-chats list --days 7 --json
 cc-search-chats extract --json
 ```
 
-JSON output includes session IDs, epoch numbers, timestamps, and message content -- everything needed to drill down further.
+JSON output includes session IDs, epoch numbers, timestamps, and message content -- everything needed to drill down further. `search --json` wraps its matches in an object -- `{"scope": ..., "searched_project": ..., "project_count": N, "results": [...]}` -- so read the `results` array; `scope` tells you whether the search stayed local, widened after a miss, or spanned every project.
 
 ## Tip: Add to Your CLAUDE.md
 

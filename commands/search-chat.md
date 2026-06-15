@@ -19,7 +19,7 @@ Determine the user's intent and route to the appropriate subcommand. Always use 
 cc-search-chats search "X" --json
 ```
 
-Optional flags: `--epoch N` (filter to epoch), `--days N` (limit recency), `--project PATH`.
+Searches the current project first and automatically broadens to all indexed projects when there are no local hits. Optional flags: `--all` (search every project up front), `--everything` (live full-content scan incl. thinking + tool calls), `--epoch N`, `--days N`, `--project PATH` (pin one project; never broadens).
 
 ### "what was in my last session" / "recover context"
 
@@ -51,7 +51,7 @@ Optional: `--depth N` (surrounding messages, default 5).
 cc-search-chats index --json
 ```
 
-Force a full reindex of the current project.
+Reindexes the current project. Use `cc-search-chats index --all` to (incrementally) index every project under `~/.claude/projects/` — needed before cross-project search can find other projects.
 
 ## Instructions
 
@@ -60,14 +60,14 @@ Force a full reindex of the current project.
 2. Classify the user's request and run the appropriate command above with `--json`.
 
 3. Parse the JSON output and present results in a readable format:
-   - For **search results**: show snippets with session IDs, epoch info, and timestamps. Offer to extract specific sessions.
+   - For **search results**: the payload is an object `{scope, searched_project, project_count, results}` — read the `results` array. If `scope` is `widened` or `all`, note the matches came from outside the current project and show each result's `project_path`. Show snippets with session IDs, epoch info, and timestamps. Offer to extract specific sessions.
    - For **extract**: show the conversation with role labels. Mention epoch boundaries if present.
    - For **list**: show a table of sessions with dates, message counts, and epoch counts.
    - For **context**: show the target message with surrounding conversation.
 
 4. Include session IDs in output so the user can drill down further (e.g. `extract <session-id>`).
 
-5. If no results found, suggest broadening the search: increase `--days`, try alternative keywords, or use `list` to see what sessions exist.
+5. If no results found (search already auto-broadens to every indexed project): try alternative keywords, increase `--days`, run `cc-search-chats index --all` if the global index may be incomplete, add `--everything` to include thinking and tool calls, or use `list` to see what sessions exist.
 
 ## Examples
 

@@ -1,6 +1,6 @@
 # cc-search-chats-plugin-python
 
-Last verified: 2026-02-08
+Last verified: 2026-06-12
 
 ## Overview
 
@@ -21,12 +21,12 @@ Claude Code plugin for context recovery and cross-referencing of chat history. S
 ## Commands
 
 - `cc-search-chats` — Primary CLI invocation (install via `uv tool install` from git or editable local)
-  - `search "query"` — full-text search
+  - `search "query"` — full-text search; current project first, auto-broadens to all indexed projects on a miss. `--all` forces machine-wide; `--project PATH` narrows (never broadens); `--everything` runs a live full-content scan including thinking + tool I/O (not persisted)
   - `extract [SESSION_ID]` — extract conversation (auto-discovers if no ID)
   - `list` — list sessions
   - `context UUID` — show context around a message
-  - `index` — rebuild search index
-  - All subcommands accept `--json` for structured output
+  - `index` — rebuild the current project's index; `index --all` incrementally indexes every project under `~/.claude/projects/`
+  - All subcommands accept `--json`. Note: `search --json` is an object `{scope, searched_project, project_count, results}` (parse `.results`); the other subcommands return arrays/objects as before
 - `uv run pytest` — Run tests
 - `uv run ruff check .` — Lint
 - `uv run ruff format .` — Format
@@ -55,7 +55,9 @@ Claude Code plugin for context recovery and cross-referencing of chat history. S
 
 - **Functional Core / Imperative Shell**: Pure functions for parsing and search query building in `core/`. Side effects (database, filesystem, CLI I/O) at the edges in `cli.py`, `storage/`, and `output.py`.
 - **t-string output formatting**: Uses PEP 750 t-strings for safe string interpolation in output formatters.
-- **SQLite FTS5 indexing**: JIT (just-in-time) indexing — sessions indexed on first access, updated incrementally.
+- **SQLite FTS5 indexing**: JIT (just-in-time) indexing — the current project's sessions are indexed on first access, updated incrementally by mtime. `index --all` seeds/refreshes a global index across all projects (cheap to re-run, e.g. from cron).
+- **Cross-project search**: search is local-first and broadens to the whole index on a local miss (`scope` = local / widened / all). User queries are sanitised before reaching FTS5 (`sanitize_fts5_query`), so punctuation never injects query syntax.
+- **Ephemeral full-content search**: `--everything` builds a throwaway in-memory index over in-scope sessions' full content (thinking + tool I/O via `parse_session(full_content=True)`), searches it, then discards it — nothing extra is persisted.
 - **Epoch model**: Messages segmented by `compact_boundary` events. Epoch 0 = pre-compression content.
 
 ## Claude Code Chat Data Format
