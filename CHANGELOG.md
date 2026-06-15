@@ -1,5 +1,22 @@
 # Changelog
 
+## cc-search-chats 2.0.0a4
+
+Hardens the `--json` contract so the CLI and plugin cannot silently
+mis-parse when their versions drift.
+
+**New:**
+- Every `--json` payload now carries a `schema_version` field
+  (`output.SCHEMA_VERSION`). The `/search-chat` skill asserts it and tells
+  the user to reinstall the CLI on a mismatch, rather than mis-parsing.
+
+**Changed:**
+- **Breaking:** `list --json` now returns an object
+  `{schema_version, sessions}` instead of a bare array — read the
+  `sessions` array. This was the last array-shaped output; all `--json`
+  payloads are now extensible objects, so future additions are additive
+  and non-breaking.
+
 ## cc-search-chats 2.0.0a3
 
 Cross-project search and full-content scanning, plus a search-query crash fix.
