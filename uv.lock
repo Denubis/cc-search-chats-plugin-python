@@ -2,9 +2,13 @@ version = 1
 revision = 3
 requires-python = ">=3.14"
 
+[options]
+exclude-newer = "2026-06-08T00:52:10.922048319Z"
+exclude-newer-span = "P1W"
+
 [[package]]
 name = "cc-search-chats"
-version = "2.0.0a2"
+version = "2.0.0a3"
 source = { editable = "." }
 
 [package.dev-dependencies]
