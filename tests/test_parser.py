@@ -541,9 +541,7 @@ class TestFullContentExtraction:
         assert "Grep" in rec.text_content
 
     def test_full_captures_tool_result(self) -> None:
-        rec = parse_record(
-            self._user_tool_result_line(), SESSION_ID, full_content=True
-        )
+        rec = parse_record(self._user_tool_result_line(), SESSION_ID, full_content=True)
         assert isinstance(rec, SessionRecord)
         assert "quuxresult" in rec.text_content
 
@@ -567,3 +565,30 @@ class TestFullContentExtraction:
         )
         assert "zebracode" in joined
         assert "quuxresult" in joined
+
+
+# --- cwd capture (source of the real project path) ---
+
+
+class TestCwdCapture:
+    """Records carry the session's real filesystem path via the cwd field."""
+
+    def test_user_record_captures_cwd(self) -> None:
+        line = json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "timestamp": "2026-02-07T10:00:00Z",
+                "sessionId": SESSION_ID,
+                "cwd": "/home/brian/people/Brian/cc-search-chats-plugin-python",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        result = parse_record(line, SESSION_ID)
+        assert isinstance(result, SessionRecord)
+        assert result.cwd == "/home/brian/people/Brian/cc-search-chats-plugin-python"
+
+    def test_record_without_cwd_has_none(self, user_message_line: str) -> None:
+        result = parse_record(user_message_line, SESSION_ID)
+        assert isinstance(result, SessionRecord)
+        assert result.cwd is None

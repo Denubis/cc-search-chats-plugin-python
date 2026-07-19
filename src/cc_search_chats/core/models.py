@@ -33,6 +33,11 @@ class SessionRecord:
     leaf_uuid: str | None
     """Only populated for summary records (from JSONL leafUuid field)."""
 
+    cwd: str | None = None
+    """Session working directory (the real project path), from the JSONL
+    ``cwd`` field. Used to recover the true filesystem path that the lossy
+    directory-name encoding cannot round-trip."""
+
 
 @dataclass(frozen=True, slots=True)
 class CompactEvent:

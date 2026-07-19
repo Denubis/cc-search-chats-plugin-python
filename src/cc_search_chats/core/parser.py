@@ -131,6 +131,7 @@ def _parse_message_record(
             role=record_type,
             text_content="",
             leaf_uuid=None,
+            cwd=_to_str_or_none(data.get("cwd")),
         )
 
     content = message.get("content", "")
@@ -155,6 +156,7 @@ def _parse_message_record(
         role=str(role) if role is not None else record_type,
         text_content=text_content,
         leaf_uuid=None,
+        cwd=_to_str_or_none(data.get("cwd")),
     )
 
 
@@ -175,6 +177,7 @@ def _parse_summary_record(
         role=None,
         text_content=str(summary_text) if summary_text else "",
         leaf_uuid=_to_str_or_none(leaf_uuid),
+        cwd=_to_str_or_none(data.get("cwd")),
     )
 
 
