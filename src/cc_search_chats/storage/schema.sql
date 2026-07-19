@@ -10,7 +10,8 @@
 
 CREATE TABLE IF NOT EXISTS session (
     session_id  TEXT PRIMARY KEY,
-    project_path TEXT NOT NULL,
+    project_path TEXT NOT NULL,        -- lossy decoded dir name (filter/group key)
+    real_project_path TEXT,            -- true fs path from session cwd (display only)
     file_path   TEXT NOT NULL,
     file_size   INTEGER NOT NULL,
     modified_at TEXT NOT NULL,   -- file mtime at last index (ISO 8601)

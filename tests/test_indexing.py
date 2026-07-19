@@ -319,15 +319,11 @@ class TestReindexIdempotent:
 class TestIndexAllProjects:
     """index --all: incrementally index every project under the projects dir."""
 
-    def _make_project(
-        self, projects_dir: Path, encoded: str, session_id: str
-    ) -> None:
+    def _make_project(self, projects_dir: Path, encoded: str, session_id: str) -> None:
         proj = projects_dir / encoded
         proj.mkdir(parents=True)
         lines = _make_session_lines(session_id, compact_boundaries=0)
-        (proj / f"{session_id}.jsonl").write_text(
-            "\n".join(lines), encoding="utf-8"
-        )
+        (proj / f"{session_id}.jsonl").write_text("\n".join(lines), encoding="utf-8")
 
     def test_indexes_every_project_dir(
         self, db_conn: sqlite3.Connection, tmp_path: Path
@@ -667,3 +663,75 @@ class TestDuplicateUuidHandling:
             (SESSION_ID_A,),
         ).fetchone()
         assert rows[0] == 1, "duplicate compact_boundary should be absorbed"
+
+
+class TestRealProjectPath:
+    """The session's true filesystem path (from cwd) is stored for display."""
+
+    def _index_with_cwd(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+        session_id: str,
+        cwd: str,
+    ) -> None:
+        line = json.dumps(
+            {
+                "type": "user",
+                "uuid": f"{session_id}-u1",
+                "timestamp": "2026-02-07T10:00:00Z",
+                "sessionId": session_id,
+                "cwd": cwd,
+                "message": {"role": "user", "content": "hello world"},
+            }
+        )
+        session_file = tmp_path / f"{session_id}.jsonl"
+        session_file.write_text(line, encoding="utf-8")
+        meta = SessionMeta(
+            session_id=session_id,
+            file_path=str(session_file),
+            project_path="/home/brian/lossy/decoded",  # the lossy stand-in
+            file_size=session_file.stat().st_size,
+            modified_at=session_file.stat().st_mtime,
+        )
+        index_session(db_conn, meta)
+
+    def test_real_project_path_captured_from_cwd(
+        self, db_conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        cwd = "/home/brian/people/Brian/cc-search-chats-plugin-python"
+        self._index_with_cwd(db_conn, tmp_path, SESSION_ID_A, cwd)
+        row = db_conn.execute(
+            "SELECT real_project_path FROM session WHERE session_id = ?",
+            (SESSION_ID_A,),
+        ).fetchone()
+        assert row["real_project_path"] == cwd
+
+    def test_real_project_path_null_without_cwd(
+        self, indexed_db: sqlite3.Connection
+    ) -> None:
+        # The sample session fixture carries no cwd field.
+        row = indexed_db.execute(
+            "SELECT real_project_path FROM session WHERE session_id = ?",
+            (SESSION_ID_A,),
+        ).fetchone()
+        assert row["real_project_path"] is None
+
+    def test_migration_adds_column_to_old_db(self, tmp_path: Path) -> None:
+        # Simulate a pre-existing DB whose session table predates the column.
+        from cc_search_chats.storage.index import close_db, open_db
+
+        db_path = tmp_path / "old.db"
+        raw = sqlite3.connect(str(db_path))
+        raw.execute(
+            "CREATE TABLE session (session_id TEXT PRIMARY KEY, project_path TEXT, "
+            "file_path TEXT, file_size INTEGER, modified_at TEXT, indexed_at TEXT, "
+            "summary TEXT)"
+        )
+        raw.commit()
+        raw.close()
+
+        conn = open_db(db_path)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(session)").fetchall()]
+        close_db(conn)
+        assert "real_project_path" in cols

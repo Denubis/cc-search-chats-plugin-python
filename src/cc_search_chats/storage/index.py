@@ -56,6 +56,24 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(schema_sql)
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Return True if ``table`` has ``column`` (via PRAGMA table_info)."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row[1] == column for row in rows)
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Apply idempotent, additive migrations to an existing database.
+
+    New installs already have the current schema from schema.sql; databases
+    created before a column existed get it added here. Additive only — never
+    drops or reshapes existing data.
+    """
+    if not _column_exists(conn, "session", "real_project_path"):
+        conn.execute("ALTER TABLE session ADD COLUMN real_project_path TEXT")
+        conn.commit()
+
+
 def _check_integrity(conn: sqlite3.Connection) -> bool:
     """Run quick_check and return True if database is healthy."""
     try:
@@ -105,6 +123,8 @@ def open_db(db_path: Path | None = None) -> sqlite3.Connection:
 
     if not _has_schema(conn):
         _apply_schema(conn)
+    else:
+        _migrate_schema(conn)
 
     return conn
 
@@ -171,6 +191,7 @@ def index_session(
     Commits after the entire session is indexed.
     """
     sid = session_meta.session_id
+    real_project_path: str | None = None  # recovered from the first record's cwd
 
     # 1. Delete existing data (CASCADE removes messages and compact_events)
     conn.execute("DELETE FROM session WHERE session_id = ?", (sid,))
@@ -231,6 +252,8 @@ def index_session(
                 last_compact_uuid = record.uuid
 
             elif isinstance(record, SessionRecord):
+                if real_project_path is None and record.cwd:
+                    real_project_path = record.cwd
                 if record.record_type == "summary":
                     # Update session.summary with latest summary text
                     conn.execute(
@@ -275,6 +298,13 @@ def index_session(
                     )
     finally:
         fh.close()
+
+    # Persist the session's true filesystem path (from cwd) for display.
+    if real_project_path is not None:
+        conn.execute(
+            "UPDATE session SET real_project_path = ? WHERE session_id = ?",
+            (real_project_path, sid),
+        )
 
     conn.commit()
 

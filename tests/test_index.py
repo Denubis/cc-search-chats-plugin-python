@@ -118,7 +118,9 @@ class TestOpenDb:
         # Create and populate
         conn1 = open_db(db_path)
         conn1.execute(
-            "INSERT INTO session VALUES "
+            "INSERT INTO session "
+            "(session_id, project_path, file_path, file_size, modified_at, "
+            "indexed_at, summary) VALUES "
             "('s1', '/proj', '/f.jsonl', 100, '2026-01-01T00:00:00Z', "
             "'2026-01-01T00:00:00Z', NULL)"
         )
