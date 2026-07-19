@@ -39,6 +39,7 @@ def _search_row(
     snippet: str = "...the >>>database<<< schema...",
     score: float = -1.23,
     project_path: str = "/home/brian/project",
+    real_project_path: str | None = None,
 ) -> dict:
     return {
         "uuid": uuid,
@@ -49,6 +50,7 @@ def _search_row(
         "snippet": snippet,
         "score": score,
         "project_path": project_path,
+        "real_project_path": real_project_path,
     }
 
 
@@ -106,6 +108,7 @@ def _session_row(
     summary: str | None = "Discussion about database schema design",
     epoch_count: int = 2,
     total_messages: int = 10,
+    real_project_path: str | None = None,
 ) -> dict:
     return {
         "session_id": session_id,
@@ -116,6 +119,7 @@ def _session_row(
         "summary": summary,
         "epoch_count": epoch_count,
         "total_messages": total_messages,
+        "real_project_path": real_project_path,
     }
 
 
@@ -841,3 +845,42 @@ class TestJsonWithBLNS:
         parsed = json.loads(output)
         assert isinstance(parsed, dict)
         assert len(parsed["epochs"]) == 1
+
+
+class TestRealProjectPathDisplay:
+    """Human output shows the true path; JSON exposes it additively."""
+
+    def test_list_shows_real_project_path_when_present(self) -> None:
+        rows = [
+            _session_row(
+                project_path="/home/x/proj",
+                real_project_path="/home/x/my-real-proj",
+            )
+        ]
+        output = format_session_list(rows)
+        assert "/home/x/my-real-proj" in output
+
+    def test_list_falls_back_to_project_path_when_real_absent(self) -> None:
+        rows = [_session_row(project_path="/home/x/proj", real_project_path=None)]
+        output = format_session_list(rows)
+        assert "/home/x/proj" in output
+
+    def test_json_list_includes_real_project_path(self) -> None:
+        rows = [_session_row(real_project_path="/home/x/my-real-proj")]
+        data = json.loads(json_session_list(rows))
+        assert data["sessions"][0]["real_project_path"] == "/home/x/my-real-proj"
+
+    def test_search_label_uses_real_project_path(self) -> None:
+        rows = [
+            _search_row(
+                project_path="/home/x/proj",
+                real_project_path="/home/x/my-real-proj",
+            )
+        ]
+        output = format_search_results(rows, scope="all")
+        assert "/home/x/my-real-proj" in output
+
+    def test_json_search_includes_real_project_path(self) -> None:
+        rows = [_search_row(real_project_path="/home/x/my-real-proj")]
+        data = json.loads(json_search_results(rows, scope="all"))
+        assert data["results"][0]["real_project_path"] == "/home/x/my-real-proj"

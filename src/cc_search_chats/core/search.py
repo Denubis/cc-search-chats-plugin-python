@@ -47,7 +47,7 @@ def build_search_query(
         "SELECT m.uuid, m.session_id, m.epoch, m.timestamp, m.role,",
         "  snippet(message_fts, 0, '>>>', '<<<', '...', 20) AS snippet,",
         "  rank AS score,",
-        "  s.project_path",
+        "  s.project_path, s.real_project_path",
         "FROM message_fts",
         "JOIN message m ON message_fts.rowid = m.rowid",
         "JOIN session s ON m.session_id = s.session_id",
@@ -147,8 +147,8 @@ def build_list_query(
     Ordered by session modified_at descending (newest first).
     """
     sql_parts = [
-        "SELECT s.session_id, s.project_path, s.file_path, s.file_size,",
-        "  s.modified_at, s.summary,",
+        "SELECT s.session_id, s.project_path, s.real_project_path,",
+        "  s.file_path, s.file_size, s.modified_at, s.summary,",
         "  COUNT(DISTINCT es.epoch) AS epoch_count,",
         "  COALESCE(SUM(es.message_count), 0) AS total_messages",
         "FROM session s",

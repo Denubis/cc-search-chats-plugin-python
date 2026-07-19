@@ -199,9 +199,7 @@ class TestSearchPunctuation:
     (``pole:``) raised ``no such column: pole``.
     """
 
-    def test_decimal_numbers_do_not_raise(
-        self, indexed_db: sqlite3.Connection
-    ) -> None:
+    def test_decimal_numbers_do_not_raise(self, indexed_db: sqlite3.Connection) -> None:
         """The exact query that crashed: decimals trigger no FTS5 syntax error."""
         results = search(
             indexed_db, "true agreement 0.90 passes 0.70 fails 19 times in 20"
@@ -232,9 +230,7 @@ class TestSearchPunctuation:
         assert len(plain) > 0
         assert len(trailing_period) == len(plain)
 
-    def test_blank_query_returns_empty(
-        self, indexed_db: sqlite3.Connection
-    ) -> None:
+    def test_blank_query_returns_empty(self, indexed_db: sqlite3.Connection) -> None:
         """A query with no searchable terms returns [] rather than erroring."""
         assert search(indexed_db, "") == []
         assert search(indexed_db, "   ") == []
@@ -283,9 +279,7 @@ class TestSanitizeFts5Query:
             )
             conn.execute("INSERT INTO t(body) VALUES ('alpha 0.90 pole Ellie')")
             if match:
-                conn.execute(
-                    "SELECT rowid FROM t WHERE t MATCH ?", (match,)
-                ).fetchall()
+                conn.execute("SELECT rowid FROM t WHERE t MATCH ?", (match,)).fetchall()
         finally:
             conn.close()
 
@@ -513,3 +507,19 @@ class TestListSessions:
         results = list_sessions(db_conn, project="/proj/alpha")
         assert len(results) == 1
         assert results[0]["session_id"] == SESSION_ID_A
+
+
+class TestRealProjectPathInQueries:
+    """List and search queries expose the display-only real_project_path."""
+
+    def test_list_query_selects_real_project_path(self) -> None:
+        from cc_search_chats.core.search import build_list_query
+
+        sql, _ = build_list_query()
+        assert "real_project_path" in sql
+
+    def test_search_query_selects_real_project_path(self) -> None:
+        from cc_search_chats.core.search import build_search_query
+
+        sql, _ = build_search_query("database")
+        assert "real_project_path" in sql

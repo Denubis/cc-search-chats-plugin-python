@@ -62,7 +62,7 @@ Claude Code plugin for context recovery and cross-referencing of chat history. S
 
 ## Claude Code Chat Data Format
 
-Sessions are stored as JSONL files at `~/.claude/projects/<encoded-path>/<session-uuid>.jsonl`. The encoded path replaces every non-alphanumeric character (`/`, `.`, spaces, ...) with `-` in the project's absolute path — e.g. `/home/brian/.worktrees/x` → `-home-brian--worktrees-x`. Each line is a JSON object with `sessionId`, `timestamp`, `cwd`, and `message` (containing `role` and `content`). Content can be a string or an array of text/tool_use objects.
+Sessions are stored as JSONL files at `~/.claude/projects/<encoded-path>/<session-uuid>.jsonl`. The encoded path replaces every non-alphanumeric character (`/`, `.`, spaces, ...) with `-` in the project's absolute path — e.g. `/home/brian/.worktrees/x` → `-home-brian--worktrees-x`. Each line is a JSON object with `sessionId`, `timestamp`, `cwd`, and `message` (containing `role` and `content`). Content can be a string or an array of text/tool_use objects. Because the directory encoding is lossy (both `/` and `.` collapse to `-`, so it cannot be reversed), the true filesystem path is recovered from each record's `cwd` and stored as the session's `real_project_path` for display; the lossy decoded `project_path` remains the filter/group key.
 
 ## Conventions
 

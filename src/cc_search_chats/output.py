@@ -27,6 +27,25 @@ type _Row = dict | sqlite3.Row
 _TOOL_ONLY_RE = re.compile(r"^(\[tool: [^\]]+\]\n?)+$")
 
 
+def _row_value(row: _Row, key: str) -> str | None:
+    """Return ``row[key]`` or None when the column/key is absent.
+
+    Works for dicts and sqlite3.Row alike — sqlite3.Row raises IndexError for
+    an unknown string key rather than supporting ``.get()``. Lets formatters
+    read optional columns (e.g. real_project_path) whether or not the query
+    selected them.
+    """
+    try:
+        return row[key]
+    except KeyError, IndexError:
+        return None
+
+
+def _display_project(row: _Row) -> str:
+    """The best available project path: true fs path, else lossy fallback."""
+    return _row_value(row, "real_project_path") or row["project_path"]
+
+
 def render_safe(template: Template) -> str:
     """Process a t-string template, sanitising interpolated values.
 
@@ -106,14 +125,12 @@ def format_search_results(
         score = row["score"]
 
         if show_project:
-            project = row["project_path"]
+            project = _display_project(row)
             header = render_safe(
                 t"[{timestamp}] {session_id} epoch {epoch} ({role}) — {project}"
             )
         else:
-            header = render_safe(
-                t"[{timestamp}] {session_id} epoch {epoch} ({role})"
-            )
+            header = render_safe(t"[{timestamp}] {session_id} epoch {epoch} ({role})")
         snippet_line = render_safe(t"  {snippet}")
 
         if verbose:
@@ -204,7 +221,7 @@ def format_session_list(rows: list) -> str:
     blocks: list[str] = []
     for row in rows:
         session_id = row["session_id"]
-        project_path = row["project_path"]
+        project_path = _display_project(row)
         file_size = row["file_size"]
         modified_at = row["modified_at"]
         summary = row["summary"]
@@ -303,6 +320,7 @@ def json_search_results(
                 "snippet": row["snippet"],
                 "score": row["score"],
                 "project_path": row["project_path"],
+                "real_project_path": _row_value(row, "real_project_path"),
             }
         )
     return json.dumps(
@@ -387,6 +405,7 @@ def json_session_list(rows: list) -> str:
             {
                 "session_id": row["session_id"],
                 "project_path": row["project_path"],
+                "real_project_path": _row_value(row, "real_project_path"),
                 "file_size": row["file_size"],
                 "modified_at": row["modified_at"],
                 "summary": row["summary"],
