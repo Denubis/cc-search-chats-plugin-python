@@ -10,6 +10,10 @@ from pathlib import Path
 
 from cc_search_chats.core.models import SessionMeta
 
+# Characters kept verbatim in Claude Code's encoded directory names.
+# Every other character (``/``, ``.``, spaces, ...) is replaced with ``-``.
+_ENCODE_RE = re.compile(r"[^a-zA-Z0-9_-]")
+
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$"
 )
@@ -18,14 +22,20 @@ _UUID_RE = re.compile(
 def encode_project_path(project_path: str) -> str:
     """Convert a project path to Claude Code's encoded directory name.
 
-    Replaces every ``/`` (including the leading one) with ``-``.
+    Replaces every character that is not alphanumeric, ``_``, or ``-`` with
+    ``-``. This matches Claude Code's actual encoding, which collapses ``/``,
+    ``.``, spaces, and other special characters alike -- so a project under a
+    dotfile directory (``.worktrees``, ``.claude``) or one containing spaces
+    resolves to the right directory instead of a lookup miss.
 
     >>> encode_project_path("/home/brian/project")
     '-home-brian-project'
+    >>> encode_project_path("/home/brian/.worktrees/feature")
+    '-home-brian--worktrees-feature'
     >>> encode_project_path("/")
     '-'
     """
-    return project_path.replace("/", "-")
+    return _ENCODE_RE.sub("-", project_path)
 
 
 def decode_project_path(encoded: str) -> str:

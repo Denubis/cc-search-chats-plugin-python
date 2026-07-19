@@ -23,7 +23,7 @@ from cc_search_chats.core.models import SessionMeta
 
 
 class TestEncodeProjectPath:
-    """Pure string transformation: replace / with -."""
+    """Pure string transformation: replace non-alphanumerics with -."""
 
     def test_typical_path(self):
         assert encode_project_path("/home/brian/project") == "-home-brian-project"
@@ -51,6 +51,23 @@ class TestEncodeProjectPath:
     def test_path_with_hyphens(self):
         """Hyphens in path segments are preserved (encoding is lossy)."""
         assert encode_project_path("/my-project/sub-dir") == "-my-project-sub-dir"
+
+    def test_dotfile_directory(self):
+        """Dots become '-' too, not just slashes.
+
+        Verified against real ~/.claude/projects dirs: a project under
+        ``.worktrees`` is stored as ``...--worktrees-...`` (the ``/.`` pair
+        collapses to ``--``). Claude Code replaces every non-alphanumeric
+        character, so lookups under dotfile dirs fail if we only map ``/``.
+        """
+        assert (
+            encode_project_path("/home/brian/.worktrees/feature")
+            == "-home-brian--worktrees-feature"
+        )
+
+    def test_space_in_path(self):
+        """Spaces are non-alphanumeric and are replaced with '-'."""
+        assert encode_project_path("/home/brian/my project") == "-home-brian-my-project"
 
 
 # ---------------------------------------------------------------------------
