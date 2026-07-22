@@ -17,12 +17,10 @@ from pathlib import Path
 
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.storage.index import (
-    compute_epoch_keywords,
     index_all_projects,
     index_session,
     needs_reindex,
     search,
-    update_all_keywords,
 )
 from tests.conftest import (
     SESSION_ID_A,
@@ -396,163 +394,6 @@ class TestIndexAllProjects:
             "indexed": 0,
             "skipped": 0,
         }
-
-
-# ============================================================
-# Epoch keyword extraction tests (cc-search-v2.AC2.4)
-# ============================================================
-
-
-class TestKeywordExtraction:
-    """cc-search-v2.AC2.4: TF-IDF keyword extraction populates epoch_summary.keywords."""
-
-    def test_keywords_null_before_extraction(
-        self, indexed_db: sqlite3.Connection
-    ) -> None:
-        """epoch_summary.keywords is NULL before compute_epoch_keywords is called."""
-        rows = indexed_db.execute(
-            "SELECT keywords FROM epoch_summary WHERE session_id = ?",
-            (SESSION_ID_A,),
-        ).fetchall()
-        assert len(rows) > 0
-        for row in rows:
-            assert row["keywords"] is None
-
-    def test_keywords_populated_after_extraction(
-        self, indexed_db: sqlite3.Connection
-    ) -> None:
-        """epoch_summary.keywords is non-NULL after compute_epoch_keywords."""
-        compute_epoch_keywords(indexed_db, SESSION_ID_A)
-
-        rows = indexed_db.execute(
-            "SELECT keywords FROM epoch_summary WHERE session_id = ?",
-            (SESSION_ID_A,),
-        ).fetchall()
-        assert len(rows) > 0
-        for row in rows:
-            assert row["keywords"] is not None
-            assert len(row["keywords"]) > 0
-
-    def test_epoch_0_keywords_match_topic(self, indexed_db: sqlite3.Connection) -> None:
-        """Epoch 0 (database/schema topic) produces relevant keywords."""
-        compute_epoch_keywords(indexed_db, SESSION_ID_A)
-
-        row = indexed_db.execute(
-            "SELECT keywords FROM epoch_summary WHERE session_id = ? AND epoch = 0",
-            (SESSION_ID_A,),
-        ).fetchone()
-        keywords = row["keywords"].lower()
-        # Epoch 0 messages discuss database schema and FTS5
-        # At least one of these topic words should appear
-        topic_words = {"database", "schema", "sqlite", "fts5", "search"}
-        found = {w for w in topic_words if w in keywords}
-        assert len(found) >= 1, f"Expected topic words in '{keywords}', found none"
-
-    def test_epoch_1_keywords_match_topic(self, indexed_db: sqlite3.Connection) -> None:
-        """Epoch 1 (authentication/OAuth topic) produces relevant keywords."""
-        compute_epoch_keywords(indexed_db, SESSION_ID_A)
-
-        row = indexed_db.execute(
-            "SELECT keywords FROM epoch_summary WHERE session_id = ? AND epoch = 1",
-            (SESSION_ID_A,),
-        ).fetchone()
-        keywords = row["keywords"].lower()
-        # Epoch 1 messages discuss authentication and OAuth
-        topic_words = {"authentication", "oauth", "token", "tokens", "jwt", "refresh"}
-        found = {w for w in topic_words if w in keywords}
-        assert len(found) >= 1, f"Expected topic words in '{keywords}', found none"
-
-    def test_keywords_are_comma_separated(self, indexed_db: sqlite3.Connection) -> None:
-        """Keywords are stored as comma-separated values."""
-        compute_epoch_keywords(indexed_db, SESSION_ID_A)
-
-        rows = indexed_db.execute(
-            "SELECT keywords FROM epoch_summary WHERE session_id = ?",
-            (SESSION_ID_A,),
-        ).fetchall()
-        for row in rows:
-            kw = row["keywords"]
-            # Should contain at least one comma (multiple keywords)
-            parts = [p.strip() for p in kw.split(",")]
-            assert len(parts) >= 2, f"Expected multiple keywords, got: {kw}"
-
-    def test_keywords_limited_to_top_n(self, indexed_db: sqlite3.Connection) -> None:
-        """Keywords are limited to top_n terms."""
-        top_n = 5
-        compute_epoch_keywords(indexed_db, SESSION_ID_A, top_n=top_n)
-
-        rows = indexed_db.execute(
-            "SELECT keywords FROM epoch_summary WHERE session_id = ?",
-            (SESSION_ID_A,),
-        ).fetchall()
-        for row in rows:
-            parts = [p.strip() for p in row["keywords"].split(",")]
-            assert len(parts) <= top_n
-
-
-class TestKeywordExtractionGenericContent:
-    """Keywords are still produced even for generic content."""
-
-    def test_generic_content_produces_keywords(
-        self, db_conn: sqlite3.Connection, tmp_path: Path
-    ) -> None:
-        """Session with common words still produces keywords."""
-        lines = _make_session_lines(SESSION_ID_A, compact_boundaries=0)
-        meta = _write_session_file(tmp_path, SESSION_ID_A, lines)
-        index_session(db_conn, meta)
-        compute_epoch_keywords(db_conn, SESSION_ID_A)
-
-        row = db_conn.execute(
-            "SELECT keywords FROM epoch_summary WHERE session_id = ? AND epoch = 0",
-            (SESSION_ID_A,),
-        ).fetchone()
-        assert row is not None
-        assert row["keywords"] is not None
-        assert len(row["keywords"]) > 0
-
-
-class TestUpdateAllKeywords:
-    """update_all_keywords batch keyword computation."""
-
-    def test_update_single_session(self, indexed_db: sqlite3.Connection) -> None:
-        """update_all_keywords with session_id populates that session's keywords."""
-        update_all_keywords(indexed_db, session_id=SESSION_ID_A)
-
-        rows = indexed_db.execute(
-            "SELECT keywords FROM epoch_summary WHERE session_id = ?",
-            (SESSION_ID_A,),
-        ).fetchall()
-        for row in rows:
-            assert row["keywords"] is not None
-
-    def test_update_all_sessions(
-        self, db_conn: sqlite3.Connection, tmp_path: Path
-    ) -> None:
-        """update_all_keywords with no session_id computes for all sessions."""
-        # Index two sessions
-        lines_a = _make_session_lines(SESSION_ID_A, compact_boundaries=1)
-        meta_a = _write_session_file(tmp_path, SESSION_ID_A, lines_a)
-        index_session(db_conn, meta_a)
-
-        sid_b = "bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb"
-        lines_b = _make_session_lines(sid_b, compact_boundaries=0)
-        meta_b = _write_session_file(tmp_path, sid_b, lines_b)
-        index_session(db_conn, meta_b)
-
-        # All keywords should be NULL
-        null_count = db_conn.execute(
-            "SELECT COUNT(*) FROM epoch_summary WHERE keywords IS NULL"
-        ).fetchone()[0]
-        assert null_count > 0
-
-        # Update all
-        update_all_keywords(db_conn)
-
-        # No NULL keywords remaining
-        null_count = db_conn.execute(
-            "SELECT COUNT(*) FROM epoch_summary WHERE keywords IS NULL"
-        ).fetchone()[0]
-        assert null_count == 0
 
 
 # ============================================================

@@ -40,7 +40,6 @@ from cc_search_chats.storage.index import (
     reindex_project,
     search,
     search_full_content,
-    update_all_keywords,
 )
 
 
@@ -284,7 +283,6 @@ def _handle_index(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     """Build or rebuild the search index."""
     if args.all:
         counts = index_all_projects(conn)
-        update_all_keywords(conn)
         if args.json:
             print(json_index_all_result(counts))
         else:
@@ -300,7 +298,6 @@ def _handle_index(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     _validate_project_dir(project_path)
 
     count = reindex_project(conn, project_path)
-    update_all_keywords(conn)
 
     if args.json:
         print(json_index_result(count, project_path))

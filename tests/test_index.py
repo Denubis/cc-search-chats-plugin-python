@@ -23,7 +23,6 @@ EXPECTED_TABLES = {
     "message",
     "compact_event",
     "message_fts",
-    "message_fts_vocab",
     "project_summary",
     "epoch_summary",
 }

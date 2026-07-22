@@ -87,13 +87,6 @@ BEGIN
 END;
 
 -- ============================================================
--- FTS5 vocabulary table for TF-IDF keyword extraction
--- ============================================================
-
-CREATE VIRTUAL TABLE IF NOT EXISTS message_fts_vocab
-    USING fts5vocab('message_fts', 'instance');
-
--- ============================================================
 -- Materialised views (regular tables + maintenance triggers)
 -- ============================================================
 
@@ -149,7 +142,6 @@ CREATE TABLE IF NOT EXISTS epoch_summary (
     message_count   INTEGER NOT NULL DEFAULT 0,
     first_timestamp TEXT,
     last_timestamp  TEXT,
-    keywords        TEXT,   -- comma-separated top keywords (populated by deferred computation)
     PRIMARY KEY (session_id, epoch)
 );
 
