@@ -1,5 +1,25 @@
 # Changelog
 
+## cc-search-chats 2.0.0a5
+
+Fixes indexing, which never finished on large corpora, and surfaces each
+session's true filesystem path.
+
+**New:**
+- `list` and `search` display the session's real filesystem path, recovered
+  from each session's `cwd`, because the `~/.claude/projects` directory
+  encoding is lossy and cannot be reversed. The lossy `project_path` remains
+  the filter/group key, and `real_project_path` is an additive `--json`
+  field.
+
+**Fixed:**
+- `index` / `index --all` no longer runs an unconditional corpus-wide TF-IDF
+  keyword recompute after every build. On large corpora that pass took hours
+  and made indexing appear to hang, and nothing read its output. The keyword
+  feature is removed entirely (both call sites, `compute_epoch_keywords` /
+  `update_all_keywords`, the `message_fts_vocab` vtable, and the
+  `epoch_summary.keywords` column). `index --all` now completes in ~2s.
+
 ## cc-search-chats 2.0.0a4
 
 Hardens the `--json` contract so the CLI and plugin cannot silently

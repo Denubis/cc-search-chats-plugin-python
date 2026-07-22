@@ -1,7 +1,7 @@
 {
   "name": "cc-search-chats",
   "description": "Context recovery and cross-referencing for Claude Code chat history — recover from compression, search sessions, extract conversations",
-  "version": "2.0.0a4",
+  "version": "2.0.0a5",
   "author": {
     "name": "Denubis"
   },
