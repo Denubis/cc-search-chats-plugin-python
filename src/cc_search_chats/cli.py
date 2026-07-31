@@ -29,11 +29,17 @@ from cc_search_chats.output import (
     json_session_list,
 )
 from cc_search_chats.storage.index import (
+    ProjectRebuildError,
     close_db,
+    discard_damaged_database,
     ensure_fts5,
     extract_context,
     extract_session,
+    format_exception_detail,
+    format_index_error,
+    get_db_path,
     index_all_projects,
+    is_database_damage,
     jit_reindex,
     list_sessions,
     open_db,
@@ -288,7 +294,7 @@ def _handle_index(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
         else:
             print(
                 f"Indexed {counts['indexed']} sessions "
-                f"({counts['skipped']} already current) "
+                f"({counts['skipped']} skipped) "
                 f"across {counts['projects']} projects",
                 file=sys.stderr,
             )
@@ -297,12 +303,16 @@ def _handle_index(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     project_path = _resolve_project(args)
     _validate_project_dir(project_path)
 
-    count = reindex_project(conn, project_path)
+    counts = reindex_project(conn, project_path)
 
     if args.json:
-        print(json_index_result(count, project_path))
+        print(json_index_result(counts, project_path))
     else:
-        print(f"Indexed {count} sessions for {project_path}", file=sys.stderr)
+        print(
+            f"Indexed {counts['indexed']} sessions "
+            f"({counts['skipped']} skipped) for {project_path}",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -527,16 +537,64 @@ def main() -> None:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
 
-    conn = open_db()
+    conn: sqlite3.Connection | None = None
+    db_path = None
     try:
+        db_path = get_db_path()
+        conn = open_db(db_path)
         exit_code = args.func(args, conn)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         exit_code = 1
+    except ProjectRebuildError as exc:
+        if db_path is None:
+            print(str(exc), file=sys.stderr)
+        elif conn is not None and is_database_damage(exc.cause):
+            damaged_conn = conn
+            conn = None
+            print(
+                discard_damaged_database(
+                    damaged_conn,
+                    db_path,
+                    format_exception_detail(exc.cause),
+                    "SQLite stopped the operation with an explicit damage result.",
+                ),
+                file=sys.stderr,
+            )
+        else:
+            diagnostic = format_index_error(db_path, exc.cause, conn)
+            print(
+                f"Project index rebuild failed for {exc.project_path}. "
+                f"{diagnostic} The transaction was rolled back; "
+                "prior index contents remain intact.",
+                file=sys.stderr,
+            )
+        exit_code = 1
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         exit_code = 1
+    except sqlite3.ProgrammingError:
+        raise
+    except (OSError, sqlite3.DatabaseError) as exc:
+        if db_path is None:
+            print(f"{exc.__class__.__name__}: {exc}", file=sys.stderr)
+        elif conn is not None and is_database_damage(exc):
+            damaged_conn = conn
+            conn = None
+            print(
+                discard_damaged_database(
+                    damaged_conn,
+                    db_path,
+                    format_exception_detail(exc),
+                    "SQLite stopped the operation with an explicit damage result.",
+                ),
+                file=sys.stderr,
+            )
+        else:
+            print(format_index_error(db_path, exc, conn), file=sys.stderr)
+        exit_code = 1
     finally:
-        close_db(conn)
+        if conn is not None:
+            close_db(conn)
 
     sys.exit(exit_code)

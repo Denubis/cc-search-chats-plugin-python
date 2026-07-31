@@ -8,18 +8,24 @@ Acceptance criteria coverage:
 - cc-search-v2.AC2.5: No compact_boundary -> all messages in epoch 0
 - cc-search-v2.AC2.6: 3 compact_boundaries -> epochs 0-3
 - cc-search-v2.AC7.1: DB created automatically (covered in test_index.py)
-- cc-search-v2.AC7.4: Corrupted DB recovery (covered in test_index.py)
+- Index damage preservation and reporting (covered in test_index.py)
 """
 
 import json
 import sqlite3
 from pathlib import Path
 
-from cc_search_chats.core.models import SessionMeta
+import pytest
+
+from cc_search_chats.core.discovery import decode_project_path, encode_project_path
+from cc_search_chats.core.models import SessionMeta, SessionRecord
+from cc_search_chats.storage import index as index_module
 from cc_search_chats.storage.index import (
     index_all_projects,
     index_session,
+    jit_reindex,
     needs_reindex,
+    reindex_project,
     search,
 )
 from tests.conftest import (
@@ -28,6 +34,26 @@ from tests.conftest import (
     _make_session_lines,
     _write_session_file,
 )
+
+
+def _snapshot_index(conn: sqlite3.Connection) -> dict[str, list[tuple[object, ...]]]:
+    """Capture every user-visible index projection needed for rollback checks."""
+    queries = {
+        "session": "SELECT * FROM session ORDER BY session_id",
+        "message": "SELECT * FROM message ORDER BY uuid",
+        "compact_event": "SELECT * FROM compact_event ORDER BY uuid",
+        "fts": (
+            "SELECT message.uuid, message_fts.text_content "
+            "FROM message_fts JOIN message ON message.rowid = message_fts.rowid "
+            "ORDER BY message.uuid"
+        ),
+        "project_summary": "SELECT * FROM project_summary ORDER BY project_path",
+        "epoch_summary": ("SELECT * FROM epoch_summary ORDER BY session_id, epoch"),
+    }
+    return {
+        name: [tuple(row) for row in conn.execute(query).fetchall()]
+        for name, query in queries.items()
+    }
 
 
 class TestIndexSessionBasic:
@@ -314,6 +340,467 @@ class TestReindexIdempotent:
         assert msg_count == 9
 
 
+class TestTransactionalRebuild:
+    """A rebuild either replaces the complete project index or changes nothing."""
+
+    def test_rebuild_rejects_active_transaction_without_rolling_it_back(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A caller-owned transaction remains open and unchanged."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        db_conn.execute(
+            "INSERT INTO session "
+            "(session_id, project_path, file_path, file_size, modified_at, "
+            "indexed_at, summary) VALUES "
+            "('caller-pending', '/caller', '/caller.jsonl', 1, "
+            "'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z', NULL)"
+        )
+        assert db_conn.in_transaction
+
+        with pytest.raises(
+            sqlite3.ProgrammingError,
+            match="reindex_project requires a connection with no active transaction",
+        ):
+            reindex_project(db_conn, "/target")
+
+        assert db_conn.in_transaction
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM session WHERE session_id = 'caller-pending'"
+            ).fetchone()[0]
+            == 1
+        )
+        db_conn.rollback()
+
+    def test_single_session_rejects_active_transaction_without_committing_it(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+    ) -> None:
+        """Incremental indexing cannot commit a caller-owned transaction."""
+        replacement_meta = _write_session_file(
+            tmp_path,
+            SESSION_ID_A,
+            _make_session_lines(SESSION_ID_A, compact_boundaries=0),
+        )
+        db_conn.execute(
+            "INSERT INTO session "
+            "(session_id, project_path, file_path, file_size, modified_at, "
+            "indexed_at, summary) VALUES "
+            "('caller-pending', '/caller', '/caller.jsonl', 1, "
+            "'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z', NULL)"
+        )
+        assert db_conn.in_transaction
+
+        with pytest.raises(
+            sqlite3.ProgrammingError,
+            match="index_session requires a connection with no active transaction",
+        ):
+            index_session(db_conn, replacement_meta)
+
+        assert db_conn.in_transaction
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM session WHERE session_id = 'caller-pending'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM session WHERE session_id = ?",
+                (SESSION_ID_A,),
+            ).fetchone()[0]
+            == 0
+        )
+        db_conn.rollback()
+
+    def test_single_session_autocommit_open_failure_is_reported_and_skipped(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A source-open skip preserves prior state, including in autocommit mode."""
+        old_meta = _write_session_file(
+            tmp_path,
+            SESSION_ID_A,
+            _make_session_lines(SESSION_ID_A, compact_boundaries=1),
+        )
+        index_session(db_conn, old_meta)
+        before = _snapshot_index(db_conn)
+        db_conn.isolation_level = None
+        missing_path = tmp_path / "missing-replacement.jsonl"
+        missing_meta = SessionMeta(
+            session_id=SESSION_ID_A,
+            file_path=str(missing_path),
+            project_path=old_meta.project_path,
+            file_size=1,
+            modified_at=old_meta.modified_at + 1,
+        )
+
+        indexed = index_session(db_conn, missing_meta)
+
+        captured = capsys.readouterr()
+        assert indexed is False
+        assert f"Warning: Could not open session file {missing_path}:" in captured.err
+        assert "Skipping." in captured.err
+        assert not db_conn.in_transaction
+        assert _snapshot_index(db_conn) == before
+
+    def test_success_replaces_project_and_preserves_unrelated_sessions(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Project deletion uses the same lossy key stored by discovery."""
+        real_project = "/home/brian/my-project/.worktree"
+        encoded = encode_project_path(real_project)
+        stored_project = decode_project_path(encoded)
+
+        (tmp_path / "stale").mkdir()
+        stale_meta = _write_session_file(
+            tmp_path / "stale",
+            SESSION_ID_A,
+            _make_session_lines(SESSION_ID_A, compact_boundaries=1),
+            stored_project,
+        )
+        index_session(db_conn, stale_meta)
+
+        unrelated_id = "cccccccc-1111-2222-3333-cccccccccccc"
+        (tmp_path / "unrelated").mkdir()
+        unrelated_meta = _write_session_file(
+            tmp_path / "unrelated",
+            unrelated_id,
+            _make_session_lines(unrelated_id, compact_boundaries=0),
+            "/unrelated/project",
+        )
+        index_session(db_conn, unrelated_meta)
+
+        projects_dir = tmp_path / "projects"
+        current_dir = projects_dir / encoded
+        current_dir.mkdir(parents=True)
+        current_file = current_dir / f"{SESSION_ID_B}.jsonl"
+        current_file.write_text(
+            "\n".join(_make_session_lines(SESSION_ID_B, compact_boundaries=0)),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+
+        counts = reindex_project(db_conn, real_project)
+
+        assert counts == {"indexed": 1, "skipped": 0}
+        project_sessions = db_conn.execute(
+            "SELECT session_id, modified_at FROM session "
+            "WHERE project_path = ? ORDER BY session_id",
+            (stored_project,),
+        ).fetchall()
+        assert [row["session_id"] for row in project_sessions] == [SESSION_ID_B]
+        replacement_modified_at = project_sessions[0]["modified_at"]
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM message WHERE session_id = ?",
+                (SESSION_ID_B,),
+            ).fetchone()[0]
+            == 4
+        )
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM message_fts "
+                "JOIN message ON message.rowid = message_fts.rowid "
+                "WHERE message_fts MATCH 'database' AND message.session_id = ?",
+                (SESSION_ID_B,),
+            ).fetchone()[0]
+            > 0
+        )
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM message WHERE session_id = ?", (SESSION_ID_A,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM compact_event WHERE session_id = ?",
+                (SESSION_ID_A,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM message_fts "
+                "JOIN message ON message.rowid = message_fts.rowid "
+                "WHERE message_fts MATCH 'database' AND message.session_id = ?",
+                (SESSION_ID_A,),
+            ).fetchone()[0]
+            == 0
+        )
+        summary = db_conn.execute(
+            "SELECT session_count, latest_activity FROM project_summary "
+            "WHERE project_path = ?",
+            (stored_project,),
+        ).fetchone()
+        assert summary["session_count"] == 1
+        assert summary["latest_activity"] == replacement_modified_at
+        replacement_epoch = db_conn.execute(
+            "SELECT epoch, message_count FROM epoch_summary WHERE session_id = ?",
+            (SESSION_ID_B,),
+        ).fetchall()
+        assert [(row["epoch"], row["message_count"]) for row in replacement_epoch] == [
+            (0, 4)
+        ]
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM epoch_summary WHERE session_id = ?",
+                (SESSION_ID_A,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM session WHERE session_id = ?",
+                (unrelated_id,),
+            ).fetchone()[0]
+            == 1
+        )
+
+    def test_missing_file_is_reported_and_skipped_during_atomic_rebuild(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A skipped source is absent while readable replacements commit."""
+        project_path = "/home/brian/project"
+        (tmp_path / "stale").mkdir()
+        stale_meta = _write_session_file(
+            tmp_path / "stale",
+            SESSION_ID_A,
+            _make_session_lines(SESSION_ID_A, compact_boundaries=1),
+            project_path,
+        )
+        index_session(db_conn, stale_meta)
+
+        (tmp_path / "replacement").mkdir()
+        valid_meta = _write_session_file(
+            tmp_path / "replacement",
+            SESSION_ID_B,
+            _make_session_lines(SESSION_ID_B, compact_boundaries=0),
+            project_path,
+        )
+        valid_meta = SessionMeta(
+            session_id=valid_meta.session_id,
+            file_path=valid_meta.file_path,
+            project_path=valid_meta.project_path,
+            file_size=valid_meta.file_size,
+            modified_at=2.0,
+        )
+        missing_path = tmp_path / "vanished.jsonl"
+        missing_meta = SessionMeta(
+            session_id="dddddddd-1111-2222-3333-dddddddddddd",
+            file_path=str(missing_path),
+            project_path=project_path,
+            file_size=1,
+            modified_at=1.0,
+        )
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.list_session_files",
+            lambda *_args: [missing_meta, valid_meta],
+        )
+
+        counts = reindex_project(db_conn, project_path)
+
+        captured = capsys.readouterr()
+        assert counts == {"indexed": 1, "skipped": 1}
+        assert f"Warning: Could not open session file {missing_path}:" in captured.err
+        assert "Skipping." in captured.err
+        assert not db_conn.in_transaction
+        assert [
+            row["session_id"]
+            for row in db_conn.execute(
+                "SELECT session_id FROM session WHERE project_path = ?",
+                (project_path,),
+            ).fetchall()
+        ] == [SESSION_ID_B]
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM message WHERE session_id = ?",
+                (SESSION_ID_B,),
+            ).fetchone()[0]
+            == 4
+        )
+
+    def test_parser_failure_rolls_back_complete_project_state(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A non-SQLite failure names its cause and retains the prior index."""
+        project_path = "/home/brian/project"
+        (tmp_path / "stale").mkdir()
+        stale_meta = _write_session_file(
+            tmp_path / "stale",
+            SESSION_ID_A,
+            _make_session_lines(SESSION_ID_A, compact_boundaries=1),
+            project_path,
+        )
+        index_session(db_conn, stale_meta)
+        before = _snapshot_index(db_conn)
+
+        (tmp_path / "replacement").mkdir()
+        replacement_meta = _write_session_file(
+            tmp_path / "replacement",
+            SESSION_ID_B,
+            _make_session_lines(SESSION_ID_B, compact_boundaries=0),
+            project_path,
+        )
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.list_session_files",
+            lambda *_args: [replacement_meta],
+        )
+
+        def failing_parse(
+            _lines: object, session_id: str, *, full_content: bool = False
+        ) -> object:
+            del full_content
+            yield SessionRecord(
+                record_type="user",
+                uuid="partial-replacement-message",
+                parent_uuid=None,
+                timestamp="2026-07-31T00:00:00Z",
+                session_id=session_id,
+                role="user",
+                text_content="partial replacement",
+                leaf_uuid=None,
+            )
+            raise ValueError("parser exploded")
+
+        monkeypatch.setattr(index_module, "parse_session", failing_parse)
+
+        with pytest.raises(RuntimeError) as caught:
+            reindex_project(db_conn, project_path)
+
+        assert "ValueError: parser exploded" in str(caught.value)
+        assert "prior index contents remain intact" in str(caught.value).lower()
+        assert _snapshot_index(db_conn) == before
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM message_fts WHERE message_fts MATCH 'partial'"
+            ).fetchone()[0]
+            == 0
+        )
+
+    def test_single_session_parser_failure_is_atomic(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The public incremental index operation also rolls back on exceptions."""
+        (tmp_path / "old").mkdir()
+        old_meta = _write_session_file(
+            tmp_path / "old",
+            SESSION_ID_A,
+            _make_session_lines(SESSION_ID_A, compact_boundaries=1),
+        )
+        index_session(db_conn, old_meta)
+        before = _snapshot_index(db_conn)
+
+        (tmp_path / "replacement").mkdir()
+        replacement_meta = _write_session_file(
+            tmp_path / "replacement",
+            SESSION_ID_A,
+            _make_session_lines(SESSION_ID_A, compact_boundaries=0),
+        )
+
+        def failing_parse(
+            _lines: object, session_id: str, *, full_content: bool = False
+        ) -> object:
+            del full_content
+            yield SessionRecord(
+                record_type="user",
+                uuid="partial-single-session-message",
+                parent_uuid=None,
+                timestamp="2026-07-31T00:00:00Z",
+                session_id=session_id,
+                role="user",
+                text_content="partial single-session replacement",
+                leaf_uuid=None,
+            )
+            raise ValueError("single parser exploded")
+
+        monkeypatch.setattr(index_module, "parse_session", failing_parse)
+
+        with pytest.raises(ValueError, match="single parser exploded"):
+            index_session(db_conn, replacement_meta)
+
+        assert _snapshot_index(db_conn) == before
+        assert (
+            db_conn.execute(
+                "SELECT COUNT(*) FROM message_fts WHERE message_fts MATCH 'partial'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+class TestJitReindex:
+    """JIT indexing tolerates source-open races without lying about counts."""
+
+    def test_reports_and_skips_missing_file_while_indexing_readable_session(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        project_path = "/home/brian/project"
+        valid_meta = _write_session_file(
+            tmp_path,
+            SESSION_ID_A,
+            _make_session_lines(SESSION_ID_A, compact_boundaries=0),
+            project_path,
+        )
+        missing_path = tmp_path / "jit-vanished.jsonl"
+        missing_meta = SessionMeta(
+            session_id=SESSION_ID_B,
+            file_path=str(missing_path),
+            project_path=project_path,
+            file_size=1,
+            modified_at=valid_meta.modified_at + 1,
+        )
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.list_session_files",
+            lambda *_args: [missing_meta, valid_meta],
+        )
+
+        counts = jit_reindex(db_conn, project_path)
+
+        captured = capsys.readouterr()
+        assert counts == {"indexed": 1, "skipped": 1}
+        assert f"Warning: Could not open session file {missing_path}:" in captured.err
+        assert "Skipping." in captured.err
+        assert not db_conn.in_transaction
+        assert [
+            row["session_id"]
+            for row in db_conn.execute(
+                "SELECT session_id FROM session ORDER BY session_id"
+            ).fetchall()
+        ] == [SESSION_ID_A]
+
+
 class TestIndexAllProjects:
     """index --all: incrementally index every project under the projects dir."""
 
@@ -372,6 +859,47 @@ class TestIndexAllProjects:
         second = index_all_projects(db_conn, projects_dir=projects)
         assert second["indexed"] == 0
         assert second["skipped"] == 1
+
+    def test_reports_and_counts_missing_file_as_skipped(
+        self,
+        db_conn: sqlite3.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        projects = tmp_path / "projects"
+        (projects / "-home-brian-project").mkdir(parents=True)
+        valid_meta = _write_session_file(
+            tmp_path,
+            SESSION_ID_A,
+            _make_session_lines(SESSION_ID_A, compact_boundaries=0),
+        )
+        missing_path = tmp_path / "all-vanished.jsonl"
+        missing_meta = SessionMeta(
+            session_id=SESSION_ID_B,
+            file_path=str(missing_path),
+            project_path="/home/brian/project",
+            file_size=1,
+            modified_at=valid_meta.modified_at + 1,
+        )
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.list_session_files",
+            lambda *_args: [missing_meta, valid_meta],
+        )
+
+        counts = index_all_projects(db_conn, projects_dir=projects)
+
+        captured = capsys.readouterr()
+        assert counts == {"projects": 1, "indexed": 1, "skipped": 1}
+        assert f"Warning: Could not open session file {missing_path}:" in captured.err
+        assert "Skipping." in captured.err
+        assert not db_conn.in_transaction
+        assert [
+            row["session_id"]
+            for row in db_conn.execute(
+                "SELECT session_id FROM session ORDER BY session_id"
+            ).fetchall()
+        ] == [SESSION_ID_A]
 
     def test_empty_projects_dir(
         self, db_conn: sqlite3.Connection, tmp_path: Path

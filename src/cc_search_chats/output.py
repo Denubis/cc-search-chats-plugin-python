@@ -446,15 +446,16 @@ def json_context(target: _Row, before: list, after: list) -> str:
     )
 
 
-def json_index_result(sessions_indexed: int, project_path: str) -> str:
+def json_index_result(counts: dict[str, int], project_path: str) -> str:
     """Format index result as JSON.
 
-    Returns a JSON object with sessions_indexed count and project_path.
+    Returns a JSON object with indexed/skipped counts and project_path.
     """
     return json.dumps(
         {
             "schema_version": SCHEMA_VERSION,
-            "sessions_indexed": sessions_indexed,
+            "sessions_indexed": counts["indexed"],
+            "sessions_skipped": counts["skipped"],
             "project_path": project_path,
         },
         indent=2,
@@ -466,7 +467,8 @@ def json_index_all_result(counts: dict[str, int]) -> str:
     """Format an ``index --all`` result as JSON.
 
     Returns a JSON object with the number of projects scanned and the
-    sessions indexed (new/changed) versus skipped (already current).
+    sessions indexed (new/changed) versus skipped (already current or source
+    could not be opened).
     """
     return json.dumps(
         {

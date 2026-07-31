@@ -11,6 +11,7 @@ Environment isolation uses:
 - monkeypatch to override get_claude_projects_dir()
 """
 
+import errno
 import io
 import json
 import shutil
@@ -19,13 +20,20 @@ import sys
 from collections.abc import Generator
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
-from cc_search_chats.cli import build_parser
+from cc_search_chats.cli import build_parser, main
 from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
-from cc_search_chats.storage.index import close_db, index_session, open_db, search
+from cc_search_chats.storage.index import (
+    ProjectRebuildError,
+    close_db,
+    index_session,
+    open_db,
+    search,
+)
 from tests.conftest import SESSION_ID_A, SESSION_ID_B, _make_session_lines
 
 # ============================================================
@@ -182,9 +190,7 @@ class TestIndexAll:
         assert "project" in stderr.lower()
 
     def test_index_all_json(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
-            ["index", "--all", "--json"], cli_env
-        )
+        exit_code, stdout, stderr = _run_cli(["index", "--all", "--json"], cli_env)
         assert exit_code == 0
         payload = json.loads(stdout)
         assert payload["projects"] >= 1
@@ -213,12 +219,614 @@ class TestIndexAll:
         assert SESSION_ID_A in {r["session_id"] for r in results}
 
 
+class TestMainErrors:
+    """Top-level database failures are rendered without a traceback."""
+
+    def test_programming_error_is_not_rendered_as_environment_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Caller bugs remain loud programming errors."""
+        conn = open_db(tmp_path / "closed.db")
+        close_db(conn)
+        monkeypatch.setenv(
+            "CC_SEARCH_DB_PATH",
+            str(tmp_path / "programming-error.db"),
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["cc-search-chats", "search", "query", "--all"],
+        )
+        monkeypatch.setattr("cc_search_chats.cli.open_db", lambda _db_path: conn)
+
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            main()
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+    def test_open_db_failure_is_caught(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(
+            sys, "argv", ["cc-search-chats", "search", "query", "--all"]
+        )
+
+        def fail_open(_db_path: Path) -> sqlite3.Connection:
+            raise RuntimeError("index diagnostic")
+
+        monkeypatch.setattr("cc_search_chats.cli.open_db", fail_open)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 1
+        assert captured.out == ""
+        assert captured.err == "index diagnostic\n"
+        assert "Traceback" not in captured.err
+
+    @pytest.mark.parametrize(
+        ("error_name", "expect_deleted", "expected_remedy"),
+        [
+            ("SQLITE_CORRUPT_INDEX", True, None),
+            (
+                "SQLITE_READONLY_DIRECTORY",
+                False,
+                "Grant read/write access to the index directory",
+            ),
+            (
+                "SQLITE_BUSY_TIMEOUT",
+                False,
+                "Wait for the concurrent indexing or database operation to finish",
+            ),
+        ],
+    )
+    def test_jit_sqlite_failure_deletes_only_explicit_damage(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        error_name: str,
+        expect_deleted: bool,
+        expected_remedy: str | None,
+    ) -> None:
+        """Pre-query JIT CORRUPT deletes while READONLY and BUSY preserve."""
+        db_path = tmp_path / "jit-index" / "index.db"
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
+        setup_conn = open_db(db_path)
+        close_db(setup_conn)
+        original = db_path.read_bytes()
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "cc-search-chats",
+                "search",
+                "query",
+                "--project",
+                str(tmp_path),
+            ],
+        )
+        error = sqlite3.OperationalError("forced JIT failure")
+        error.sqlite_errorname = error_name
+
+        def fail_jit(
+            _conn: sqlite3.Connection,
+            _project_path: str,
+            _include_subagents: bool = False,
+        ) -> int:
+            raise error
+
+        monkeypatch.setattr(
+            "cc_search_chats.cli._validate_project_dir",
+            lambda _project_path: None,
+        )
+        monkeypatch.setattr("cc_search_chats.cli.jit_reindex", fail_jit)
+
+        with pytest.raises(SystemExit) as caught:
+            main()
+
+        captured = capsys.readouterr()
+        assert caught.value.code == 1
+        assert captured.out == ""
+        assert error_name in captured.err
+        assert "OperationalError: forced JIT failure" in captured.err
+        assert "Traceback" not in captured.err
+        if expect_deleted:
+            assert (
+                f"The damaged index at {db_path} is no longer present. "
+                "Run `cc-search-chats index` to rebuild it."
+            ) in captured.err
+            assert "was deleted" not in captured.err
+            assert not db_path.exists()
+        else:
+            assert "The database file was deleted" not in captured.err
+            assert db_path.read_bytes() == original
+            assert expected_remedy is not None
+            assert expected_remedy in captured.err
+            assert "corrupt" not in captured.err.lower()
+
+    @pytest.mark.parametrize(
+        ("error_name", "expect_absent", "expected_remedy"),
+        [
+            ("SQLITE_CORRUPT_INDEX", True, None),
+            (
+                "SQLITE_READONLY_DIRECTORY",
+                False,
+                "Grant read/write access to the index directory",
+            ),
+            (
+                "SQLITE_BUSY_TIMEOUT",
+                False,
+                "Wait for the concurrent indexing or database operation to finish",
+            ),
+        ],
+    )
+    def test_persistent_query_failure_discards_only_explicit_damage(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        error_name: str,
+        expect_absent: bool,
+        expected_remedy: str | None,
+    ) -> None:
+        """Persistent query CORRUPT discards while READONLY and BUSY preserve."""
+        db_path = tmp_path / "query-index" / "index.db"
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
+        setup_conn = open_db(db_path)
+        close_db(setup_conn)
+        original = db_path.read_bytes()
+        error = sqlite3.OperationalError("forced persistent query failure")
+        error.sqlite_errorname = error_name
+
+        def fail_search(
+            _conn: sqlite3.Connection,
+            _query: str,
+            *,
+            epoch: int | None = None,
+            project: str | None = None,
+            days: int | None = None,
+            limit: int = 50,
+        ) -> list[sqlite3.Row]:
+            del epoch, project, days, limit
+            raise error
+
+        monkeypatch.setattr("cc_search_chats.cli.search", fail_search)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["cc-search-chats", "search", "query", "--all"],
+        )
+
+        with pytest.raises(SystemExit) as caught:
+            main()
+
+        captured = capsys.readouterr()
+        assert caught.value.code == 1
+        assert captured.out == ""
+        assert error_name in captured.err
+        assert "OperationalError: forced persistent query failure" in captured.err
+        assert "Traceback" not in captured.err
+        if expect_absent:
+            assert (
+                f"The damaged index at {db_path} is no longer present. "
+                "Run `cc-search-chats index` to rebuild it."
+            ) in captured.err
+            assert "was deleted" not in captured.err
+            assert not db_path.exists()
+        else:
+            assert "The database file was deleted" not in captured.err
+            assert db_path.read_bytes() == original
+            assert expected_remedy is not None
+            assert expected_remedy in captured.err
+            assert "corrupt" not in captured.err.lower()
+
+    def test_indexing_sqlite_failure_is_rendered_with_index_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A READONLY error escaping incremental indexing names its cause."""
+        db_path = tmp_path / "all-index" / "index.db"
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["cc-search-chats", "index", "--all"],
+        )
+        error = sqlite3.OperationalError("index write denied")
+        error.sqlite_errorname = "SQLITE_READONLY"
+
+        def fail_index(
+            _conn: sqlite3.Connection,
+            _projects_dir: Path | None = None,
+            _include_subagents: bool = False,
+        ) -> dict[str, int]:
+            raise error
+
+        monkeypatch.setattr(
+            "cc_search_chats.cli.index_all_projects",
+            fail_index,
+        )
+
+        with pytest.raises(SystemExit) as caught:
+            main()
+
+        captured = capsys.readouterr()
+        assert caught.value.code == 1
+        assert captured.out == ""
+        assert "SQLITE_READONLY" in captured.err
+        assert "OperationalError: index write denied" in captured.err
+        assert "The index contains no recorded session indexing time." in captured.err
+        assert str(db_path.parent) in captured.err
+        assert "Traceback" not in captured.err
+        assert "corrupt" not in captured.err.lower()
+
+    def test_everything_corruption_preserves_persistent_index_identity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Transient full-content damage never deletes the persistent index."""
+        projects_dir = _setup_project_dir(tmp_path)
+        monkeypatch.setattr(
+            "cc_search_chats.cli.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        db_path = tmp_path / "persistent" / "index.db"
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
+        conn = open_db(db_path)
+        close_db(conn)
+        original = db_path.read_bytes()
+        error = sqlite3.DatabaseError("transient database disk image is malformed")
+        error.sqlite_errorname = "SQLITE_CORRUPT_INDEX"
+
+        def fail_transient_search(
+            _conn: sqlite3.Connection,
+            _query: str,
+            *,
+            epoch: int | None = None,
+            project: str | None = None,
+            days: int | None = None,
+            limit: int = 50,
+        ) -> list[sqlite3.Row]:
+            del epoch, project, days, limit
+            raise error
+
+        monkeypatch.setattr(
+            "cc_search_chats.storage.index.search",
+            fail_transient_search,
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "cc-search-chats",
+                "search",
+                "query",
+                "--everything",
+                "--project",
+                FAKE_PROJECT_PATH,
+            ],
+        )
+
+        with pytest.raises(SystemExit) as caught:
+            main()
+
+        captured = capsys.readouterr()
+        assert caught.value.code == 1
+        assert captured.out == ""
+        assert "SQLITE_CORRUPT_INDEX" in captured.err
+        assert (
+            "DatabaseError: transient database disk image is malformed" in captured.err
+        )
+        assert "in-memory" in captured.err.lower()
+        assert "The persistent index was not modified." in captured.err
+        assert "The database file was deleted" not in captured.err
+        assert "`cc-search-chats index`" not in captured.err
+        assert "Traceback" not in captured.err
+        assert db_path.read_bytes() == original
+
+    def test_source_file_failure_does_not_recommend_database_permissions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A vanished JSONL is not diagnosed as index-directory denial."""
+        projects_dir = _setup_project_dir(tmp_path)
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        db_path = tmp_path / "source-race" / "index.db"
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["cc-search-chats", "index", "--all"],
+        )
+        original_open = Path.open
+
+        def fail_jsonl_open(
+            path: Path,
+            mode: Literal["r"] = "r",
+            buffering: int = -1,
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> io.TextIOWrapper:
+            if path.suffix == ".jsonl":
+                raise FileNotFoundError(f"session vanished: {path}")
+            return original_open(
+                path,
+                mode=mode,
+                buffering=buffering,
+                encoding=encoding,
+                errors=errors,
+                newline=newline,
+            )
+
+        monkeypatch.setattr(Path, "open", fail_jsonl_open)
+
+        with pytest.raises(SystemExit) as caught:
+            main()
+
+        captured = capsys.readouterr()
+        assert caught.value.code == 0
+        assert captured.out == ""
+        assert captured.err.count("Warning: Could not open session file") == 2
+        assert "session vanished:" in captured.err
+        assert ".jsonl" in captured.err
+        assert "Skipping." in captured.err
+        assert "Indexed 0 sessions (2 skipped) across 1 projects" in captured.err
+        assert "Grant read/write access" not in captured.err
+        assert "sandbox_workspace_write.writable_roots" not in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_source_permission_failure_does_not_recommend_index_permissions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A denied JSONL names that file instead of the database directory."""
+        projects_dir = _setup_project_dir(tmp_path)
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        db_path = tmp_path / "source-denied" / "index.db"
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["cc-search-chats", "index", "--all"],
+        )
+        original_open = Path.open
+
+        def deny_jsonl_open(
+            path: Path,
+            mode: Literal["r"] = "r",
+            buffering: int = -1,
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> io.TextIOWrapper:
+            if path.suffix == ".jsonl":
+                raise PermissionError(
+                    errno.EACCES,
+                    "session read denied",
+                    str(path),
+                )
+            return original_open(
+                path,
+                mode=mode,
+                buffering=buffering,
+                encoding=encoding,
+                errors=errors,
+                newline=newline,
+            )
+
+        monkeypatch.setattr(Path, "open", deny_jsonl_open)
+
+        with pytest.raises(SystemExit) as caught:
+            main()
+
+        captured = capsys.readouterr()
+        assert caught.value.code == 0
+        assert captured.out == ""
+        assert captured.err.count("Warning: Could not open session file") == 2
+        assert "session read denied" in captured.err
+        assert ".jsonl" in captured.err
+        assert "Skipping." in captured.err
+        assert "Indexed 0 sessions (2 skipped) across 1 projects" in captured.err
+        assert "Grant read/write access" not in captured.err
+        assert "sandbox_workspace_write.writable_roots" not in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_project_rebuild_readonly_failure_gets_complete_r4_diagnostic(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A rebuild preserves its SQLite cause for the shared formatter."""
+        projects_dir = _setup_project_dir(tmp_path)
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        monkeypatch.setattr(
+            "cc_search_chats.cli.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        db_path = tmp_path / "readonly-rebuild" / "index.db"
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
+        conn = open_db(db_path)
+        conn.execute(
+            "INSERT INTO session "
+            "(session_id, project_path, file_path, file_size, modified_at, "
+            "indexed_at, summary) VALUES "
+            "('existing', '/existing', '/existing.jsonl', 1, "
+            "'2026-07-31T00:00:00Z', '2026-07-31T03:00:00Z', NULL)"
+        )
+        conn.commit()
+        conn.execute("PRAGMA query_only=ON")
+        monkeypatch.setattr("cc_search_chats.cli.open_db", lambda _db_path: conn)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["cc-search-chats", "index", "--project", FAKE_PROJECT_PATH],
+        )
+
+        with pytest.raises(SystemExit) as caught:
+            main()
+
+        captured = capsys.readouterr()
+        assert caught.value.code == 1
+        assert captured.out == ""
+        assert "Project index rebuild failed" in captured.err
+        assert "SQLITE_READONLY" in captured.err
+        assert "OperationalError: attempt to write a readonly database" in captured.err
+        assert (
+            "Most recent recorded session indexing: 2026-07-31T03:00:00Z."
+            in captured.err
+        )
+        assert "prior index contents remain intact" in captured.err
+        assert str(db_path.parent) in captured.err
+        assert "sandbox_workspace_write.writable_roots" in captured.err
+        assert "Traceback" not in captured.err
+        assert "corrupt" not in captured.err.lower()
+
+    def test_project_rebuild_corruption_deletes_index(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A structured rebuild error transfers cleanup ownership to main."""
+        projects_dir = _setup_project_dir(tmp_path)
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        monkeypatch.setattr(
+            "cc_search_chats.cli.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        db_path = tmp_path / "corrupt-rebuild" / "index.db"
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
+        error = sqlite3.DatabaseError("database disk image is malformed")
+        error.sqlite_errorname = "SQLITE_CORRUPT_INDEX"
+
+        def fail_rebuild(
+            _conn: sqlite3.Connection,
+            project_path: str,
+        ) -> dict[str, int]:
+            raise ProjectRebuildError(project_path, error)
+
+        monkeypatch.setattr("cc_search_chats.cli.reindex_project", fail_rebuild)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["cc-search-chats", "index", "--project", FAKE_PROJECT_PATH],
+        )
+
+        with pytest.raises(SystemExit) as caught:
+            main()
+
+        captured = capsys.readouterr()
+        assert caught.value.code == 1
+        assert captured.out == ""
+        assert "SQLITE_CORRUPT_INDEX" in captured.err
+        assert "DatabaseError: database disk image is malformed" in captured.err
+        assert (
+            f"The damaged index at {db_path} is no longer present. "
+            "Run `cc-search-chats index` to rebuild it."
+        ) in captured.err
+        assert "was deleted" not in captured.err
+        assert "prior index contents remain intact" not in captured.err
+        assert "Traceback" not in captured.err
+        assert not db_path.exists()
+
+    def test_project_rebuild_busy_failure_gets_wait_and_state_diagnostic(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A competing WAL writer reaches the BUSY-specific R4 remedy."""
+        projects_dir = _setup_project_dir(tmp_path)
+        monkeypatch.setattr(
+            "cc_search_chats.core.discovery.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        monkeypatch.setattr(
+            "cc_search_chats.cli.get_claude_projects_dir",
+            lambda: projects_dir,
+        )
+        db_path = tmp_path / "busy-rebuild" / "index.db"
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
+        setup_conn = open_db(db_path)
+        setup_conn.execute(
+            "INSERT INTO session "
+            "(session_id, project_path, file_path, file_size, modified_at, "
+            "indexed_at, summary) VALUES "
+            "('existing', '/existing', '/existing.jsonl', 1, "
+            "'2026-07-31T00:00:00Z', '2026-07-31T04:00:00Z', NULL)"
+        )
+        setup_conn.commit()
+        close_db(setup_conn)
+
+        conn = open_db(db_path)
+        conn.execute("PRAGMA busy_timeout=0")
+        blocker = open_db(db_path)
+        blocker.execute("BEGIN IMMEDIATE")
+        monkeypatch.setattr("cc_search_chats.cli.open_db", lambda _db_path: conn)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["cc-search-chats", "index", "--project", FAKE_PROJECT_PATH],
+        )
+        try:
+            with pytest.raises(SystemExit) as caught:
+                main()
+        finally:
+            blocker.rollback()
+            close_db(blocker)
+
+        captured = capsys.readouterr()
+        assert caught.value.code == 1
+        assert captured.out == ""
+        assert "Project index rebuild failed" in captured.err
+        assert "SQLITE_BUSY" in captured.err
+        assert "OperationalError: database is locked" in captured.err
+        assert (
+            "Most recent recorded session indexing: 2026-07-31T04:00:00Z."
+            in captured.err
+        )
+        assert "prior index contents remain intact" in captured.err
+        assert "Wait for the concurrent indexing" in captured.err
+        assert "sandbox_workspace_write.writable_roots" not in captured.err
+        assert "Traceback" not in captured.err
+        assert "corrupt" not in captured.err.lower()
+
+
 class TestSearchScope:
     """Local-first search with broaden-on-miss across projects."""
 
-    def test_all_flag_searches_everything(
-        self, cli_env: sqlite3.Connection
-    ) -> None:
+    def test_all_flag_searches_everything(self, cli_env: sqlite3.Connection) -> None:
         _, stdout, _ = _run_cli(["search", "database", "--all", "--json"], cli_env)
         parsed = json.loads(stdout)
         assert parsed["scope"] == "all"
@@ -287,9 +895,7 @@ class TestSearchEverything:
     """--everything runs a live full-content scan (thinking + tool calls)."""
 
     def _write_thinking_session(self, tmp_path: Path) -> None:
-        proj = (
-            tmp_path / "claude" / "projects" / encode_project_path(FAKE_PROJECT_PATH)
-        )
+        proj = tmp_path / "claude" / "projects" / encode_project_path(FAKE_PROJECT_PATH)
         line = json.dumps(
             {
                 "type": "assistant",
@@ -495,7 +1101,7 @@ class TestJsonOutput:
         assert COMPRESSED_SESSION_ID in session_ids
 
     def test_index_json(self, cli_env: sqlite3.Connection) -> None:
-        """Index --json produces valid JSON with sessions_indexed and project_path."""
+        """Index --json distinguishes indexed from skipped sessions."""
         exit_code, stdout, stderr = _run_cli(
             ["index", "--project", FAKE_PROJECT_PATH, "--json"],
             cli_env,
@@ -504,9 +1110,11 @@ class TestJsonOutput:
         parsed = json.loads(stdout)
         assert isinstance(parsed, dict)
         assert "sessions_indexed" in parsed
+        assert "sessions_skipped" in parsed
         assert "project_path" in parsed
         assert parsed["project_path"] == FAKE_PROJECT_PATH
         assert parsed["sessions_indexed"] >= 0
+        assert parsed["sessions_skipped"] >= 0
 
 
 # ============================================================

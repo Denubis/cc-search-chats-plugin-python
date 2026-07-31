@@ -753,8 +753,10 @@ class TestSchemaVersion:
         assert parsed["schema_version"] == SCHEMA_VERSION
 
     def test_index_has_schema_version(self) -> None:
-        parsed = json.loads(json_index_result(3, "/p"))
+        parsed = json.loads(json_index_result({"indexed": 3, "skipped": 2}, "/p"))
         assert parsed["schema_version"] == SCHEMA_VERSION
+        assert parsed["sessions_indexed"] == 3
+        assert parsed["sessions_skipped"] == 2
 
     def test_index_all_has_schema_version(self) -> None:
         parsed = json.loads(
