@@ -18,3 +18,9 @@
 - Invocation: `uv run ty`
 - Version: 0.0.15
 - Notes: type-check with `uv run ty check`
+
+## complexipy
+- Invocation: `uvx complexipy`
+- Version: 6.2.0
+- Path: `/home/brian/.local/bin/uvx` (launcher)
+- Notes: measure cognitive complexity without changing the configured uv cache
