@@ -39,6 +39,7 @@ class ClaudeDiagnosticCode(StrEnum):
     EXCLUDED_INJECTED = "excluded_injected"
     MISSING_MESSAGE_UUID = "missing_message_uuid"
     INVALID_COMPACT_BOUNDARY = "invalid_compact_boundary"
+    DUPLICATE_COMPACT_BOUNDARY = "duplicate_compact_boundary"
     EMPTY_CONTENT = "empty_content"
     INVALID_UNICODE = "invalid_unicode"
 
@@ -71,6 +72,32 @@ class ClaudeSessionContext:
 
 
 @dataclass(frozen=True, slots=True)
+class ClaudeParserState:
+    """Immutable Claude state required to parse only an appended suffix."""
+
+    next_conversation_epoch: int = 0
+    seen_compaction_uuids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Reject persisted state that cannot identify the next epoch."""
+        if (
+            isinstance(self.next_conversation_epoch, bool)
+            or not isinstance(self.next_conversation_epoch, int)
+            or self.next_conversation_epoch < 0
+        ):
+            raise ValueError("next_conversation_epoch must be a nonnegative integer")
+        if not isinstance(self.seen_compaction_uuids, tuple) or any(
+            not isinstance(value, str)
+            or not value.strip()
+            or any(delimiter in value for delimiter in (":", "\r", "\n"))
+            for value in self.seen_compaction_uuids
+        ):
+            raise ValueError("seen_compaction_uuids must contain locator-safe UUIDs")
+        if len(set(self.seen_compaction_uuids)) != len(self.seen_compaction_uuids):
+            raise ValueError("seen_compaction_uuids must be unique")
+
+
+@dataclass(frozen=True, slots=True)
 class ClaudeParseResult:
     """All retained and excluded outcomes for one bounded Claude source."""
 
@@ -78,6 +105,7 @@ class ClaudeParseResult:
     messages: tuple[NativeMessage, ...]
     boundaries: tuple[SessionEpochBoundary, ...]
     diagnostics: tuple[ClaudeDiagnostic, ...]
+    next_state: ClaudeParserState
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,15 +535,22 @@ def _parse_boundary(
 
 
 def parse_claude_session(
-    envelopes: tuple[RecordEnvelope, ...], *, context: ClaudeSessionContext
+    envelopes: tuple[RecordEnvelope, ...],
+    *,
+    context: ClaudeSessionContext,
+    prior_state: ClaudeParserState | None = None,
 ) -> ClaudeParseResult:
     """Adapt bounded Claude envelopes into searchable and diagnostic outcomes."""
+    if prior_state is not None and not isinstance(prior_state, ClaudeParserState):
+        raise TypeError("prior_state must be ClaudeParserState or None")
+    state = prior_state if prior_state is not None else ClaudeParserState()
     records, decode_diagnostics = _decode_records(tuple(envelopes))
     session_kind = _classify_session_kind(records, context)
     messages: list[NativeMessage] = []
     boundaries: list[SessionEpochBoundary] = []
     diagnostics = list(decode_diagnostics)
-    conversation_epoch = 0
+    conversation_epoch = state.next_conversation_epoch
+    seen_compaction_uuids = set(state.seen_compaction_uuids)
 
     for record in records:
         payload = record.payload
@@ -531,8 +566,19 @@ def parse_claude_session(
                 if diagnostic is not None:
                     diagnostics.append(diagnostic)
                 elif boundary is not None:
-                    conversation_epoch += 1
-                    boundaries.append(boundary)
+                    boundary_uuid = str(boundary.physical_alias.locator.key)
+                    if boundary_uuid in seen_compaction_uuids:
+                        diagnostics.append(
+                            _diagnostic(
+                                ClaudeDiagnosticCode.DUPLICATE_COMPACT_BOUNDARY,
+                                record.envelope,
+                                "duplicate compact_boundary does not advance the epoch",
+                            )
+                        )
+                    else:
+                        seen_compaction_uuids.add(boundary_uuid)
+                        conversation_epoch += 1
+                        boundaries.append(boundary)
             else:
                 diagnostics.append(
                     _diagnostic(
@@ -637,5 +683,9 @@ def parse_claude_session(
                     value.detail,
                 ),
             )
+        ),
+        next_state=ClaudeParserState(
+            next_conversation_epoch=conversation_epoch,
+            seen_compaction_uuids=tuple(sorted(seen_compaction_uuids)),
         ),
     )

@@ -148,6 +148,7 @@ def _base_compatible(
         _opposite_families(left.record_family, right.record_family)
         and left_locator.source_session_id == right_locator.source_session_id
         and _same_physical_source(left, right)
+        and left_message.session_kind is right_message.session_kind
         and left_message.conversation_epoch == right_message.conversation_epoch
         and left_message.role == right_message.role
         and left_message.content_class is ContentClass.PROSE

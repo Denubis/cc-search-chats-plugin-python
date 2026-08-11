@@ -28,6 +28,108 @@ def diagnostic_codes(
 
 
 class TestBoundedJsonlRead:
+    def test_resumes_from_absolute_complete_record_coordinates(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "session.jsonl"
+        committed = b'{"text":"committed"}'
+        appended = b'{"text":"appended"}'
+        source.write_bytes(committed + b"\n" + appended + b"\n")
+        committed_offset = len(committed) + 1
+
+        result = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("session.jsonl"),
+            target_size=source.stat().st_size,
+            start_byte_offset=committed_offset,
+            next_record_ordinal=1,
+            next_source_line=2,
+        )
+
+        assert [envelope.raw_bytes for envelope in result.envelopes] == [appended]
+        assert result.envelopes[0].record_ordinal == 1
+        assert result.envelopes[0].source_line == 2
+        assert result.envelopes[0].source_byte_offset == committed_offset
+        assert result.next_source_byte_offset == source.stat().st_size
+        assert result.next_record_ordinal == 2
+        assert result.next_source_line == 3
+
+    @pytest.mark.parametrize(
+        ("start_byte_offset", "next_record_ordinal", "next_source_line"),
+        [
+            (-1, 0, 1),
+            (0, -1, 1),
+            (0, 0, 0),
+            (0, 1, 1),
+            (4, 0, 1),
+        ],
+    )
+    def test_rejects_inconsistent_resume_coordinates(
+        self,
+        tmp_path: Path,
+        start_byte_offset: int,
+        next_record_ordinal: int,
+        next_source_line: int,
+    ) -> None:
+        source = tmp_path / "session.jsonl"
+        source.write_bytes(b"{}\n")
+
+        with pytest.raises(ValueError, match="coordinate|target_size"):
+            read_bounded_jsonl(
+                source,
+                source_file_relative=Path("session.jsonl"),
+                target_size=source.stat().st_size,
+                start_byte_offset=start_byte_offset,
+                next_record_ordinal=next_record_ordinal,
+                next_source_line=next_source_line,
+            )
+
+    def test_partial_resumed_suffix_preserves_next_coordinates(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "session.jsonl"
+        committed = b'{"text":"committed"}\n'
+        source.write_bytes(committed + b'{"text":')
+
+        result = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("session.jsonl"),
+            target_size=source.stat().st_size,
+            start_byte_offset=len(committed),
+            next_record_ordinal=1,
+            next_source_line=2,
+        )
+
+        assert result.envelopes == ()
+        assert result.next_source_byte_offset == len(committed)
+        assert result.next_record_ordinal == 1
+        assert result.next_source_line == 2
+        diagnostic = result.diagnostics[0]
+        assert diagnostic.record_ordinal == 1
+        assert diagnostic.source_line == 2
+        assert diagnostic.source_byte_offset == len(committed)
+
+    def test_resumed_unreadable_source_diagnostic_uses_absolute_coordinates(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "directory.jsonl"
+        source.mkdir()
+
+        result = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("session.jsonl"),
+            target_size=12,
+            start_byte_offset=8,
+            next_record_ordinal=2,
+            next_source_line=3,
+        )
+
+        diagnostic = result.diagnostics[0]
+        assert diagnostic.code is SourceDiagnosticCode.UNREADABLE_SOURCE
+        assert diagnostic.record_ordinal == 2
+        assert diagnostic.source_line == 3
+        assert diagnostic.source_byte_offset == 8
+
     @pytest.mark.parametrize(
         "source_file_relative",
         [Path("../outside.jsonl"), Path("project/../../outside.jsonl")],

@@ -17,6 +17,7 @@ from cc_search_chats.core.identity import (
 )
 from cc_search_chats.providers.codex import (
     CodexDiagnosticCode,
+    CodexParserState,
     CodexSessionContext,
     parse_codex_session,
 )
@@ -87,6 +88,300 @@ def parse_fixture(name: str, *, session_id: str, target_size: int | None = None)
 
 
 class TestCodexSchemaFamilies:
+    def test_suffix_resumes_kind_and_pairs_trailing_projection(self) -> None:
+        prefix_records = sequential_envelopes(
+            {
+                "type": "session_meta",
+                "payload": {"id": "append-session", "source": "cli"},
+            },
+            {
+                "timestamp": "2026-08-11T09:00:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "response-id",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "paired text"}],
+                },
+            },
+        )
+        prefix = parse_codex_session(
+            prefix_records,
+            context=CodexSessionContext(source_session_id="append-session"),
+        )
+        suffix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:01Z",
+                        "type": "event_msg",
+                        "payload": {"type": "agent_message", "message": "paired text"},
+                    },
+                    ordinal=2,
+                    source_byte_offset=500,
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="append-session"),
+            prior_state=prefix.next_state,
+        )
+
+        assert prefix.next_state.session_kind is SessionKind.PRIMARY
+        assert prefix.next_state.trailing_candidate is not None
+        assert suffix.session_kind is SessionKind.PRIMARY
+        assert len(suffix.messages) == 1
+        assert len(suffix.messages[0].identity.physical_aliases) == 2
+        assert suffix.canonicalization_diagnostics == ()
+        assert suffix.next_state.trailing_candidate is None
+
+    def test_compaction_clears_cross_append_pairing_carry(self) -> None:
+        prefix = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "boundary-session", "source": "cli"},
+                },
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": "before-boundary",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "same text"}
+                        ],
+                    },
+                },
+            ),
+            context=CodexSessionContext(source_session_id="boundary-session"),
+        )
+        suffix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:01Z",
+                        "type": "compacted",
+                        "payload": {"message": "summary", "replacement_history": []},
+                    },
+                    ordinal=2,
+                    source_byte_offset=500,
+                ),
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:02Z",
+                        "type": "event_msg",
+                        "payload": {"type": "agent_message", "message": "same text"},
+                    },
+                    ordinal=3,
+                    source_byte_offset=700,
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="boundary-session"),
+            prior_state=prefix.next_state,
+        )
+
+        combined = (*prefix.messages, *suffix.messages)
+        assert len(combined) == 2
+        assert [message.conversation_epoch for message in combined] == [0, 1]
+        assert all(len(message.identity.physical_aliases) == 1 for message in combined)
+        assert suffix.next_state.next_conversation_epoch == 1
+        assert suffix.next_state.trailing_candidate is not None
+        assert suffix.next_state.trailing_candidate.message.conversation_epoch == 1
+
+    def test_duplicate_compaction_in_later_suffix_does_not_advance_twice(
+        self,
+    ) -> None:
+        compaction = {
+            "timestamp": "2026-08-11T09:00:00Z",
+            "type": "compacted",
+            "payload": {"message": "summary", "replacement_history": []},
+        }
+        prefix = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "duplicate-session", "source": "cli"},
+                },
+                compaction,
+            ),
+            context=CodexSessionContext(source_session_id="duplicate-session"),
+        )
+
+        suffix = parse_codex_session(
+            (envelope(compaction, ordinal=2, source_byte_offset=500),),
+            context=CodexSessionContext(source_session_id="duplicate-session"),
+            prior_state=prefix.next_state,
+        )
+
+        assert suffix.boundaries == ()
+        assert [diagnostic.code for diagnostic in suffix.diagnostics] == [
+            CodexDiagnosticCode.DUPLICATE_COMPACTION
+        ]
+        assert suffix.next_state.next_conversation_epoch == 1
+
+    def test_changed_session_kind_in_suffix_fails_closed(self) -> None:
+        prefix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "kind-session", "source": "cli"},
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="kind-session"),
+        )
+        suffix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "kind-session",
+                            "source": {
+                                "subagent": {
+                                    "thread_spawn": {
+                                        "parent_thread_id": "parent",
+                                        "depth": 1,
+                                    }
+                                }
+                            },
+                        },
+                    },
+                    ordinal=1,
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="kind-session"),
+            prior_state=prefix.next_state,
+        )
+
+        assert suffix.session_kind is SessionKind.UNKNOWN
+        assert suffix.next_state.session_kind is SessionKind.PRIMARY
+        assert CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE in {
+            diagnostic.code for diagnostic in suffix.diagnostics
+        }
+
+    def test_changed_kind_cannot_pair_with_established_trailing_candidate(
+        self,
+    ) -> None:
+        prefix = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "kind-pair-session", "source": "cli"},
+                },
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": "response-id",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "same"}],
+                    },
+                },
+            ),
+            context=CodexSessionContext(source_session_id="kind-pair-session"),
+        )
+        suffix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "kind-pair-session",
+                            "source": {
+                                "subagent": {
+                                    "thread_spawn": {
+                                        "parent_thread_id": "parent",
+                                        "depth": 1,
+                                    }
+                                }
+                            },
+                        },
+                    },
+                    ordinal=2,
+                ),
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:01Z",
+                        "type": "event_msg",
+                        "payload": {"type": "agent_message", "message": "same"},
+                    },
+                    ordinal=3,
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="kind-pair-session"),
+            prior_state=prefix.next_state,
+        )
+
+        assert suffix.session_kind is SessionKind.UNKNOWN
+        assert len(suffix.messages) == 1
+        assert len(suffix.messages[0].identity.physical_aliases) == 1
+        assert suffix.next_state.session_kind is SessionKind.PRIMARY
+        assert suffix.next_state.trailing_candidate is None
+
+    def test_append_ambiguity_is_diagnostic_and_not_carried_forward(self) -> None:
+        prefix = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "ambiguous-session", "source": "cli"},
+                },
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": "response-id",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ambiguous"}],
+                    },
+                },
+            ),
+            context=CodexSessionContext(source_session_id="ambiguous-session"),
+        )
+        suffix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:01Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": "ambiguous",
+                        },
+                    },
+                    ordinal=2,
+                ),
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:02Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": "ambiguous",
+                        },
+                    },
+                    ordinal=3,
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="ambiguous-session"),
+            prior_state=prefix.next_state,
+        )
+
+        assert len(suffix.messages) == 2
+        assert CanonicalizationDiagnosticCode.MULTIPLE_COMPATIBLE_PARTNERS in {
+            diagnostic.code for diagnostic in suffix.canonicalization_diagnostics
+        }
+        assert suffix.next_state.trailing_candidate is None
+
+    def test_rejects_malformed_codex_continuation(self) -> None:
+        with pytest.raises(ValueError, match="next_conversation_epoch"):
+            CodexParserState(next_conversation_epoch=-1)
+        with pytest.raises(ValueError, match="SHA-256"):
+            CodexParserState(seen_compaction_digests=("not-a-digest",))
+
     def test_legacy_primary_canonicalizes_duplicates_and_separates_tools(self) -> None:
         result = parse_fixture(
             "codex_legacy_primary_046.jsonl", session_id="codex-legacy-primary"

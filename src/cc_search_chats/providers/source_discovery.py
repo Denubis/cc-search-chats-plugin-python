@@ -70,6 +70,9 @@ class BoundedReadResult:
     diagnostics: tuple[SourceDiagnostic, ...]
     target_size: int
     final_size: int | None
+    next_source_byte_offset: int
+    next_record_ordinal: int
+    next_source_line: int
 
     @property
     def pending_bytes(self) -> int | None:
@@ -131,6 +134,7 @@ def _record_diagnostic(
     path: Path,
     detail: str,
     ordinal: int,
+    source_line: int,
     offset: int,
 ) -> SourceDiagnostic:
     """Build a diagnostic at one zero-based complete-record coordinate."""
@@ -139,7 +143,7 @@ def _record_diagnostic(
         path,
         detail,
         record_ordinal=ordinal,
-        source_line=ordinal + 1,
+        source_line=source_line,
         source_byte_offset=offset,
     )
 
@@ -149,6 +153,9 @@ def read_bounded_jsonl(
     *,
     source_file_relative: Path,
     target_size: int,
+    start_byte_offset: int = 0,
+    next_record_ordinal: int = 0,
+    next_source_line: int = 1,
 ) -> BoundedReadResult:
     """Read complete JSONL records ending at or before ``target_size``.
 
@@ -156,17 +163,28 @@ def read_bounded_jsonl(
     delimiter. A fragment without a terminating newline is diagnostic only and
     does not consume an ordinal.
     """
+    coordinates = (start_byte_offset, next_record_ordinal, next_source_line)
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in coordinates):
+        raise ValueError("resume coordinates must be integers")
     if target_size < 0:
         raise ValueError("target_size must be nonnegative")
+    if start_byte_offset < 0 or next_record_ordinal < 0 or next_source_line < 1:
+        raise ValueError("resume coordinates must be nonnegative with a one-based line")
+    if next_source_line != next_record_ordinal + 1:
+        raise ValueError("resume coordinates require source line = record ordinal + 1")
+    if start_byte_offset > target_size:
+        raise ValueError("start_byte_offset cannot exceed target_size")
     validate_source_file_relative(source_file_relative)
 
     envelopes: list[RecordEnvelope] = []
     diagnostics: list[SourceDiagnostic] = []
-    offset = 0
-    ordinal = 0
+    offset = start_byte_offset
+    ordinal = next_record_ordinal
+    source_line = next_source_line
 
     try:
         with path.open("rb") as handle:
+            handle.seek(start_byte_offset)
             while offset < target_size:
                 line = handle.readline(target_size - offset)
                 if not line:
@@ -176,6 +194,7 @@ def read_bounded_jsonl(
                             path,
                             "source ended before the captured target size",
                             ordinal,
+                            source_line,
                             offset,
                         )
                     )
@@ -187,6 +206,7 @@ def read_bounded_jsonl(
                             path,
                             "captured target ends with an incomplete JSONL record",
                             ordinal,
+                            source_line,
                             offset,
                         )
                     )
@@ -198,7 +218,7 @@ def read_bounded_jsonl(
                 envelope = RecordEnvelope(
                     source_file_relative=source_file_relative,
                     record_ordinal=ordinal,
-                    source_line=ordinal + 1,
+                    source_line=source_line,
                     source_byte_offset=offset,
                     raw_bytes=record_bytes,
                     raw_byte_length=len(record_bytes),
@@ -214,17 +234,22 @@ def read_bounded_jsonl(
                             path,
                             f"complete record is not valid JSON: {error}",
                             ordinal,
+                            source_line,
                             offset,
                         )
                     )
                 offset += len(line)
                 ordinal += 1
+                source_line += 1
     except OSError as error:
         diagnostics.append(
             _diagnostic(
                 SourceDiagnosticCode.UNREADABLE_SOURCE,
                 path,
                 f"source could not be read: {error}",
+                record_ordinal=ordinal,
+                source_line=source_line,
+                source_byte_offset=offset,
             )
         )
 
@@ -237,6 +262,9 @@ def read_bounded_jsonl(
         diagnostics=tuple(diagnostics),
         target_size=target_size,
         final_size=final_size,
+        next_source_byte_offset=offset,
+        next_record_ordinal=ordinal,
+        next_source_line=source_line,
     )
 
 

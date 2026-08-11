@@ -17,6 +17,7 @@ from cc_search_chats.core.identity import (
 )
 from cc_search_chats.providers.claude import (
     ClaudeDiagnosticCode,
+    ClaudeParserState,
     ClaudeSessionContext,
     parse_claude_session,
 )
@@ -77,6 +78,71 @@ def parse_fixture(
 
 
 class TestClaudeRecognizedShapes:
+    def test_resumes_conversation_epoch_from_explicit_state(self) -> None:
+        boundary_payload = {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "boundary-uuid",
+            "timestamp": "2026-08-11T09:00:00Z",
+            "compactMetadata": {"trigger": "auto", "preTokens": 50},
+        }
+        prefix = parse_claude_session(
+            (envelope(boundary_payload),),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+        suffix_payload = {
+            "type": "assistant",
+            "uuid": "after-boundary",
+            "timestamp": "2026-08-11T09:00:01Z",
+            "message": {"role": "assistant", "content": "after boundary"},
+        }
+
+        suffix = parse_claude_session(
+            (envelope(suffix_payload),),
+            context=ClaudeSessionContext(source_session_id="session"),
+            prior_state=prefix.next_state,
+        )
+
+        assert prefix.next_state == ClaudeParserState(
+            next_conversation_epoch=1,
+            seen_compaction_uuids=("boundary-uuid",),
+        )
+        assert [message.conversation_epoch for message in suffix.messages] == [1]
+        assert suffix.next_state == prefix.next_state
+
+    def test_duplicate_compaction_in_later_suffix_does_not_advance_twice(
+        self,
+    ) -> None:
+        boundary_payload = {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "duplicate-boundary",
+            "timestamp": "2026-08-11T09:00:00Z",
+            "compactMetadata": {"trigger": "auto", "preTokens": 50},
+        }
+        prefix = parse_claude_session(
+            (envelope(boundary_payload),),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        suffix = parse_claude_session(
+            (envelope(boundary_payload),),
+            context=ClaudeSessionContext(source_session_id="session"),
+            prior_state=prefix.next_state,
+        )
+
+        assert suffix.boundaries == ()
+        assert [diagnostic.code for diagnostic in suffix.diagnostics] == [
+            ClaudeDiagnosticCode.DUPLICATE_COMPACT_BOUNDARY
+        ]
+        assert suffix.next_state == prefix.next_state
+
+    def test_rejects_malformed_claude_continuation(self) -> None:
+        with pytest.raises(ValueError, match="next_conversation_epoch"):
+            ClaudeParserState(next_conversation_epoch=-1)
+        with pytest.raises(ValueError, match="seen_compaction_uuids"):
+            ClaudeParserState(seen_compaction_uuids=("bad:uuid",))
+
     def test_primary_fixture_emits_visible_prose_and_distinct_tool_rows(self) -> None:
         result = parse_fixture(
             "claude_primary.jsonl",

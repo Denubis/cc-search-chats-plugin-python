@@ -9,6 +9,8 @@ from typing import TypeIs
 
 from cc_search_chats.core.canonicalization import (
     CanonicalizationDiagnostic,
+    CanonicalizationDiagnosticCode,
+    CanonicalizationResult,
     CodexRecordFamily,
     PhysicalMessageCandidate,
     canonicalize_codex_candidates,
@@ -126,6 +128,63 @@ class CodexSessionContext:
 
 
 @dataclass(frozen=True, slots=True)
+class CodexParserState:
+    """Immutable Codex state required to parse only an appended suffix."""
+
+    next_conversation_epoch: int = 0
+    session_kind: SessionKind | None = None
+    seen_compaction_digests: tuple[str, ...] = ()
+    trailing_candidate: PhysicalMessageCandidate | None = None
+
+    def __post_init__(self) -> None:
+        """Reject malformed or cross-epoch persisted parser state."""
+        if (
+            isinstance(self.next_conversation_epoch, bool)
+            or not isinstance(self.next_conversation_epoch, int)
+            or self.next_conversation_epoch < 0
+        ):
+            raise ValueError("next_conversation_epoch must be a nonnegative integer")
+        if self.session_kind is not None and not isinstance(
+            self.session_kind, SessionKind
+        ):
+            raise ValueError("session_kind must be a SessionKind or None")
+        if not isinstance(self.seen_compaction_digests, tuple) or any(
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or not set(digest) <= set("0123456789abcdef")
+            for digest in self.seen_compaction_digests
+        ):
+            raise ValueError("seen_compaction_digests must contain SHA-256 hex strings")
+        if len(set(self.seen_compaction_digests)) != len(
+            self.seen_compaction_digests
+        ):
+            raise ValueError("seen_compaction_digests must be unique")
+        candidate = self.trailing_candidate
+        if candidate is None:
+            return
+        if not isinstance(candidate, PhysicalMessageCandidate):
+            raise ValueError("trailing_candidate must be a physical message candidate")
+        message = candidate.message
+        if (
+            candidate.record_family
+            not in {
+                CodexRecordFamily.RESPONSE_MESSAGE,
+                CodexRecordFamily.EVENT_MESSAGE,
+            }
+            or message.content_class is not ContentClass.PROSE
+            or message.conversation_epoch != self.next_conversation_epoch
+            or len(message.identity.physical_aliases) != 1
+            or message.identity.canonical_locator.provider is not Provider.CODEX
+            or self.session_kind is None
+            or message.session_kind is not self.session_kind
+        ):
+            raise ValueError(
+                "trailing_candidate must be one unpaired Codex prose projection "
+                "in the continuation epoch and session kind"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class CodexParseResult:
     """Canonical messages plus retained physical and diagnostic outcomes."""
 
@@ -135,6 +194,7 @@ class CodexParseResult:
     boundaries: tuple[SessionEpochBoundary, ...]
     diagnostics: tuple[CodexDiagnostic, ...]
     canonicalization_diagnostics: tuple[CanonicalizationDiagnostic, ...]
+    next_state: CodexParserState
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +333,33 @@ def _session_kind(
     if not kinds or len(set(kinds)) != 1 or diagnostics:
         return SessionKind.UNKNOWN, tuple(diagnostics)
     return kinds[0], tuple(diagnostics)
+
+
+def _continued_session_kind(
+    records: tuple[_DecodedRecord, ...],
+    context: CodexSessionContext,
+    established: SessionKind | None,
+) -> tuple[SessionKind, tuple[CodexDiagnostic, ...]]:
+    """Use an established kind when a suffix omits session metadata."""
+    if established is None:
+        return _session_kind(records, context)
+    metadata = tuple(
+        record for record in records if record.payload.get("type") == "session_meta"
+    )
+    if not metadata:
+        return established, ()
+    observed, diagnostics = _session_kind(metadata, context)
+    if observed is established and not diagnostics:
+        return established, ()
+    if diagnostics:
+        return SessionKind.UNKNOWN, diagnostics
+    return SessionKind.UNKNOWN, (
+        _diagnostic(
+            CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE,
+            metadata[0].envelope,
+            "session_meta changes the established continuation session kind",
+        ),
+    )
 
 
 def _locator_safe_id(value: object) -> str | None:
@@ -782,15 +869,106 @@ def _inter_agent_metadata_shape(record: _DecodedRecord) -> bool:
     )
 
 
+def _candidate_alias(candidate: PhysicalMessageCandidate) -> PhysicalAlias:
+    """Return the sole physical occurrence of an unpaired parser candidate."""
+    return candidate.message.identity.physical_aliases[0]
+
+
+def _messages_touching_new_candidates(
+    canonical: CanonicalizationResult,
+    candidates: tuple[PhysicalMessageCandidate, ...],
+) -> tuple[NativeMessage, ...]:
+    """Return only canonical rows created or changed by this parsed suffix."""
+    aliases = {_candidate_alias(candidate) for candidate in candidates}
+    return tuple(
+        message
+        for message in canonical.messages
+        if aliases.intersection(message.identity.physical_aliases)
+    )
+
+
+def _diagnostics_touching_new_candidates(
+    canonical: CanonicalizationResult,
+    candidates: tuple[PhysicalMessageCandidate, ...],
+) -> tuple[CanonicalizationDiagnostic, ...]:
+    """Avoid re-emitting a prior suffix's already-recorded non-pairing outcome."""
+    aliases = {_candidate_alias(candidate) for candidate in candidates}
+    return tuple(
+        diagnostic
+        for diagnostic in canonical.diagnostics
+        if aliases.intersection(diagnostic.physical_aliases)
+    )
+
+
+def _next_trailing_candidate(
+    canonical: CanonicalizationResult,
+    candidates: tuple[PhysicalMessageCandidate, ...],
+    conversation_epoch: int,
+) -> PhysicalMessageCandidate | None:
+    """Carry only the last still-unpaired projection in the current epoch."""
+    current = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.message.conversation_epoch == conversation_epoch
+        and candidate.record_family
+        in {
+            CodexRecordFamily.RESPONSE_MESSAGE,
+            CodexRecordFamily.EVENT_MESSAGE,
+        }
+    )
+    if not current:
+        return None
+    candidate = max(
+        current,
+        key=lambda value: (
+            _candidate_alias(value).source_file_relative.as_posix(),
+            _candidate_alias(value).record_ordinal,
+            _candidate_alias(value).source_byte_offset,
+        ),
+    )
+    alias = _candidate_alias(candidate)
+    canonical_message = next(
+        message
+        for message in canonical.messages
+        if alias in message.identity.physical_aliases
+    )
+    if len(canonical_message.identity.physical_aliases) != 1:
+        return None
+    diagnostic = next(
+        (
+            value
+            for value in canonical.diagnostics
+            if alias in value.physical_aliases
+        ),
+        None,
+    )
+    if (
+        diagnostic is None
+        or diagnostic.code is not CanonicalizationDiagnosticCode.NO_COMPATIBLE_PARTNER
+    ):
+        return None
+    return candidate
+
+
 def parse_codex_session(
     envelopes: tuple[RecordEnvelope, ...],
     *,
     context: CodexSessionContext,
     source_diagnostics: tuple[SourceDiagnostic, ...] = (),
+    prior_state: CodexParserState | None = None,
 ) -> CodexParseResult:
     """Adapt bounded Codex envelopes and canonicalize physical projections."""
+    if prior_state is not None and not isinstance(prior_state, CodexParserState):
+        raise TypeError("prior_state must be CodexParserState or None")
+    state = prior_state if prior_state is not None else CodexParserState()
     records, decode_diagnostics = _decode_records(tuple(envelopes))
-    session_kind, kind_diagnostics = _session_kind(records, context)
+    session_kind, kind_diagnostics = _continued_session_kind(
+        records, context, state.session_kind
+    )
+    if state.trailing_candidate is not None:
+        carry_locator = state.trailing_candidate.message.identity.canonical_locator
+        if carry_locator.source_session_id != context.source_session_id:
+            raise ValueError("trailing_candidate belongs to a different source session")
     candidates: list[PhysicalMessageCandidate] = []
     boundaries: list[SessionEpochBoundary] = []
     diagnostics = [
@@ -798,8 +976,8 @@ def parse_codex_session(
         *kind_diagnostics,
         *_source_diagnostics(tuple(source_diagnostics)),
     ]
-    conversation_epoch = 0
-    seen_compaction_digests: set[str] = set()
+    conversation_epoch = state.next_conversation_epoch
+    seen_compaction_digests = set(state.seen_compaction_digests)
 
     for record in records:
         outer_type = record.payload.get("type")
@@ -896,11 +1074,27 @@ def parse_codex_session(
                 )
             )
 
-    canonical = canonicalize_codex_candidates(tuple(candidates))
+    new_candidates = tuple(candidates)
+    established_kind = (
+        state.session_kind if state.session_kind is not None else session_kind
+    )
+    compatible_carry = (
+        state.trailing_candidate if session_kind is established_kind else None
+    )
+    candidates_with_carry = (
+        *((compatible_carry,) if compatible_carry is not None else ()),
+        *new_candidates,
+    )
+    canonical = canonicalize_codex_candidates(candidates_with_carry)
+    next_candidate = (
+        _next_trailing_candidate(canonical, candidates_with_carry, conversation_epoch)
+        if session_kind is established_kind
+        else None
+    )
     return CodexParseResult(
         session_kind=session_kind,
-        messages=canonical.messages,
-        physical_candidates=tuple(candidates),
+        messages=_messages_touching_new_candidates(canonical, new_candidates),
+        physical_candidates=new_candidates,
         boundaries=tuple(boundaries),
         diagnostics=tuple(
             sorted(
@@ -912,5 +1106,13 @@ def parse_codex_session(
                 ),
             )
         ),
-        canonicalization_diagnostics=canonical.diagnostics,
+        canonicalization_diagnostics=_diagnostics_touching_new_candidates(
+            canonical, new_candidates
+        ),
+        next_state=CodexParserState(
+            next_conversation_epoch=conversation_epoch,
+            session_kind=established_kind,
+            seen_compaction_digests=tuple(sorted(seen_compaction_digests)),
+            trailing_candidate=next_candidate,
+        ),
     )
