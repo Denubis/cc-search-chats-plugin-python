@@ -159,6 +159,36 @@ class TestBoundedJsonlRead:
 
 
 class TestProviderDiscovery:
+    def test_nested_traversal_failure_is_reported_while_siblings_continue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        readable = tmp_path / "readable"
+        readable.mkdir()
+        (readable / "valid.jsonl").write_text('{"type":"user"}\n')
+        unreadable = tmp_path / "unreadable"
+        unreadable.mkdir()
+        (unreadable / "hidden.jsonl").write_text('{"type":"assistant"}\n')
+        original_scandir = os.scandir
+
+        def fail_one_nested_directory(path: os.PathLike[str] | str):
+            if Path(path) == unreadable:
+                raise PermissionError("injected nested traversal denial")
+            return original_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", fail_one_nested_directory)
+
+        result = discover_claude_sources(tmp_path.resolve())
+
+        assert result.provider is Provider.CLAUDE
+        assert [source.source_file_relative for source in result.sources] == [
+            Path("readable/valid.jsonl")
+        ]
+        assert len(result.diagnostics) == 1
+        diagnostic = result.diagnostics[0]
+        assert diagnostic.code is SourceDiagnosticCode.UNREADABLE_PATH
+        assert diagnostic.path == unreadable
+        assert "injected nested traversal denial" in diagnostic.detail
+
     def test_claude_discovers_top_level_and_subagent_sources(
         self, tmp_path: Path
     ) -> None:

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import subprocess
+from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -30,6 +31,7 @@ class SourceDiagnosticCode(StrEnum):
     SOURCE_TRUNCATED = "source_truncated"
     MISSING_ROOT = "missing_root"
     UNREADABLE_ROOT = "unreadable_root"
+    UNREADABLE_PATH = "unreadable_path"
     NON_NATIVE_AGY = "non_native_agy"
     NON_NATIVE_TRANSPORT_ARCHIVE = "non_native_transport_archive"
     GIT_PROBE_FAILED = "git_probe_failed"
@@ -355,10 +357,12 @@ def _discover(
     provider: Provider,
     root: Path,
     candidate_paths: tuple[Path, ...],
+    archive_paths: tuple[Path, ...],
+    traversal_diagnostics: tuple[SourceDiagnostic, ...],
 ) -> DiscoveryResult:
     """Filter provider-shaped paths while rejecting positive artifact signatures."""
     sources: list[DiscoveredSource] = []
-    diagnostics: list[SourceDiagnostic] = []
+    diagnostics = list(traversal_diagnostics)
     for path in candidate_paths:
         artifact = _positive_non_native_diagnostic(path)
         if artifact is not None:
@@ -372,7 +376,7 @@ def _discover(
             )
         )
 
-    for archive in sorted((*root.rglob("*.md"), *root.rglob("*.json"))):
+    for archive in archive_paths:
         diagnostics.append(_archive_diagnostic(archive))
 
     return DiscoveryResult(
@@ -381,6 +385,55 @@ def _discover(
         sources=tuple(sources),
         diagnostics=tuple(diagnostics),
     )
+
+
+def _walk_regular_files(
+    root: Path,
+) -> tuple[tuple[Path, ...], tuple[SourceDiagnostic, ...]]:
+    """Walk ``root`` deterministically and report every traversal failure."""
+    pending = deque([root])
+    files: list[Path] = []
+    diagnostics: list[SourceDiagnostic] = []
+
+    while pending:
+        directory = pending.popleft()
+        try:
+            with os.scandir(directory) as entries:
+                ordered_entries = sorted(entries, key=lambda entry: entry.name)
+        except OSError as error:
+            code = (
+                SourceDiagnosticCode.UNREADABLE_ROOT
+                if directory == root
+                else SourceDiagnosticCode.UNREADABLE_PATH
+            )
+            diagnostics.append(
+                _diagnostic(
+                    code,
+                    directory,
+                    f"directory could not be traversed: {error}",
+                )
+            )
+            continue
+
+        child_directories: list[Path] = []
+        for entry in ordered_entries:
+            path = Path(entry.path)
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    child_directories.append(path)
+                elif entry.is_file(follow_symlinks=True):
+                    files.append(path)
+            except OSError as error:
+                diagnostics.append(
+                    _diagnostic(
+                        SourceDiagnosticCode.UNREADABLE_PATH,
+                        path,
+                        f"path could not be inspected during traversal: {error}",
+                    )
+                )
+        pending.extend(child_directories)
+
+    return tuple(sorted(files)), tuple(diagnostics)
 
 
 def _is_codex_rollout(path: Path, root: Path) -> bool:
@@ -405,23 +458,25 @@ def _discover_provider_sources(
     failure = _root_failure(provider, resolved_root)
     if failure is not None:
         return failure
-    try:
-        if provider is Provider.CLAUDE:
-            candidates = tuple(sorted(resolved_root.rglob("*.jsonl")))
-        else:
-            candidates = tuple(
-                path
-                for path in sorted(resolved_root.rglob("rollout-*.jsonl"))
-                if _is_codex_rollout(path, resolved_root)
-            )
-    except OSError as error:
-        return _discovery_failure(
-            provider,
-            resolved_root,
-            SourceDiagnosticCode.UNREADABLE_ROOT,
-            f"configured provider root could not be traversed: {error}",
+    files, traversal_diagnostics = _walk_regular_files(resolved_root)
+    if provider is Provider.CLAUDE:
+        candidates = tuple(path for path in files if path.suffix == ".jsonl")
+    else:
+        candidates = tuple(
+            path
+            for path in files
+            if path.name.startswith("rollout-")
+            and path.suffix == ".jsonl"
+            and _is_codex_rollout(path, resolved_root)
         )
-    return _discover(provider, resolved_root, candidates)
+    archives = tuple(path for path in files if path.suffix in {".md", ".json"})
+    return _discover(
+        provider,
+        resolved_root,
+        candidates,
+        archives,
+        traversal_diagnostics,
+    )
 
 
 def discover_claude_sources(resolved_root: Path) -> DiscoveryResult:
