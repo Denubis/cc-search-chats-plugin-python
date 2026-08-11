@@ -1,12 +1,15 @@
 """Codex physical-alias canonicalization tests."""
 
 import hashlib
+import sys
 from pathlib import Path
+from types import FrameType
 
 import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import cc_search_chats.core.canonicalization as canonicalization_module
 from cc_search_chats.core.canonicalization import (
     CanonicalizationDiagnosticCode,
     CodexRecordFamily,
@@ -142,6 +145,10 @@ class TestCanonicalPairing:
 
         assert len(result.messages) == 2
         assert output_aliases(result.messages) == aliases(values)
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CanonicalizationDiagnosticCode.NO_COMPATIBLE_PARTNER,
+            CanonicalizationDiagnosticCode.NO_COMPATIBLE_PARTNER,
+        ]
 
     def test_timestamp_order_must_match_physical_record_order(self) -> None:
         values = (
@@ -163,6 +170,10 @@ class TestCanonicalPairing:
 
         assert len(result.messages) == 2
         assert output_aliases(result.messages) == aliases(values)
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CanonicalizationDiagnosticCode.NO_COMPATIBLE_PARTNER,
+            CanonicalizationDiagnosticCode.NO_COMPATIBLE_PARTNER,
+        ]
 
     def test_fallback_identity_is_stable_when_second_alias_arrives(self) -> None:
         response = candidate(
@@ -310,6 +321,41 @@ class TestCanonicalPairing:
             diagnostic.code for diagnostic in result.diagnostics
         }
 
+    def test_repeated_identical_text_preserves_every_ambiguous_candidate(self) -> None:
+        values = (
+            candidate(
+                ordinal=1,
+                family=CodexRecordFamily.RESPONSE_MESSAGE,
+                text="repeated",
+            ),
+            candidate(
+                ordinal=2,
+                family=CodexRecordFamily.EVENT_MESSAGE,
+                text="repeated",
+            ),
+            candidate(
+                ordinal=3,
+                family=CodexRecordFamily.RESPONSE_MESSAGE,
+                text="repeated",
+            ),
+            candidate(
+                ordinal=4,
+                family=CodexRecordFamily.EVENT_MESSAGE,
+                text="repeated",
+            ),
+        )
+
+        result = canonicalize_codex_candidates(values)
+
+        assert len(result.messages) == 4
+        assert output_aliases(result.messages) == aliases(values)
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CanonicalizationDiagnosticCode.MULTIPLE_COMPATIBLE_PARTNERS,
+            CanonicalizationDiagnosticCode.MULTIPLE_COMPATIBLE_PARTNERS,
+            CanonicalizationDiagnosticCode.MULTIPLE_COMPATIBLE_PARTNERS,
+            CanonicalizationDiagnosticCode.MULTIPLE_COMPATIBLE_PARTNERS,
+        ]
+
     def test_intervening_visible_message_prevents_text_pairing(self) -> None:
         values = (
             candidate(
@@ -334,6 +380,11 @@ class TestCanonicalPairing:
 
         assert len(result.messages) == 3
         assert output_aliases(result.messages) == aliases(values)
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CanonicalizationDiagnosticCode.NO_COMPATIBLE_PARTNER,
+            CanonicalizationDiagnosticCode.NO_COMPATIBLE_PARTNER,
+            CanonicalizationDiagnosticCode.NO_COMPATIBLE_PARTNER,
+        ]
 
     def test_compatible_shapes_across_boundary_epochs_remain_two_messages(self) -> None:
         values = (
@@ -377,6 +428,67 @@ class TestCanonicalPairing:
 
         assert len(result.messages) == 2
         assert output_aliases(result.messages) == aliases(values)
+
+
+def _compatibility_comparison_count(
+    values: tuple[PhysicalMessageCandidate, ...],
+) -> int:
+    """Count calls at the exact compatibility-inspection boundary."""
+    calls = 0
+    compatibility_code = canonicalization_module._base_compatible.__code__
+    previous_profile = sys.getprofile()
+
+    def count_call(frame: FrameType, event: str, arg: object) -> None:
+        del arg
+        nonlocal calls
+        if event == "call" and frame.f_code is compatibility_code:
+            calls += 1
+
+    try:
+        sys.setprofile(count_call)
+        canonicalize_codex_candidates(values)
+    finally:
+        sys.setprofile(previous_profile)
+    return calls
+
+
+def test_compatibility_work_is_bounded_by_exact_fact_buckets() -> None:
+    pair_count = 128
+    values = tuple(
+        item
+        for index in range(pair_count)
+        for item in (
+            candidate(
+                ordinal=index * 2,
+                family=CodexRecordFamily.RESPONSE_MESSAGE,
+                text=f"unique-{index}",
+            ),
+            candidate(
+                ordinal=index * 2 + 1,
+                family=CodexRecordFamily.EVENT_MESSAGE,
+                text=f"unique-{index}",
+            ),
+        )
+    )
+    larger_values = tuple(
+        item
+        for index in range(pair_count * 2)
+        for item in (
+            candidate(
+                ordinal=index * 2,
+                family=CodexRecordFamily.RESPONSE_MESSAGE,
+                text=f"unique-{index}",
+            ),
+            candidate(
+                ordinal=index * 2 + 1,
+                family=CodexRecordFamily.EVENT_MESSAGE,
+                text=f"unique-{index}",
+            ),
+        )
+    )
+
+    assert _compatibility_comparison_count(values) == pair_count
+    assert _compatibility_comparison_count(larger_values) == pair_count * 2
 
 
 generated_text = st.text(min_size=1, max_size=100)

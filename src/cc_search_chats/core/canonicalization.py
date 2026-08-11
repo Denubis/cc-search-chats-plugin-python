@@ -3,9 +3,12 @@
 # pattern: Functional Core
 
 import hashlib
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 
 from cc_search_chats.core.identity import (
     ContentClass,
@@ -13,9 +16,15 @@ from cc_search_chats.core.identity import (
     MessageIdentity,
     NativeMessage,
     PhysicalAlias,
+    SessionKind,
     SubmittedBy,
     format_locator,
 )
+
+type _CompatibilityKey = tuple[
+    str, Path, SessionKind, int, str, ContentClass, str
+]
+type _VisibilityBoundary = tuple[str, Path, int]
 
 
 class CodexRecordFamily(StrEnum):
@@ -158,29 +167,97 @@ def _base_compatible(
     )
 
 
+def _compatibility_key(candidate: PhysicalMessageCandidate) -> _CompatibilityKey:
+    """Return exact pair facts that can exclude unrelated candidates."""
+    message = candidate.message
+    alias = min(message.identity.physical_aliases, key=_alias_key)
+    return (
+        message.identity.canonical_locator.source_session_id,
+        alias.source_file_relative,
+        message.session_kind,
+        message.conversation_epoch,
+        message.role,
+        message.content_class,
+        message.text,
+    )
+
+
+def _compatibility_pairs(
+    candidates: tuple[PhysicalMessageCandidate, ...],
+) -> Iterator[tuple[PhysicalMessageCandidate, PhysicalMessageCandidate]]:
+    """Plan only cross-family comparisons within exact-fact collision buckets."""
+    buckets: dict[
+        _CompatibilityKey,
+        tuple[list[PhysicalMessageCandidate], list[PhysicalMessageCandidate]],
+    ] = {}
+    for candidate in candidates:
+        response_candidates, event_candidates = buckets.setdefault(
+            _compatibility_key(candidate), ([], [])
+        )
+        if candidate.record_family is CodexRecordFamily.RESPONSE_MESSAGE:
+            response_candidates.append(candidate)
+        elif candidate.record_family is CodexRecordFamily.EVENT_MESSAGE:
+            event_candidates.append(candidate)
+    for response_candidates, event_candidates in buckets.values():
+        for response in response_candidates:
+            for event in event_candidates:
+                yield response, event
+
+
+def _compatible_partners(
+    candidates: tuple[PhysicalMessageCandidate, ...],
+) -> dict[int, tuple[PhysicalMessageCandidate, ...]]:
+    """Index symmetric compatible partners after exact-fact bucketing."""
+    mutable_partners = {id(candidate): [] for candidate in candidates}
+    for response, event in _compatibility_pairs(candidates):
+        if _base_compatible(response, event):
+            mutable_partners[id(response)].append(event)
+            mutable_partners[id(event)].append(response)
+    return {
+        candidate_id: tuple(candidate_partners)
+        for candidate_id, candidate_partners in mutable_partners.items()
+    }
+
+
+def _visibility_boundary(candidate: PhysicalMessageCandidate) -> _VisibilityBoundary:
+    """Return the exact boundary used by the visible-message separation gate."""
+    alias = min(candidate.message.identity.physical_aliases, key=_alias_key)
+    return (
+        alias.locator.source_session_id,
+        alias.source_file_relative,
+        candidate.message.conversation_epoch,
+    )
+
+
+def _visible_ordinals_by_boundary(
+    candidates: tuple[PhysicalMessageCandidate, ...],
+) -> dict[_VisibilityBoundary, tuple[int, ...]]:
+    """Index sorted visible ordinals once for deterministic range queries."""
+    mutable_ordinals: dict[_VisibilityBoundary, list[int]] = {}
+    for candidate in candidates:
+        if candidate.message.content_class is not ContentClass.PROSE:
+            continue
+        alias = min(candidate.message.identity.physical_aliases, key=_alias_key)
+        mutable_ordinals.setdefault(_visibility_boundary(candidate), []).append(
+            alias.record_ordinal
+        )
+    return {
+        boundary: tuple(sorted(ordinals))
+        for boundary, ordinals in mutable_ordinals.items()
+    }
+
+
 def _has_intervening_visible_message(
     left: PhysicalMessageCandidate,
     right: PhysicalMessageCandidate,
-    candidates: tuple[PhysicalMessageCandidate, ...],
+    visible_ordinals: dict[_VisibilityBoundary, tuple[int, ...]],
 ) -> bool:
-    """Reject a pair separated by another visible occurrence in its epoch."""
+    """Reject a pair with a visible ordinal strictly between its occurrences."""
     left_alias = min(left.message.identity.physical_aliases, key=_alias_key)
     right_alias = min(right.message.identity.physical_aliases, key=_alias_key)
     lower, upper = sorted((left_alias.record_ordinal, right_alias.record_ordinal))
-    for candidate in candidates:
-        if candidate is left or candidate is right:
-            continue
-        message = candidate.message
-        alias = min(message.identity.physical_aliases, key=_alias_key)
-        if (
-            message.content_class is ContentClass.PROSE
-            and alias.locator.source_session_id == left_alias.locator.source_session_id
-            and alias.source_file_relative == left_alias.source_file_relative
-            and message.conversation_epoch == left.message.conversation_epoch
-            and lower < alias.record_ordinal < upper
-        ):
-            return True
-    return False
+    ordinals = visible_ordinals.get(_visibility_boundary(left), ())
+    return bisect_right(ordinals, lower) < bisect_left(ordinals, upper)
 
 
 def _earliest_alias(aliases: tuple[PhysicalAlias, ...]) -> PhysicalAlias:
@@ -279,14 +356,9 @@ def canonicalize_codex_candidates(
             CodexRecordFamily.EVENT_MESSAGE,
         }
     )
-    partners = {
-        id(candidate): tuple(
-            other
-            for other in pairable
-            if other is not candidate and _base_compatible(candidate, other)
-        )
-        for candidate in pairable
-    }
+    partners = _compatible_partners(pairable)
+    pairable_ids = set(partners)
+    visible_ordinals = _visible_ordinals_by_boundary(candidates)
 
     paired: set[int] = set()
     messages: list[NativeMessage] = []
@@ -295,7 +367,7 @@ def canonicalize_codex_candidates(
         candidate_id = id(candidate)
         if candidate_id in paired:
             continue
-        if candidate not in pairable:
+        if candidate_id not in pairable_ids:
             messages.append(candidate.message)
             continue
         compatible = partners[candidate_id]
@@ -305,7 +377,9 @@ def canonicalize_codex_candidates(
             if (
                 len(reciprocal) == 1
                 and reciprocal[0] is candidate
-                and not _has_intervening_visible_message(candidate, partner, candidates)
+                and not _has_intervening_visible_message(
+                    candidate, partner, visible_ordinals
+                )
             ):
                 messages.append(_merge_messages((candidate, partner)))
                 paired.update((candidate_id, id(partner)))
