@@ -34,11 +34,12 @@ def envelope(
     *,
     ordinal: int = 0,
     source_byte_offset: int = 0,
+    source_file_relative: Path = Path("2026/08/11/rollout-synthetic.jsonl"),
 ) -> RecordEnvelope:
     """Build one Task 2 envelope from a synthetic JSON value."""
     raw_bytes = json.dumps(payload, ensure_ascii=False).encode()
     return RecordEnvelope(
-        source_file_relative=Path("2026/08/11/rollout-synthetic.jsonl"),
+        source_file_relative=source_file_relative,
         record_ordinal=ordinal,
         source_line=ordinal + 1,
         source_byte_offset=source_byte_offset,
@@ -87,7 +88,271 @@ def parse_fixture(name: str, *, session_id: str, target_size: int | None = None)
     )
 
 
+def established_unknown_session(session_id: str) -> CodexParserState:
+    """Build prior state for suffix-only record-shape behavior tests."""
+    return CodexParserState(
+        source_session_id=session_id,
+        session_kind=SessionKind.UNKNOWN,
+    )
+
+
 class TestCodexSchemaFamilies:
+    def test_full_parse_uses_native_metadata_identity_not_rollout_filename(
+        self,
+    ) -> None:
+        misleading_path = Path(
+            "2026/08/11/rollout-2026-08-11T09-00-00-filename-session.jsonl"
+        )
+        records = (
+            envelope(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "native-session", "source": "cli"},
+                },
+                source_file_relative=misleading_path,
+            ),
+            envelope(
+                {
+                    "timestamp": "2026-08-11T09:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": "message-id",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "visible"}],
+                    },
+                },
+                ordinal=1,
+                source_byte_offset=100,
+                source_file_relative=misleading_path,
+            ),
+        )
+
+        result = parse_codex_session(records, context=CodexSessionContext())
+
+        assert result.source_session_id == "native-session"
+        assert result.next_state.source_session_id == "native-session"
+        assert {
+            alias.locator.source_session_id
+            for message in result.messages
+            for alias in message.identity.physical_aliases
+        } == {"native-session"}
+        assert "filename-session" not in str(
+            result.messages[0].identity.canonical_locator
+        )
+
+    def test_full_parse_accepts_matching_expected_session_identity(self) -> None:
+        records = sequential_envelopes(
+            {
+                "type": "session_meta",
+                "payload": {"id": "native-session", "source": "cli"},
+            },
+            {
+                "timestamp": "2026-08-11T09:00:01Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "visible"},
+            },
+        )
+
+        result = parse_codex_session(
+            records,
+            context=CodexSessionContext(source_session_id="native-session"),
+        )
+
+        assert result.messages[0].identity.canonical_locator.source_session_id == (
+            "native-session"
+        )
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY not in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
+    def test_expected_session_identity_cannot_override_native_metadata(self) -> None:
+        records = sequential_envelopes(
+            {
+                "type": "session_meta",
+                "payload": {"id": "native-session", "source": "cli"},
+            },
+            {
+                "timestamp": "2026-08-11T09:00:01Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "visible"},
+            },
+        )
+
+        result = parse_codex_session(
+            records,
+            context=CodexSessionContext(source_session_id="caller-session"),
+        )
+
+        assert result.messages == ()
+        assert result.source_session_id is None
+        assert result.next_state.source_session_id is None
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
+    def test_fresh_suffix_without_metadata_or_prior_identity_fails_closed(
+        self,
+    ) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:01Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": "visible",
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="filename-session"),
+        )
+
+        assert result.messages == ()
+        assert result.source_session_id is None
+        assert result.next_state.source_session_id is None
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
+    def test_suffix_uses_established_native_identity_without_session_metadata(
+        self,
+    ) -> None:
+        prefix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "native-session", "source": "cli"},
+                    }
+                ),
+            ),
+            context=CodexSessionContext(),
+        )
+        suffix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:01Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": "visible",
+                        },
+                    },
+                    ordinal=1,
+                    source_byte_offset=100,
+                ),
+            ),
+            context=CodexSessionContext(),
+            prior_state=prefix.next_state,
+        )
+
+        assert suffix.messages[0].identity.canonical_locator.source_session_id == (
+            "native-session"
+        )
+        assert suffix.source_session_id == "native-session"
+        assert suffix.next_state.source_session_id == "native-session"
+
+    def test_suffix_expected_identity_must_match_prior_native_identity(self) -> None:
+        prefix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "native-session", "source": "cli"},
+                    }
+                ),
+            ),
+            context=CodexSessionContext(),
+        )
+        suffix = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:01Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": "visible",
+                        },
+                    },
+                    ordinal=1,
+                    source_byte_offset=100,
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="caller-session"),
+            prior_state=prefix.next_state,
+        )
+
+        assert suffix.messages == ()
+        assert suffix.source_session_id is None
+        assert suffix.next_state.source_session_id == "native-session"
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY in {
+            diagnostic.code for diagnostic in suffix.diagnostics
+        }
+
+    @pytest.mark.parametrize(
+        "native_fields",
+        [
+            {},
+            {"id": ""},
+            {"id": "bad:id"},
+            {"id": "one", "session_id": "two"},
+        ],
+    )
+    def test_missing_malformed_or_conflicting_native_identity_fails_closed(
+        self, native_fields: dict[str, str]
+    ) -> None:
+        records = sequential_envelopes(
+            {
+                "type": "session_meta",
+                "payload": {**native_fields, "source": "cli"},
+            },
+            {
+                "timestamp": "2026-08-11T09:00:01Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "visible"},
+            },
+        )
+
+        result = parse_codex_session(records, context=CodexSessionContext())
+
+        assert result.messages == ()
+        assert result.source_session_id is None
+        assert result.next_state.source_session_id is None
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
+    def test_multiple_session_metadata_records_must_agree_on_identity(self) -> None:
+        result = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "first-session", "source": "cli"},
+                },
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "second-session", "source": "cli"},
+                },
+                {
+                    "timestamp": "2026-08-11T09:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "visible"},
+                },
+            ),
+            context=CodexSessionContext(),
+        )
+
+        assert result.messages == ()
+        assert result.source_session_id is None
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
     def test_suffix_resumes_kind_and_pairs_trailing_projection(self) -> None:
         prefix_records = sequential_envelopes(
             {
@@ -381,6 +646,8 @@ class TestCodexSchemaFamilies:
             CodexParserState(next_conversation_epoch=-1)
         with pytest.raises(ValueError, match="SHA-256"):
             CodexParserState(seen_compaction_digests=("not-a-digest",))
+        with pytest.raises(ValueError, match="established together"):
+            CodexParserState(source_session_id="native-session")
 
     def test_legacy_primary_canonicalizes_duplicates_and_separates_tools(self) -> None:
         result = parse_fixture(
@@ -585,7 +852,7 @@ class TestCodexSchemaFamilies:
         )
 
         assert result.session_kind is SessionKind.UNKNOWN
-        assert CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE in {
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY in {
             diagnostic.code for diagnostic in result.diagnostics
         }
 
@@ -664,6 +931,7 @@ class TestCodexFailClosedDiagnostics:
                 ),
             ),
             context=CodexSessionContext(source_session_id="metadata-session"),
+            prior_state=established_unknown_session("metadata-session"),
         )
 
         codes = {diagnostic.code for diagnostic in result.diagnostics}
@@ -699,6 +967,7 @@ class TestCodexFailClosedDiagnostics:
                 ),
             ),
             context=CodexSessionContext(source_session_id="metadata-session"),
+            prior_state=established_unknown_session("metadata-session"),
         )
 
         assert result.messages == ()
@@ -723,6 +992,7 @@ class TestCodexFailClosedDiagnostics:
         result = parse_codex_session(
             (raw_envelope(response), raw_envelope(event, ordinal=1)),
             context=CodexSessionContext(source_session_id="surrogate-session"),
+            prior_state=established_unknown_session("surrogate-session"),
         )
 
         assert result.messages == ()
@@ -743,6 +1013,7 @@ class TestCodexFailClosedDiagnostics:
         result = parse_codex_session(
             (raw_envelope(raw),),
             context=CodexSessionContext(source_session_id="surrogate-tool-session"),
+            prior_state=established_unknown_session("surrogate-tool-session"),
         )
 
         assert result.messages == ()
@@ -770,6 +1041,7 @@ class TestCodexFailClosedDiagnostics:
                 ),
             ),
             context=CodexSessionContext(source_session_id="empty-session"),
+            prior_state=established_unknown_session("empty-session"),
         )
 
         assert result.messages == ()
@@ -811,6 +1083,7 @@ class TestCodexFailClosedDiagnostics:
                 ),
             ),
             context=CodexSessionContext(source_session_id="empty-session"),
+            prior_state=established_unknown_session("empty-session"),
         )
 
         assert result.messages == ()
@@ -831,6 +1104,7 @@ class TestCodexFailClosedDiagnostics:
                 ),
             ),
             context=CodexSessionContext(source_session_id="empty-session"),
+            prior_state=established_unknown_session("empty-session"),
         )
 
         assert result.messages == ()
@@ -868,6 +1142,7 @@ def test_generated_visible_text_is_preserved_exactly(text: str) -> None:
             ),
         ),
         context=CodexSessionContext(source_session_id="property-session"),
+        prior_state=established_unknown_session("property-session"),
     )
 
     assert [message.text for message in result.messages] == [text]
@@ -892,6 +1167,7 @@ def test_arbitrary_unrecognized_message_blocks_never_become_searchable(
             ),
         ),
         context=CodexSessionContext(source_session_id="property-session"),
+        prior_state=established_unknown_session("property-session"),
     )
 
     assert result.messages == ()
@@ -918,6 +1194,7 @@ def test_known_excluded_message_blocks_are_reasoning_diagnostics(
             ),
         ),
         context=CodexSessionContext(source_session_id="excluded-session"),
+        prior_state=established_unknown_session("excluded-session"),
     )
 
     assert result.messages == ()

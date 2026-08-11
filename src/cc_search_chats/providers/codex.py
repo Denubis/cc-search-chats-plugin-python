@@ -98,6 +98,7 @@ class CodexDiagnosticCode(StrEnum):
     INVALID_UNICODE = "invalid_unicode"
     EMPTY_CONTENT = "empty_content"
     UNKNOWN_METADATA_SHAPE = "unknown_metadata_shape"
+    UNSUPPORTED_SESSION_IDENTITY = "unsupported_session_identity"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,16 +114,22 @@ class CodexDiagnostic:
 
 @dataclass(frozen=True, slots=True)
 class CodexSessionContext:
-    """Explicit provider context that is not inferred from date paths."""
+    """Caller context plus an optional expected native session identity.
 
-    source_session_id: str
+    ``source_session_id`` is retained for compatibility with Phase 1 callers,
+    but it is validation evidence only. Native metadata or prior parser state
+    owns the identity used to construct locators.
+    """
+
+    source_session_id: str | None = None
     repository: str | None = None
     cwd: str | None = None
 
     def __post_init__(self) -> None:
-        """Reject context that cannot construct provider identity."""
-        if not self.source_session_id.strip() or any(
-            delimiter in self.source_session_id for delimiter in (":", "\r", "\n")
+        """Reject malformed expected identities at the caller boundary."""
+        if (
+            self.source_session_id is not None
+            and _locator_safe_id(self.source_session_id) is None
         ):
             raise ValueError("source_session_id must be a nonempty locator-safe string")
 
@@ -135,6 +142,7 @@ class CodexParserState:
     session_kind: SessionKind | None = None
     seen_compaction_digests: tuple[str, ...] = ()
     trailing_candidate: PhysicalMessageCandidate | None = None
+    source_session_id: str | None = None
 
     def __post_init__(self) -> None:
         """Reject malformed or cross-epoch persisted parser state."""
@@ -148,6 +156,17 @@ class CodexParserState:
             self.session_kind, SessionKind
         ):
             raise ValueError("session_kind must be a SessionKind or None")
+        if (
+            self.source_session_id is not None
+            and _locator_safe_id(self.source_session_id) is None
+        ):
+            raise ValueError(
+                "source_session_id must be a nonempty locator-safe string or None"
+            )
+        if (self.session_kind is None) != (self.source_session_id is None):
+            raise ValueError(
+                "source_session_id and session_kind must be established together"
+            )
         if not isinstance(self.seen_compaction_digests, tuple) or any(
             not isinstance(digest, str)
             or len(digest) != 64
@@ -176,6 +195,8 @@ class CodexParserState:
             or len(message.identity.physical_aliases) != 1
             or message.identity.canonical_locator.provider is not Provider.CODEX
             or self.session_kind is None
+            or message.identity.canonical_locator.source_session_id
+            != self.source_session_id
             or message.session_kind is not self.session_kind
         ):
             raise ValueError(
@@ -188,6 +209,7 @@ class CodexParserState:
 class CodexParseResult:
     """Canonical messages plus retained physical and diagnostic outcomes."""
 
+    source_session_id: str | None
     session_kind: SessionKind
     messages: tuple[NativeMessage, ...]
     physical_candidates: tuple[PhysicalMessageCandidate, ...]
@@ -291,9 +313,9 @@ def _source_kind(source: object) -> SessionKind | None:
 
 
 def _session_kind(
-    records: tuple[_DecodedRecord, ...], context: CodexSessionContext
+    records: tuple[_DecodedRecord, ...],
 ) -> tuple[SessionKind, tuple[CodexDiagnostic, ...]]:
-    """Classify all session_meta records without resetting record state."""
+    """Classify all session_meta sources independently of their identity."""
     kinds: list[SessionKind] = []
     diagnostics: list[CodexDiagnostic] = []
     for record in records:
@@ -309,23 +331,13 @@ def _session_kind(
                 )
             )
             continue
-        present_native_ids = tuple(
-            meta[key] for key in ("id", "session_id") if key in meta
-        )
-        native_ids_valid = bool(present_native_ids) and all(
-            isinstance(value, str) and bool(value) for value in present_native_ids
-        )
         kind = _source_kind(meta.get("source"))
-        if (
-            kind is None
-            or not native_ids_valid
-            or set(present_native_ids) != {context.source_session_id}
-        ):
+        if kind is None:
             diagnostics.append(
                 _diagnostic(
                     CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE,
                     record.envelope,
-                    "session_meta source or session identity is unsupported",
+                    "session_meta source is unsupported",
                 )
             )
             continue
@@ -337,18 +349,17 @@ def _session_kind(
 
 def _continued_session_kind(
     records: tuple[_DecodedRecord, ...],
-    context: CodexSessionContext,
     established: SessionKind | None,
 ) -> tuple[SessionKind, tuple[CodexDiagnostic, ...]]:
     """Use an established kind when a suffix omits session metadata."""
     if established is None:
-        return _session_kind(records, context)
+        return _session_kind(records)
     metadata = tuple(
         record for record in records if record.payload.get("type") == "session_meta"
     )
     if not metadata:
         return established, ()
-    observed, diagnostics = _session_kind(metadata, context)
+    observed, diagnostics = _session_kind(metadata)
     if observed is established and not diagnostics:
         return established, ()
     if diagnostics:
@@ -360,6 +371,126 @@ def _continued_session_kind(
             "session_meta changes the established continuation session kind",
         ),
     )
+
+
+def _session_identity_diagnostic(
+    records: tuple[_DecodedRecord, ...], detail: str
+) -> CodexDiagnostic:
+    """Build an identity diagnostic even when no record decoded successfully."""
+    if records:
+        return _diagnostic(
+            CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
+            records[0].envelope,
+            detail,
+        )
+    return CodexDiagnostic(
+        code=CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
+        detail=detail,
+        record_ordinal=None,
+        source_line=None,
+        source_byte_offset=None,
+    )
+
+
+def _metadata_session_identity(
+    records: tuple[_DecodedRecord, ...],
+) -> tuple[str | None, bool, tuple[CodexDiagnostic, ...]]:
+    """Read one exact identity from every present Codex session_meta record."""
+    metadata = tuple(
+        record for record in records if record.payload.get("type") == "session_meta"
+    )
+    if not metadata:
+        return None, False, ()
+
+    observed: list[tuple[str, _DecodedRecord]] = []
+    diagnostics: list[CodexDiagnostic] = []
+    for record in metadata:
+        payload = record.payload.get("payload")
+        if not _is_json_object(payload):
+            diagnostics.append(
+                _diagnostic(
+                    CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
+                    record.envelope,
+                    "session_meta payload cannot establish a native session identity",
+                )
+            )
+            continue
+        present = tuple(payload[key] for key in ("id", "session_id") if key in payload)
+        validated = tuple(_locator_safe_id(value) for value in present)
+        if (
+            not present
+            or any(value is None for value in validated)
+            or len(set(validated)) != 1
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
+                    record.envelope,
+                    "session_meta id/session_id is missing, malformed, or conflicting",
+                )
+            )
+            continue
+        observed.append(
+            (next(value for value in validated if value is not None), record)
+        )
+
+    if diagnostics:
+        return None, True, tuple(diagnostics)
+    identities = {identity for identity, _record in observed}
+    if len(identities) != 1:
+        return (
+            None,
+            True,
+            tuple(
+                _diagnostic(
+                    CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
+                    record.envelope,
+                    "session_meta records disagree on native session identity",
+                )
+                for _identity, record in observed
+            ),
+        )
+    return observed[0][0], True, ()
+
+
+def _resolved_session_identity(
+    records: tuple[_DecodedRecord, ...],
+    context: CodexSessionContext,
+    established: str | None,
+) -> tuple[str | None, tuple[CodexDiagnostic, ...]]:
+    """Resolve identity only from native metadata or immutable prior state."""
+    observed, metadata_present, diagnostics = _metadata_session_identity(records)
+    if diagnostics:
+        return None, diagnostics
+
+    if established is None:
+        if not metadata_present or observed is None:
+            return None, (
+                _session_identity_diagnostic(
+                    records,
+                    "fresh Codex input lacks session_meta native identity",
+                ),
+            )
+        resolved = observed
+    else:
+        if metadata_present and observed != established:
+            return None, (
+                _session_identity_diagnostic(
+                    records,
+                    "session_meta changes the established native session identity",
+                ),
+            )
+        resolved = established
+
+    expected = context.source_session_id
+    if expected is not None and expected != resolved:
+        return None, (
+            _session_identity_diagnostic(
+                records,
+                "caller expected session identity does not match native parser state",
+            ),
+        )
+    return resolved, ()
 
 
 def _locator_safe_id(value: object) -> str | None:
@@ -407,6 +538,7 @@ def _native_message(
     *,
     record: _DecodedRecord,
     context: CodexSessionContext,
+    source_session_id: str,
     session_kind: SessionKind,
     epoch: int,
     role: str,
@@ -416,7 +548,7 @@ def _native_message(
     native_id: str | None = None,
 ) -> PhysicalMessageCandidate:
     """Construct one common physical message/content candidate."""
-    alias = _physical_alias(record.envelope, context.source_session_id, native_id)
+    alias = _physical_alias(record.envelope, source_session_id, native_id)
     identified_agent = role == "user" and session_kind is SessionKind.AGENT
     timestamp = record.payload.get("timestamp")
     return PhysicalMessageCandidate(
@@ -548,6 +680,7 @@ def _parse_response_item(
     record: _DecodedRecord,
     *,
     context: CodexSessionContext,
+    source_session_id: str,
     session_kind: SessionKind,
     epoch: int,
 ) -> tuple[tuple[PhysicalMessageCandidate, ...], tuple[CodexDiagnostic, ...]]:
@@ -599,6 +732,7 @@ def _parse_response_item(
                 _native_message(
                     record=record,
                     context=context,
+                    source_session_id=source_session_id,
                     session_kind=session_kind,
                     epoch=epoch,
                     role=role,
@@ -640,6 +774,7 @@ def _parse_response_item(
                 _native_message(
                     record=record,
                     context=context,
+                    source_session_id=source_session_id,
                     session_kind=session_kind,
                     epoch=epoch,
                     role="assistant",
@@ -650,6 +785,7 @@ def _parse_response_item(
                 _native_message(
                     record=record,
                     context=context,
+                    source_session_id=source_session_id,
                     session_kind=session_kind,
                     epoch=epoch,
                     role="assistant",
@@ -683,6 +819,7 @@ def _parse_response_item(
                 _native_message(
                     record=record,
                     context=context,
+                    source_session_id=source_session_id,
                     session_kind=session_kind,
                     epoch=epoch,
                     role="tool",
@@ -706,6 +843,7 @@ def _parse_event(
     record: _DecodedRecord,
     *,
     context: CodexSessionContext,
+    source_session_id: str,
     session_kind: SessionKind,
     epoch: int,
 ) -> tuple[PhysicalMessageCandidate | None, CodexDiagnostic | None]:
@@ -742,6 +880,7 @@ def _parse_event(
         _native_message(
             record=record,
             context=context,
+            source_session_id=source_session_id,
             session_kind=session_kind,
             epoch=epoch,
             role=role,
@@ -756,7 +895,7 @@ def _parse_event(
 def _parse_compaction(
     record: _DecodedRecord,
     *,
-    context: CodexSessionContext,
+    source_session_id: str,
     session_kind: SessionKind,
     next_epoch: int,
 ) -> SessionEpochBoundary | None:
@@ -769,10 +908,10 @@ def _parse_compaction(
     ):
         return None
     timestamp = record.payload.get("timestamp")
-    alias = _physical_alias(record.envelope, context.source_session_id)
+    alias = _physical_alias(record.envelope, source_session_id)
     return SessionEpochBoundary(
         provider=Provider.CODEX,
-        source_session_id=context.source_session_id,
+        source_session_id=source_session_id,
         session_kind=session_kind,
         conversation_epoch=next_epoch,
         physical_alias=alias,
@@ -963,19 +1102,45 @@ def parse_codex_session(
     state = prior_state if prior_state is not None else CodexParserState()
     records, decode_diagnostics = _decode_records(tuple(envelopes))
     session_kind, kind_diagnostics = _continued_session_kind(
-        records, context, state.session_kind
+        records, state.session_kind
     )
-    if state.trailing_candidate is not None:
-        carry_locator = state.trailing_candidate.message.identity.canonical_locator
-        if carry_locator.source_session_id != context.source_session_id:
-            raise ValueError("trailing_candidate belongs to a different source session")
-    candidates: list[PhysicalMessageCandidate] = []
-    boundaries: list[SessionEpochBoundary] = []
+    source_session_id, identity_diagnostics = _resolved_session_identity(
+        records, context, state.source_session_id
+    )
     diagnostics = [
         *decode_diagnostics,
+        *identity_diagnostics,
         *kind_diagnostics,
         *_source_diagnostics(tuple(source_diagnostics)),
     ]
+    if source_session_id is None:
+        return CodexParseResult(
+            source_session_id=None,
+            session_kind=SessionKind.UNKNOWN,
+            messages=(),
+            physical_candidates=(),
+            boundaries=(),
+            diagnostics=tuple(
+                sorted(
+                    diagnostics,
+                    key=lambda value: (
+                        value.record_ordinal
+                        if value.record_ordinal is not None
+                        else -1,
+                        value.code.value,
+                        value.detail,
+                    ),
+                )
+            ),
+            canonicalization_diagnostics=(),
+            next_state=state,
+        )
+    if state.trailing_candidate is not None:
+        carry_locator = state.trailing_candidate.message.identity.canonical_locator
+        if carry_locator.source_session_id != source_session_id:
+            raise ValueError("trailing_candidate belongs to a different source session")
+    candidates: list[PhysicalMessageCandidate] = []
+    boundaries: list[SessionEpochBoundary] = []
     conversation_epoch = state.next_conversation_epoch
     seen_compaction_digests = set(state.seen_compaction_digests)
 
@@ -1005,6 +1170,7 @@ def parse_codex_session(
             parsed, item_diagnostics = _parse_response_item(
                 record,
                 context=context,
+                source_session_id=source_session_id,
                 session_kind=session_kind,
                 epoch=conversation_epoch,
             )
@@ -1014,6 +1180,7 @@ def parse_codex_session(
             parsed, event_diagnostic = _parse_event(
                 record,
                 context=context,
+                source_session_id=source_session_id,
                 session_kind=session_kind,
                 epoch=conversation_epoch,
             )
@@ -1024,7 +1191,7 @@ def parse_codex_session(
         elif outer_type == "compacted":
             boundary = _parse_compaction(
                 record,
-                context=context,
+                source_session_id=source_session_id,
                 session_kind=session_kind,
                 next_epoch=conversation_epoch + 1,
             )
@@ -1092,6 +1259,7 @@ def parse_codex_session(
         else None
     )
     return CodexParseResult(
+        source_session_id=source_session_id,
         session_kind=session_kind,
         messages=_messages_touching_new_candidates(canonical, new_candidates),
         physical_candidates=new_candidates,
@@ -1111,6 +1279,7 @@ def parse_codex_session(
         ),
         next_state=CodexParserState(
             next_conversation_epoch=conversation_epoch,
+            source_session_id=source_session_id,
             session_kind=established_kind,
             seen_compaction_digests=tuple(sorted(seen_compaction_digests)),
             trailing_candidate=next_candidate,
