@@ -12,6 +12,8 @@ from cc_search_chats.core.canonicalization import (
     CodexRecordFamily,
     PhysicalMessageCandidate,
     canonicalize_codex_candidates,
+    codex_logical_message_id,
+    is_valid_native_timestamp,
 )
 from cc_search_chats.core.identity import (
     ContentClass,
@@ -24,6 +26,7 @@ from cc_search_chats.core.identity import (
     SessionEpochBoundary,
     SessionKind,
     SubmittedBy,
+    is_unicode_scalar_text,
 )
 from cc_search_chats.providers.source_discovery import (
     RecordEnvelope,
@@ -32,6 +35,45 @@ from cc_search_chats.providers.source_discovery import (
 )
 
 _PRIMARY_SOURCES = {"cli", "exec", "mcp", "vscode"}
+_LEGACY_SUBAGENT_ROLES = {"review"}
+_TURN_CONTEXT_REQUIRED_FIELDS = {
+    "approval_policy",
+    "cwd",
+    "model",
+    "sandbox_policy",
+    "summary",
+}
+_TURN_CONTEXT_STRING_FIELDS = {
+    "approval_policy",
+    "approvals_reviewer",
+    "comp_hash",
+    "current_date",
+    "cwd",
+    "effort",
+    "model",
+    "multi_agent_mode",
+    "multi_agent_version",
+    "personality",
+    "summary",
+    "timezone",
+    "turn_id",
+    "user_instructions",
+}
+_TURN_CONTEXT_OBJECT_FIELDS = {
+    "collaboration_mode",
+    "file_system_sandbox_policy",
+    "permission_profile",
+    "sandbox_policy",
+    "truncation_policy",
+}
+_TURN_CONTEXT_BOOLEAN_FIELDS = {"realtime_active"}
+_TURN_CONTEXT_LIST_FIELDS = {"workspace_roots"}
+_TURN_CONTEXT_FIELDS = (
+    _TURN_CONTEXT_STRING_FIELDS
+    | _TURN_CONTEXT_OBJECT_FIELDS
+    | _TURN_CONTEXT_BOOLEAN_FIELDS
+    | _TURN_CONTEXT_LIST_FIELDS
+)
 
 
 class CodexDiagnosticCode(StrEnum):
@@ -51,6 +93,9 @@ class CodexDiagnosticCode(StrEnum):
     EXCLUDED_INTER_AGENT_METADATA = "excluded_inter_agent_metadata"
     PARTIAL_TAIL = "partial_tail"
     INVALID_PAYLOAD = "invalid_payload"
+    INVALID_UNICODE = "invalid_unicode"
+    EMPTY_CONTENT = "empty_content"
+    UNKNOWN_METADATA_SHAPE = "unknown_metadata_shape"
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,9 +145,7 @@ class _DecodedRecord:
 
 def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
     """Narrow an untrusted JSON value after checking its key contract."""
-    return isinstance(value, dict) and all(
-        isinstance(key, str) for key in value
-    )
+    return isinstance(value, dict) and all(isinstance(key, str) for key in value)
 
 
 def _diagnostic(
@@ -127,7 +170,7 @@ def _decode_records(
     for envelope in envelopes:
         try:
             payload: object = json.loads(envelope.raw_bytes)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except json.JSONDecodeError, UnicodeDecodeError:
             diagnostics.append(
                 _diagnostic(
                     CodexDiagnosticCode.MALFORMED_JSON,
@@ -175,7 +218,7 @@ def _legacy_subagent(source: object) -> bool:
     if not _is_json_object(source):
         return False
     subagent = source.get("subagent")
-    return isinstance(subagent, str) and bool(subagent.strip())
+    return isinstance(subagent, str) and subagent in _LEGACY_SUBAGENT_ROLES
 
 
 def _source_kind(source: object) -> SessionKind | None:
@@ -206,16 +249,17 @@ def _session_kind(
                 )
             )
             continue
-        native_ids = tuple(
-            value
-            for key in ("id", "session_id")
-            if isinstance((value := meta.get(key)), str) and value
+        present_native_ids = tuple(
+            meta[key] for key in ("id", "session_id") if key in meta
+        )
+        native_ids_valid = bool(present_native_ids) and all(
+            isinstance(value, str) and bool(value) for value in present_native_ids
         )
         kind = _source_kind(meta.get("source"))
         if (
             kind is None
-            or not native_ids
-            or context.source_session_id not in native_ids
+            or not native_ids_valid
+            or set(present_native_ids) != {context.source_session_id}
         ):
             diagnostics.append(
                 _diagnostic(
@@ -291,11 +335,7 @@ def _native_message(
     return PhysicalMessageCandidate(
         message=NativeMessage(
             identity=MessageIdentity(
-                logical_message_id=(
-                    native_id
-                    if native_id is not None
-                    else f"record-{record.envelope.record_ordinal}-{record.envelope.source_digest}"
-                ),
+                logical_message_id=codex_logical_message_id(alias),
                 canonical_locator=alias.locator,
                 physical_aliases=(alias,),
             ),
@@ -338,6 +378,7 @@ def _message_content(
     expected = "input_text" if role == "user" else "output_text"
     text_parts: list[str] = []
     diagnostics: list[CodexDiagnostic] = []
+    invalid_unicode = False
     for block in content:
         if not _is_json_object(block):
             diagnostics.append(
@@ -368,8 +409,32 @@ def _message_content(
                 )
             )
             continue
+        if not is_unicode_scalar_text(text):
+            invalid_unicode = True
+            diagnostics.append(
+                _diagnostic(
+                    CodexDiagnosticCode.INVALID_UNICODE,
+                    envelope,
+                    "message text contains a non-scalar Unicode value",
+                )
+            )
+            continue
         text_parts.append(text)
-    return ("\n".join(text_parts) if text_parts else None), tuple(diagnostics)
+    if invalid_unicode:
+        return None, tuple(diagnostics)
+    if not text_parts:
+        return None, tuple(diagnostics)
+    text = "\n".join(text_parts)
+    if not text:
+        diagnostics.append(
+            _diagnostic(
+                CodexDiagnosticCode.EMPTY_CONTENT,
+                envelope,
+                "recognized message has empty typed prose",
+            )
+        )
+        return None, tuple(diagnostics)
+    return text, tuple(diagnostics)
 
 
 def _tool_text(value: object) -> str | None:
@@ -458,6 +523,16 @@ def _parse_response_item(
             if item_type == "function_call"
             else payload.get("input")
         )
+        if (isinstance(name, str) and not is_unicode_scalar_text(name)) or (
+            tool_input is not None and not is_unicode_scalar_text(tool_input)
+        ):
+            return (), (
+                _diagnostic(
+                    CodexDiagnosticCode.INVALID_UNICODE,
+                    record.envelope,
+                    "tool call contains a non-scalar Unicode value",
+                ),
+            )
         if not isinstance(name, str) or not name or tool_input is None:
             return (), (
                 _diagnostic(
@@ -493,6 +568,14 @@ def _parse_response_item(
         )
     if item_type in {"function_call_output", "custom_tool_call_output"}:
         output = _tool_text(payload.get("output"))
+        if output is not None and not is_unicode_scalar_text(output):
+            return (), (
+                _diagnostic(
+                    CodexDiagnosticCode.INVALID_UNICODE,
+                    record.envelope,
+                    "tool output contains a non-scalar Unicode value",
+                ),
+            )
         if output is None:
             return (), (
                 _diagnostic(
@@ -548,6 +631,12 @@ def _parse_event(
             CodexDiagnosticCode.UNKNOWN_EVENT,
             record.envelope,
             f"unrecognized event_msg payload type: {event_type!r}",
+        )
+    if not is_unicode_scalar_text(message):
+        return None, _diagnostic(
+            CodexDiagnosticCode.INVALID_UNICODE,
+            record.envelope,
+            "event message contains a non-scalar Unicode value",
         )
     return (
         _native_message(
@@ -610,6 +699,76 @@ def _source_diagnostics(
     )
 
 
+def _metadata_outer_shape(record: _DecodedRecord) -> bool:
+    """Require the exact audited metadata wrapper and a valid timestamp."""
+    return set(record.payload) == {"type", "timestamp", "payload"} and (
+        isinstance(record.payload.get("timestamp"), str)
+        and is_valid_native_timestamp(record.payload["timestamp"])
+    )
+
+
+def _is_string_list(value: object) -> bool:
+    """Narrow one audited metadata field to a list of strings."""
+    return isinstance(value, list) and all(
+        isinstance(item, str) for item in value
+    )
+
+
+def _turn_context_shape(record: _DecodedRecord) -> bool:
+    """Recognize audited turn-context capabilities and field types."""
+    payload = record.payload.get("payload")
+    if not _metadata_outer_shape(record) or not _is_json_object(payload):
+        return False
+    fields = set(payload)
+    if (
+        not _TURN_CONTEXT_REQUIRED_FIELDS <= fields
+        or not fields <= _TURN_CONTEXT_FIELDS
+    ):
+        return False
+    if any(
+        not isinstance(payload[field], str)
+        for field in fields & _TURN_CONTEXT_STRING_FIELDS
+    ):
+        return False
+    if any(
+        not _is_json_object(payload[field])
+        for field in fields & _TURN_CONTEXT_OBJECT_FIELDS
+    ):
+        return False
+    if any(
+        not isinstance(payload[field], bool)
+        for field in fields & _TURN_CONTEXT_BOOLEAN_FIELDS
+    ):
+        return False
+    return all(
+        _is_string_list(payload[field])
+        for field in fields & _TURN_CONTEXT_LIST_FIELDS
+    )
+
+
+def _world_state_shape(record: _DecodedRecord) -> bool:
+    """Recognize the audited full/state world-state wrapper."""
+    payload = record.payload.get("payload")
+    return (
+        _metadata_outer_shape(record)
+        and _is_json_object(payload)
+        and set(payload) == {"full", "state"}
+        and isinstance(payload.get("full"), bool)
+        and _is_json_object(payload.get("state"))
+    )
+
+
+def _inter_agent_metadata_shape(record: _DecodedRecord) -> bool:
+    """Recognize the audited trigger-turn inter-agent metadata wrapper."""
+    payload = record.payload.get("payload")
+    return (
+        _metadata_outer_shape(record)
+        and _is_json_object(payload)
+        and set(payload) == {"trigger_turn"}
+        and isinstance(payload.get("trigger_turn"), bool)
+    )
+
+
 def parse_codex_session(
     envelopes: tuple[RecordEnvelope, ...],
     *,
@@ -631,9 +790,27 @@ def parse_codex_session(
 
     for record in records:
         outer_type = record.payload.get("type")
-        if outer_type in {"session_meta", "turn_context", "world_state"}:
+        if outer_type == "session_meta":
             continue
-        if outer_type == "response_item":
+        if outer_type == "turn_context":
+            if not _turn_context_shape(record):
+                diagnostics.append(
+                    _diagnostic(
+                        CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
+                        record.envelope,
+                        "turn_context does not match an audited metadata shape",
+                    )
+                )
+        elif outer_type == "world_state":
+            if not _world_state_shape(record):
+                diagnostics.append(
+                    _diagnostic(
+                        CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
+                        record.envelope,
+                        "world_state does not match an audited metadata shape",
+                    )
+                )
+        elif outer_type == "response_item":
             parsed, item_diagnostics = _parse_response_item(
                 record,
                 context=context,
@@ -681,13 +858,22 @@ def parse_codex_session(
                 conversation_epoch += 1
                 boundaries.append(boundary)
         elif outer_type == "inter_agent_communication_metadata":
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.EXCLUDED_INTER_AGENT_METADATA,
-                    record.envelope,
-                    "inter-agent metadata is retained as provenance, not searchable text",
+            if _inter_agent_metadata_shape(record):
+                diagnostics.append(
+                    _diagnostic(
+                        CodexDiagnosticCode.EXCLUDED_INTER_AGENT_METADATA,
+                        record.envelope,
+                        "inter-agent metadata is retained as provenance, not searchable text",
+                    )
                 )
-            )
+            else:
+                diagnostics.append(
+                    _diagnostic(
+                        CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
+                        record.envelope,
+                        "inter-agent metadata does not match an audited shape",
+                    )
+                )
         else:
             diagnostics.append(
                 _diagnostic(

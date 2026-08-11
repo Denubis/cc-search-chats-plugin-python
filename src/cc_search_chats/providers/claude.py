@@ -19,6 +19,7 @@ from cc_search_chats.core.identity import (
     SessionEpochBoundary,
     SessionKind,
     SubmittedBy,
+    is_unicode_scalar_text,
 )
 from cc_search_chats.providers.source_discovery import RecordEnvelope
 
@@ -39,6 +40,7 @@ class ClaudeDiagnosticCode(StrEnum):
     MISSING_MESSAGE_UUID = "missing_message_uuid"
     INVALID_COMPACT_BOUNDARY = "invalid_compact_boundary"
     EMPTY_CONTENT = "empty_content"
+    INVALID_UNICODE = "invalid_unicode"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,9 +88,7 @@ class _DecodedRecord:
 
 def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
     """Narrow an untrusted JSON value after checking its key contract."""
-    return isinstance(value, dict) and all(
-        isinstance(key, str) for key in value
-    )
+    return isinstance(value, dict) and all(isinstance(key, str) for key in value)
 
 
 def _diagnostic(
@@ -113,7 +113,7 @@ def _decode_records(
     for envelope in envelopes:
         try:
             payload: object = json.loads(envelope.raw_bytes)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except json.JSONDecodeError, UnicodeDecodeError:
             diagnostics.append(
                 _diagnostic(
                     ClaudeDiagnosticCode.MALFORMED_JSON,
@@ -152,23 +152,30 @@ def _classify_session_kind(
     records: tuple[_DecodedRecord, ...], context: ClaudeSessionContext
 ) -> SessionKind:
     """Combine native path and origin facts, failing closed on contradiction."""
-    path_kinds = {_path_kind(record.envelope.source_file_relative) for record in records}
+    path_kinds = {
+        _path_kind(record.envelope.source_file_relative) for record in records
+    }
     if len(path_kinds) != 1:
         return SessionKind.UNKNOWN
     kind = next(iter(path_kinds), SessionKind.UNKNOWN)
     for record in records:
         payload = record.payload
         recorded_session_id = payload.get("sessionId")
-        if (
-            isinstance(recorded_session_id, str)
-            and recorded_session_id
-            and recorded_session_id != context.source_session_id
+        if "sessionId" in payload and (
+            not isinstance(recorded_session_id, str)
+            or not recorded_session_id
+            or recorded_session_id != context.source_session_id
         ):
             return SessionKind.UNKNOWN
         sidechain = payload.get("isSidechain")
-        has_agent_id = isinstance(payload.get("agentId"), str) and bool(
-            str(payload["agentId"]).strip()
-        )
+        if "isSidechain" in payload and not isinstance(sidechain, bool):
+            return SessionKind.UNKNOWN
+        agent_id = payload.get("agentId")
+        if "agentId" in payload and (
+            not isinstance(agent_id, str) or not agent_id.strip()
+        ):
+            return SessionKind.UNKNOWN
+        has_agent_id = isinstance(agent_id, str) and bool(agent_id.strip())
         if kind is SessionKind.PRIMARY and (sidechain is True or has_agent_id):
             return SessionKind.UNKNOWN
         if kind is SessionKind.AGENT and sidechain is False:
@@ -211,9 +218,7 @@ def _stringify_tool_value(value: object) -> str:
     """Render a recognized tool value deterministically for lexical search."""
     if isinstance(value, str):
         return value
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _tool_output(value: object) -> str | None:
@@ -243,6 +248,14 @@ def _extract_content(
 ) -> tuple[list[tuple[ContentClass, str]], list[ClaudeDiagnostic]]:
     """Classify searchable blocks and name every excluded/unknown shape."""
     if isinstance(content, str):
+        if not is_unicode_scalar_text(content):
+            return [], [
+                _diagnostic(
+                    ClaudeDiagnosticCode.INVALID_UNICODE,
+                    envelope,
+                    "message text contains a non-scalar Unicode value",
+                )
+            ]
         if content:
             return [(ContentClass.PROSE, content)], []
         return [], [
@@ -263,6 +276,7 @@ def _extract_content(
 
     rows: list[tuple[ContentClass, str]] = []
     prose: list[str] = []
+    invalid_prose = False
     diagnostics: list[ClaudeDiagnostic] = []
     for block in content:
         if not _is_json_object(block) or not isinstance(block.get("type"), str):
@@ -286,6 +300,16 @@ def _extract_content(
                     )
                 )
                 continue
+            if not is_unicode_scalar_text(text):
+                invalid_prose = True
+                diagnostics.append(
+                    _diagnostic(
+                        ClaudeDiagnosticCode.INVALID_UNICODE,
+                        envelope,
+                        "text block contains a non-scalar Unicode value",
+                    )
+                )
+                continue
             prose.append(text)
         elif block_type == "tool_use":
             name = block.get("name")
@@ -298,11 +322,24 @@ def _extract_content(
                     )
                 )
                 continue
-            rows.append((ContentClass.TOOL_NAME, name))
-            if "input" in block:
-                rows.append(
-                    (ContentClass.TOOL_INPUT, _stringify_tool_value(block["input"]))
+            rendered_input = (
+                _stringify_tool_value(block["input"]) if "input" in block else None
+            )
+            if not is_unicode_scalar_text(name) or (
+                rendered_input is not None
+                and not is_unicode_scalar_text(rendered_input)
+            ):
+                diagnostics.append(
+                    _diagnostic(
+                        ClaudeDiagnosticCode.INVALID_UNICODE,
+                        envelope,
+                        "tool_use block contains a non-scalar Unicode value",
+                    )
                 )
+                continue
+            rows.append((ContentClass.TOOL_NAME, name))
+            if rendered_input is not None:
+                rows.append((ContentClass.TOOL_INPUT, rendered_input))
         elif block_type == "tool_result":
             output = _tool_output(block.get("content"))
             if output is None:
@@ -311,6 +348,14 @@ def _extract_content(
                         ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
                         envelope,
                         "tool_result block has an unsupported content shape",
+                    )
+                )
+            elif not is_unicode_scalar_text(output):
+                diagnostics.append(
+                    _diagnostic(
+                        ClaudeDiagnosticCode.INVALID_UNICODE,
+                        envelope,
+                        "tool_result block contains a non-scalar Unicode value",
                     )
                 )
             else:
@@ -347,8 +392,18 @@ def _extract_content(
                     f"unrecognized Claude content block: {block_type}",
                 )
             )
-    if prose:
-        rows.insert(0, (ContentClass.PROSE, "\n".join(prose)))
+    if prose and not invalid_prose:
+        text = "\n".join(prose)
+        if text:
+            rows.insert(0, (ContentClass.PROSE, text))
+        else:
+            diagnostics.append(
+                _diagnostic(
+                    ClaudeDiagnosticCode.EMPTY_CONTENT,
+                    envelope,
+                    "recognized message has empty typed prose",
+                )
+            )
     return rows, diagnostics
 
 
@@ -388,13 +443,9 @@ def _native_message(
         repository=context.repository,
         cwd=cwd if isinstance(cwd, str) else context.cwd,
         submitted_by=(
-            SubmittedBy.IDENTIFIED_HARNESS
-            if identified_agent
-            else SubmittedBy.UNKNOWN
+            SubmittedBy.IDENTIFIED_HARNESS if identified_agent else SubmittedBy.UNKNOWN
         ),
-        submission_evidence=("claude:isSidechain+agentId",)
-        if identified_agent
-        else (),
+        submission_evidence=("claude:isSidechain+agentId",) if identified_agent else (),
         submission_match_cardinality=1 if identified_agent else 0,
     )
 

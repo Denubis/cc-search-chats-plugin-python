@@ -28,11 +28,26 @@ from cc_search_chats.providers.source_discovery import (
 FIXTURES = Path(__file__).parent / "fixtures" / "providers"
 
 
-def envelope(payload: object, *, path: Path = Path("project/session.jsonl")) -> RecordEnvelope:
+def envelope(
+    payload: object, *, path: Path = Path("project/session.jsonl")
+) -> RecordEnvelope:
     """Build one Task 2 envelope from a synthetic JSON value."""
     raw_bytes = json.dumps(payload, ensure_ascii=False).encode()
     return RecordEnvelope(
         source_file_relative=path,
+        record_ordinal=0,
+        source_line=1,
+        source_byte_offset=0,
+        raw_bytes=raw_bytes,
+        raw_byte_length=len(raw_bytes),
+        source_digest=hashlib.sha256(raw_bytes).hexdigest(),
+    )
+
+
+def raw_envelope(raw_bytes: bytes) -> RecordEnvelope:
+    """Build one envelope without normalizing escaped JSON test bytes."""
+    return RecordEnvelope(
+        source_file_relative=Path("project/session.jsonl"),
         record_ordinal=0,
         source_line=1,
         source_byte_offset=0,
@@ -70,7 +85,9 @@ class TestClaudeRecognizedShapes:
         )
 
         assert result.session_kind is SessionKind.PRIMARY
-        assert [(message.content_class, message.text) for message in result.messages] == [
+        assert [
+            (message.content_class, message.text) for message in result.messages
+        ] == [
             (ContentClass.PROSE, "visible primary user"),
             (ContentClass.PROSE, "visible assistant"),
             (ContentClass.TOOL_NAME, "Read"),
@@ -79,9 +96,9 @@ class TestClaudeRecognizedShapes:
             (ContentClass.PROSE, "visible after boundary"),
         ]
         assert all("[tool:" not in message.text for message in result.messages)
-        assert {message.identity.canonical_locator.provider for message in result.messages} == {
-            Provider.CLAUDE
-        }
+        assert {
+            message.identity.canonical_locator.provider for message in result.messages
+        } == {Provider.CLAUDE}
         assert all(
             message.identity.canonical_locator.key_kind is LocatorKeyKind.UUID
             for message in result.messages
@@ -107,12 +124,17 @@ class TestClaudeRecognizedShapes:
         assert boundary.conversation_epoch == 1
         assert boundary.trigger == "auto"
         assert boundary.token_count == 50
-        assert all(message.text != "synthetic injected compact summary" for message in result.messages)
+        assert all(
+            message.text != "synthetic injected compact summary"
+            for message in result.messages
+        )
         assert ClaudeDiagnosticCode.EXCLUDED_INJECTED in {
             diagnostic.code for diagnostic in result.diagnostics
         }
 
-    def test_agent_origin_and_positive_native_harness_evidence_are_separate(self) -> None:
+    def test_agent_origin_and_positive_native_harness_evidence_are_separate(
+        self,
+    ) -> None:
         result = parse_fixture(
             "claude_agent.jsonl",
             session_id="claude-agent-session",
@@ -128,7 +150,9 @@ class TestClaudeRecognizedShapes:
         assert user.submission_evidence == ("claude:isSidechain+agentId",)
         assert user.submission_match_cardinality == 1
         assert assistant.submitted_by is SubmittedBy.UNKNOWN
-        assert all(message.submitted_by is not SubmittedBy.HUMAN for message in result.messages)
+        assert all(
+            message.submitted_by is not SubmittedBy.HUMAN for message in result.messages
+        )
 
     @pytest.mark.parametrize(
         ("path", "is_sidechain"),
@@ -155,6 +179,25 @@ class TestClaudeRecognizedShapes:
 
         assert result.session_kind is SessionKind.UNKNOWN
         assert result.messages[0].session_kind is SessionKind.UNKNOWN
+        assert result.messages[0].submitted_by is SubmittedBy.UNKNOWN
+
+    @pytest.mark.parametrize("agent_id", [None, True, 1, [], {}, ""])
+    def test_malformed_present_agent_id_fails_closed(self, agent_id: object) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "type": "user",
+                        "uuid": "malformed-agent-id",
+                        "agentId": agent_id,
+                        "message": {"role": "user", "content": "visible unknown"},
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="origin-session"),
+        )
+
+        assert result.session_kind is SessionKind.UNKNOWN
         assert result.messages[0].submitted_by is SubmittedBy.UNKNOWN
 
 
@@ -200,22 +243,98 @@ class TestClaudeFailClosedDiagnostics:
             ClaudeDiagnosticCode.MISSING_MESSAGE_UUID
         ]
 
+    @pytest.mark.parametrize("escaped_surrogate", [b"\\ud800", b"\\udfff"])
+    def test_escaped_lone_surrogate_prose_is_diagnostic(
+        self, escaped_surrogate: bytes
+    ) -> None:
+        raw = (
+            b'{"type":"user","uuid":"surrogate-message","message":'
+            b'{"role":"user","content":"' + escaped_surrogate + b'"}}'
+        )
+
+        result = parse_claude_session(
+            (raw_envelope(raw),),
+            context=ClaudeSessionContext(source_session_id="surrogate-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.INVALID_UNICODE
+        ]
+
+    def test_escaped_lone_surrogate_in_serialized_tool_value_is_diagnostic(
+        self,
+    ) -> None:
+        raw = (
+            b'{"type":"assistant","uuid":"surrogate-tool","message":'
+            b'{"role":"assistant","content":[{"type":"tool_use",'
+            b'"name":"tool","input":{"invalid":"\\ud800"}}]}}'
+        )
+
+        result = parse_claude_session(
+            (raw_envelope(raw),),
+            context=ClaudeSessionContext(source_session_id="surrogate-tool-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.INVALID_UNICODE
+        ]
+
+    def test_empty_typed_prose_is_diagnostic(self) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "type": "assistant",
+                        "uuid": "empty-typed-message",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": ""}],
+                        },
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="empty-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EMPTY_CONTENT
+        ]
+
 
 visible_text = st.text(min_size=1, max_size=200)
+non_boolean_json = st.recursive(
+    st.none()
+    | st.integers()
+    | st.text(alphabet=st.characters(blacklist_categories=("Cs",)), max_size=20),
+    lambda children: (
+        st.lists(children, max_size=3)
+        | st.dictionaries(
+            st.text(alphabet=st.characters(blacklist_categories=("Cs",)), max_size=8),
+            children,
+            max_size=3,
+        )
+    ),
+    max_leaves=8,
+)
 unknown_block_type = st.text(
     alphabet=st.characters(blacklist_categories=("Cs",)), min_size=1, max_size=30
 ).filter(
-    lambda value: value
-    not in {
-        "text",
-        "tool_use",
-        "tool_result",
-        "thinking",
-        "reasoning",
-        "system",
-        "developer",
-        "injected",
-    }
+    lambda value: (
+        value
+        not in {
+            "text",
+            "tool_use",
+            "tool_result",
+            "thinking",
+            "reasoning",
+            "system",
+            "developer",
+            "injected",
+        }
+    )
 )
 
 
@@ -238,7 +357,40 @@ def test_generated_visible_text_is_preserved_exactly(text: str) -> None:
     assert [message.text for message in result.messages] == [text]
 
 
-@given(unknown_block_type, st.recursive(st.none() | st.booleans() | st.integers(), lambda children: st.lists(children, max_size=3) | st.dictionaries(st.text(max_size=8), children, max_size=3), max_leaves=8))
+@given(non_boolean_json)
+@example("not-a-boolean")
+def test_non_boolean_sidechain_metadata_never_classifies_primary(
+    is_sidechain: object,
+) -> None:
+    result = parse_claude_session(
+        (
+            envelope(
+                {
+                    "type": "user",
+                    "uuid": "malformed-sidechain",
+                    "isSidechain": is_sidechain,
+                    "message": {"role": "user", "content": "visible unknown"},
+                }
+            ),
+        ),
+        context=ClaudeSessionContext(source_session_id="origin-session"),
+    )
+
+    assert result.session_kind is SessionKind.UNKNOWN
+    assert result.messages[0].session_kind is SessionKind.UNKNOWN
+
+
+@given(
+    unknown_block_type,
+    st.recursive(
+        st.none() | st.booleans() | st.integers(),
+        lambda children: (
+            st.lists(children, max_size=3)
+            | st.dictionaries(st.text(max_size=8), children, max_size=3)
+        ),
+        max_leaves=8,
+    ),
+)
 def test_arbitrary_unrecognized_content_never_becomes_searchable(
     block_type: str, payload: object
 ) -> None:
