@@ -375,6 +375,14 @@ def _message_content(
                 "message content is not a block list",
             ),
         )
+    if not content:
+        return None, (
+            _diagnostic(
+                CodexDiagnosticCode.EMPTY_CONTENT,
+                envelope,
+                "recognized message has an empty content block list",
+            ),
+        )
     expected = "input_text" if role == "user" else "output_text"
     text_parts: list[str] = []
     diagnostics: list[CodexDiagnostic] = []
@@ -424,8 +432,7 @@ def _message_content(
         return None, tuple(diagnostics)
     if not text_parts:
         return None, tuple(diagnostics)
-    text = "\n".join(text_parts)
-    if not text:
+    if not any(text_parts):
         diagnostics.append(
             _diagnostic(
                 CodexDiagnosticCode.EMPTY_CONTENT,
@@ -434,7 +441,7 @@ def _message_content(
             )
         )
         return None, tuple(diagnostics)
-    return text, tuple(diagnostics)
+    return "\n".join(text_parts), tuple(diagnostics)
 
 
 def _tool_text(value: object) -> str | None:
@@ -637,6 +644,12 @@ def _parse_event(
             CodexDiagnosticCode.INVALID_UNICODE,
             record.envelope,
             "event message contains a non-scalar Unicode value",
+        )
+    if not message:
+        return None, _diagnostic(
+            CodexDiagnosticCode.EMPTY_CONTENT,
+            record.envelope,
+            "recognized event message has empty content",
         )
     return (
         _native_message(

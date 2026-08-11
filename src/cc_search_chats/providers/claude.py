@@ -273,6 +273,14 @@ def _extract_content(
                 "message content is neither a string nor a block list",
             )
         ]
+    if not content:
+        return [], [
+            _diagnostic(
+                ClaudeDiagnosticCode.EMPTY_CONTENT,
+                envelope,
+                "recognized message has an empty content block list",
+            )
+        ]
 
     rows: list[tuple[ContentClass, str]] = []
     prose: list[str] = []
@@ -393,10 +401,7 @@ def _extract_content(
                 )
             )
     if prose and not invalid_prose:
-        text = "\n".join(prose)
-        if text:
-            rows.insert(0, (ContentClass.PROSE, text))
-        else:
+        if not any(prose):
             diagnostics.append(
                 _diagnostic(
                     ClaudeDiagnosticCode.EMPTY_CONTENT,
@@ -404,6 +409,8 @@ def _extract_content(
                     "recognized message has empty typed prose",
                 )
             )
+        else:
+            rows.insert(0, (ContentClass.PROSE, "\n".join(prose)))
     return rows, diagnostics
 
 

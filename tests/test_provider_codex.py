@@ -482,6 +482,67 @@ class TestCodexFailClosedDiagnostics:
             CodexDiagnosticCode.EMPTY_CONTENT
         ]
 
+    @pytest.mark.parametrize(
+        ("role", "block_type"),
+        [("user", "input_text"), ("assistant", "output_text")],
+    )
+    @pytest.mark.parametrize(
+        "content_kind",
+        ["empty_list", "two_empty_blocks"],
+    )
+    def test_empty_typed_prose_collection_is_diagnostic(
+        self, role: str, block_type: str, content_kind: str
+    ) -> None:
+        content = (
+            []
+            if content_kind == "empty_list"
+            else [
+                {"type": block_type, "text": ""},
+                {"type": block_type, "text": ""},
+            ]
+        )
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": role,
+                            "content": content,
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="empty-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.EMPTY_CONTENT
+        ]
+
+    @pytest.mark.parametrize("event_type", ["user_message", "agent_message"])
+    def test_empty_event_message_is_diagnostic(self, event_type: str) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:00Z",
+                        "type": "event_msg",
+                        "payload": {"type": event_type, "message": ""},
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="empty-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.EMPTY_CONTENT
+        ]
+
 
 visible_text = st.text(min_size=1, max_size=200)
 unknown_block_type = st.text(

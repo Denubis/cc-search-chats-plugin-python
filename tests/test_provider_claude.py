@@ -303,6 +303,31 @@ class TestClaudeFailClosedDiagnostics:
             ClaudeDiagnosticCode.EMPTY_CONTENT
         ]
 
+    @pytest.mark.parametrize(
+        "content",
+        [[], [{"type": "text", "text": ""}, {"type": "text", "text": ""}]],
+    )
+    def test_empty_typed_prose_collection_is_diagnostic(
+        self, content: list[object]
+    ) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "type": "assistant",
+                        "uuid": "empty-typed-prose-collection",
+                        "message": {"role": "assistant", "content": content},
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="empty-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EMPTY_CONTENT
+        ]
+
 
 visible_text = st.text(min_size=1, max_size=200)
 non_boolean_json = st.recursive(
