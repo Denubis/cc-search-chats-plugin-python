@@ -1,0 +1,2 @@
+{"timestamp":"2026-08-11T06:00:00Z","type":"session_meta","payload":{"id":"codex-partial","cwd":"/synthetic/repository","source":"exec"}}
+{"timestamp":"2026-08-11T06:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"unfinished"

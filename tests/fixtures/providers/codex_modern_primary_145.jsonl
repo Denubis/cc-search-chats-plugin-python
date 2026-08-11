@@ -1,0 +1,13 @@
+{"timestamp":"2026-08-11T03:00:00Z","type":"session_meta","payload":{"session_id":"codex-modern-primary","id":"codex-modern-primary","timestamp":"2026-08-11T03:00:00Z","cwd":"/synthetic/repository","cli_version":"1.45.0","source":"vscode"}}
+{"timestamp":"2026-08-11T03:00:00Z","type":"session_meta","payload":{"id":"codex-modern-primary","timestamp":"2026-08-11T03:00:00Z","cwd":"/synthetic/repository","cli_version":"1.45.0","source":"vscode"}}
+{"timestamp":"2026-08-11T03:00:01Z","type":"turn_context","payload":{"cwd":"/synthetic/repository","approval_policy":"never"}}
+{"timestamp":"2026-08-11T03:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"modern visible user"}]}}
+{"timestamp":"2026-08-11T03:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"modern visible user","images":[]}}
+{"timestamp":"2026-08-11T03:00:03Z","type":"response_item","payload":{"type":"message","id":"modern-assistant-id","role":"assistant","content":[{"type":"output_text","text":"modern visible assistant"}]}}
+{"timestamp":"2026-08-11T03:00:03Z","type":"event_msg","payload":{"type":"agent_message","message":"modern visible assistant"}}
+{"timestamp":"2026-08-11T03:00:04Z","type":"world_state","payload":{"synthetic":true}}
+{"timestamp":"2026-08-11T03:00:05Z","type":"compacted","payload":{"message":"synthetic compact summary","replacement_history":[]}}
+{"timestamp":"2026-08-11T03:00:05Z","type":"compacted","payload":{"message":"synthetic compact summary","replacement_history":[]}}
+{"timestamp":"2026-08-11T03:00:06Z","type":"response_item","payload":{"type":"message","id":"modern-after-id","role":"assistant","content":[{"type":"output_text","text":"modern after compact"}]}}
+{"timestamp":"2026-08-11T03:00:07Z","type":"compacted","payload":{"future_summary_shape":"not recognized"}}
+{"timestamp":"2026-08-11T03:00:08Z","type":"response_item","payload":{"type":"message","id":"modern-after-unknown-id","role":"assistant","content":[{"type":"output_text","text":"modern after unknown compact"}]}}

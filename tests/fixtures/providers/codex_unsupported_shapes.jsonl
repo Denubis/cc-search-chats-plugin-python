@@ -1,0 +1,11 @@
+not valid json
+{"timestamp":"2026-08-11T07:00:00Z","type":"session_meta","payload":{"id":"codex-unsupported","source":{"future_origin":"unknown"}}}
+{"timestamp":"2026-08-11T07:00:01Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"private developer instruction"}]}}
+{"timestamp":"2026-08-11T07:00:02Z","type":"response_item","payload":{"type":"message","role":"future_role","content":[{"type":"input_text","text":"must not be visible"}]}}
+{"timestamp":"2026-08-11T07:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"future_private_block","text":"must not be visible"}]}}
+{"timestamp":"2026-08-11T07:00:04Z","type":"response_item","payload":{"type":"reasoning","summary":"private reasoning"}}
+{"timestamp":"2026-08-11T07:00:05Z","type":"response_item","payload":{"type":"future_response","text":"must not be visible"}}
+{"timestamp":"2026-08-11T07:00:06Z","type":"event_msg","payload":{"type":"future_event","message":"must not be visible"}}
+{"timestamp":"2026-08-11T07:00:07Z","type":"future_outer","payload":{"type":"message","role":"user","content":"must not be visible"}}
+{"timestamp":"2026-08-11T07:00:08Z","type":"compacted","payload":{"future_summary_shape":"not recognized"}}
+{"timestamp":"2026-08-11T07:00:09Z","type":"inter_agent_communication_metadata","payload":{"synthetic":true}}

@@ -1,0 +1,2 @@
+{"timestamp":"2026-08-11T05:00:00Z","type":"session_meta","payload":{"id":"codex-legacy-child","cwd":"/synthetic/repository","cli_version":"1.40.0","source":{"subagent":"review"}}}
+{"timestamp":"2026-08-11T05:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"legacy child answer"}]}}
