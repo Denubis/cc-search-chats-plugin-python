@@ -1,0 +1,2 @@
+{"type":"user","uuid":"claude-agent-user-1","sessionId":"claude-agent-session","timestamp":"2026-08-11T01:00:00Z","cwd":"/synthetic/repository","isSidechain":true,"agentId":"synthetic-agent-1","message":{"role":"user","content":"synthetic delegated task"}}
+{"type":"assistant","uuid":"claude-agent-assistant-1","sessionId":"claude-agent-session","timestamp":"2026-08-11T01:00:01Z","cwd":"/synthetic/repository","isSidechain":true,"agentId":"synthetic-agent-1","message":{"role":"assistant","content":[{"type":"text","text":"synthetic delegated answer"}]}}

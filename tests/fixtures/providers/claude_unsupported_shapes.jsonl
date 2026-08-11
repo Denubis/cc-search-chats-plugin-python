@@ -1,0 +1,11 @@
+{"type":"user","uuid":"missing-message"}
+{"type":"assistant","uuid":"non-object-message","message":"not-an-object"}
+{"type":"user","uuid":"unknown-role","message":{"role":"developer","content":"must not be visible"}}
+{"type":"assistant","uuid":"unknown-block","message":{"role":"assistant","content":[{"type":"future_private_block","text":"must not be visible"}]}}
+{"type":"future_conversation_record","uuid":"unknown-record","message":{"role":"user","content":"must not be visible"}}
+{"type":"system","uuid":"system-instruction","message":{"role":"system","content":"must not be visible"}}
+{"type":"user","uuid":"injected-user","isMeta":true,"message":{"role":"user","content":"must not be visible"}}
+{"type":"user","message":{"role":"user","content":"missing uuid must not be visible"}}
+{"type":"system","subtype":"compact_boundary","uuid":"bad-boundary","compactMetadata":{"trigger":7,"preTokens":"many"}}
+{"type":"user","uuid":"reasoning-user","message":{"role":"user","content":[{"type":"reasoning","text":"must not be visible"}]}}
+not valid json
