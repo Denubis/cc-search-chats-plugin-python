@@ -4,6 +4,7 @@
 
 import hashlib
 from dataclasses import dataclass, replace
+from datetime import datetime
 from enum import StrEnum
 
 from cc_search_chats.core.identity import (
@@ -87,9 +88,7 @@ def _candidate_key(
     )
 
 
-def _opposite_families(
-    left: CodexRecordFamily, right: CodexRecordFamily
-) -> bool:
+def _opposite_families(left: CodexRecordFamily, right: CodexRecordFamily) -> bool:
     """Return whether two records are the recognized projection pair."""
     return {left, right} == {
         CodexRecordFamily.RESPONSE_MESSAGE,
@@ -104,6 +103,37 @@ def _same_physical_source(
     left_alias = min(left.message.identity.physical_aliases, key=_alias_key)
     right_alias = min(right.message.identity.physical_aliases, key=_alias_key)
     return left_alias.source_file_relative == right_alias.source_file_relative
+
+
+def _native_timestamp(value: object) -> datetime | None:
+    """Parse one timezone-aware native timestamp without inventing defaults."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def is_valid_native_timestamp(value: object) -> bool:
+    """Return whether a native timestamp is timezone-aware ISO-8601 text."""
+    return _native_timestamp(value) is not None
+
+
+def _timestamps_follow_physical_order(
+    left: PhysicalMessageCandidate, right: PhysicalMessageCandidate
+) -> bool:
+    """Require valid timestamps that do not reverse native record order."""
+    left_timestamp = _native_timestamp(left.message.timestamp)
+    right_timestamp = _native_timestamp(right.message.timestamp)
+    if left_timestamp is None or right_timestamp is None:
+        return False
+    if _candidate_key(left) <= _candidate_key(right):
+        return left_timestamp <= right_timestamp
+    return right_timestamp <= left_timestamp
 
 
 def _base_compatible(
@@ -123,7 +153,7 @@ def _base_compatible(
         and left_message.content_class is ContentClass.PROSE
         and right_message.content_class is ContentClass.PROSE
         and left.text_digest == right.text_digest
-        and left_message.timestamp == right_message.timestamp
+        and _timestamps_follow_physical_order(left, right)
     )
 
 
@@ -143,8 +173,7 @@ def _has_intervening_visible_message(
         alias = min(message.identity.physical_aliases, key=_alias_key)
         if (
             message.content_class is ContentClass.PROSE
-            and alias.locator.source_session_id
-            == left_alias.locator.source_session_id
+            and alias.locator.source_session_id == left_alias.locator.source_session_id
             and alias.source_file_relative == left_alias.source_file_relative
             and message.conversation_epoch == left.message.conversation_epoch
             and lower < alias.record_ordinal < upper
@@ -164,23 +193,11 @@ def _preferred_alias(aliases: tuple[PhysicalAlias, ...]) -> PhysicalAlias:
     )
 
 
-def _logical_message_id(
-    representative: NativeMessage, canonical_alias: PhysicalAlias
-) -> str:
-    """Retain a native ID or derive a coordinate-bound logical identifier."""
+def codex_logical_message_id(canonical_alias: PhysicalAlias) -> str:
+    """Derive one stable Codex logical ID from its canonical physical alias."""
     if canonical_alias.locator.key_kind is LocatorKeyKind.ID:
         return str(canonical_alias.locator.key)
-    identity_material = "\x1f".join(
-        (
-            canonical_alias.locator.source_session_id,
-            canonical_alias.source_file_relative.as_posix(),
-            str(canonical_alias.record_ordinal),
-            canonical_alias.source_digest,
-            str(representative.conversation_epoch),
-            representative.role,
-        )
-    )
-    return f"codex-{hashlib.sha256(identity_material.encode()).hexdigest()}"
+    return f"record-{canonical_alias.record_ordinal}-{canonical_alias.source_digest}"
 
 
 def _merge_messages(
@@ -214,11 +231,7 @@ def _merge_messages(
         submitted_by = next(iter(identified_values))
         evidence = tuple(
             sorted(
-                {
-                    item
-                    for message in identified
-                    for item in message.submission_evidence
-                }
+                {item for message in identified for item in message.submission_evidence}
             )
         )
         cardinality = max(
@@ -231,7 +244,7 @@ def _merge_messages(
     return replace(
         representative,
         identity=MessageIdentity(
-            logical_message_id=_logical_message_id(representative, canonical_alias),
+            logical_message_id=codex_logical_message_id(canonical_alias),
             canonical_locator=canonical_alias.locator,
             physical_aliases=aliases,
         ),
@@ -297,9 +310,7 @@ def canonicalize_codex_candidates(
             if (
                 len(reciprocal) == 1
                 and reciprocal[0] is candidate
-                and not _has_intervening_visible_message(
-                    candidate, partner, candidates
-                )
+                and not _has_intervening_visible_message(candidate, partner, candidates)
             ):
                 messages.append(_merge_messages((candidate, partner)))
                 paired.update((candidate_id, id(partner)))

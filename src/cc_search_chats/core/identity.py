@@ -83,6 +83,30 @@ def _validate_digest(value: str, field_name: str) -> None:
         raise ValueError(f"{field_name} must be 64 lowercase hexadecimal characters")
 
 
+def validate_source_file_relative(value: Path) -> None:
+    """Validate a normalized lexical path contained by a provider root."""
+    if (
+        not isinstance(value, Path)
+        or value.is_absolute()
+        or value == Path(".")
+        or ".." in value.parts
+    ):
+        raise ValueError(
+            "source_file_relative must be a contained nonempty relative path"
+        )
+
+
+def is_unicode_scalar_text(value: object) -> bool:
+    """Return whether text can be represented as strict UTF-8 scalar values."""
+    if not isinstance(value, str):
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class NativeLocator:
     """Provider-qualified physical native-record locator."""
@@ -189,12 +213,7 @@ class PhysicalAlias:
 
     def __post_init__(self) -> None:
         """Validate root-independent physical source coordinates."""
-        if not isinstance(self.source_file_relative, Path):
-            raise ValueError("source_file_relative must be a Path")
-        if self.source_file_relative.is_absolute() or self.source_file_relative == Path(
-            "."
-        ):
-            raise ValueError("source_file_relative must be a nonempty relative path")
+        validate_source_file_relative(self.source_file_relative)
         if self.record_ordinal < 0:
             raise ValueError("record_ordinal must be nonnegative")
         if self.source_line < 1:
@@ -262,14 +281,23 @@ class NativeMessage:
         """Validate message epoch and evidence cardinality."""
         if not self.role:
             raise ValueError("role must be nonempty")
+        if not is_unicode_scalar_text(self.text):
+            raise ValueError("text must contain only Unicode scalar values")
         if self.conversation_epoch < 0:
             raise ValueError("conversation_epoch must be nonnegative")
         if self.submission_match_cardinality < 0:
             raise ValueError("submission_match_cardinality must be nonnegative")
         evidence = tuple(self.submission_evidence)
         object.__setattr__(self, "submission_evidence", evidence)
-        if self.submitted_by is not SubmittedBy.UNKNOWN and not evidence:
-            raise ValueError("identified submissions require positive evidence")
+        if self.submitted_by is SubmittedBy.UNKNOWN:
+            if evidence or self.submission_match_cardinality != 0:
+                raise ValueError(
+                    "unknown submissions cannot carry positive match state"
+                )
+        elif not evidence or self.submission_match_cardinality != 1:
+            raise ValueError(
+                "identified submissions require evidence and exactly one match"
+            )
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,6 +3,7 @@
 import hashlib
 from pathlib import Path
 
+import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
@@ -99,6 +100,90 @@ def output_aliases(messages: tuple[NativeMessage, ...]) -> set[PhysicalAlias]:
 
 
 class TestCanonicalPairing:
+    def test_pairs_adjacent_projections_with_ordered_unequal_timestamps(self) -> None:
+        values = (
+            candidate(
+                ordinal=1,
+                family=CodexRecordFamily.RESPONSE_MESSAGE,
+                text="same message",
+                timestamp="2026-08-11T08:00:00Z",
+            ),
+            candidate(
+                ordinal=2,
+                family=CodexRecordFamily.EVENT_MESSAGE,
+                text="same message",
+                timestamp="2026-08-11T08:00:20.609Z",
+            ),
+        )
+
+        result = canonicalize_codex_candidates(values)
+
+        assert len(result.messages) == 1
+        assert set(result.messages[0].identity.physical_aliases) == aliases(values)
+
+    @pytest.mark.parametrize("timestamp", ["", "not-a-timestamp"])
+    def test_missing_or_invalid_timestamp_cannot_pair(self, timestamp: str) -> None:
+        values = (
+            candidate(
+                ordinal=1,
+                family=CodexRecordFamily.RESPONSE_MESSAGE,
+                text="same message",
+                timestamp=timestamp,
+            ),
+            candidate(
+                ordinal=2,
+                family=CodexRecordFamily.EVENT_MESSAGE,
+                text="same message",
+                timestamp=timestamp,
+            ),
+        )
+
+        result = canonicalize_codex_candidates(values)
+
+        assert len(result.messages) == 2
+        assert output_aliases(result.messages) == aliases(values)
+
+    def test_timestamp_order_must_match_physical_record_order(self) -> None:
+        values = (
+            candidate(
+                ordinal=1,
+                family=CodexRecordFamily.RESPONSE_MESSAGE,
+                text="same message",
+                timestamp="2026-08-11T08:00:01Z",
+            ),
+            candidate(
+                ordinal=2,
+                family=CodexRecordFamily.EVENT_MESSAGE,
+                text="same message",
+                timestamp="2026-08-11T08:00:00Z",
+            ),
+        )
+
+        result = canonicalize_codex_candidates(values)
+
+        assert len(result.messages) == 2
+        assert output_aliases(result.messages) == aliases(values)
+
+    def test_fallback_identity_is_stable_when_second_alias_arrives(self) -> None:
+        response = candidate(
+            ordinal=1,
+            family=CodexRecordFamily.RESPONSE_MESSAGE,
+            text="same message",
+        )
+        event = candidate(
+            ordinal=2,
+            family=CodexRecordFamily.EVENT_MESSAGE,
+            text="same message",
+        )
+
+        prefix = canonicalize_codex_candidates((response,)).messages[0]
+        paired = canonicalize_codex_candidates((response, event)).messages[0]
+
+        assert paired.identity.logical_message_id == prefix.identity.logical_message_id
+        assert paired.identity.canonical_locator == prefix.identity.canonical_locator
+        assert len(prefix.identity.physical_aliases) == 1
+        assert len(paired.identity.physical_aliases) == 2
+
     def test_pairs_only_mutually_unique_response_and_event_aliases(self) -> None:
         values = (
             candidate(

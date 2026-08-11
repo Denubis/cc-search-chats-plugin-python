@@ -28,6 +28,35 @@ def diagnostic_codes(
 
 
 class TestBoundedJsonlRead:
+    @pytest.mark.parametrize(
+        "source_file_relative",
+        [Path("../outside.jsonl"), Path("project/../../outside.jsonl")],
+    )
+    def test_rejects_parent_traversal_source_paths(
+        self, tmp_path: Path, source_file_relative: Path
+    ) -> None:
+        source = tmp_path / "session.jsonl"
+        source.write_text("{}\n")
+
+        with pytest.raises(ValueError, match="source_file_relative"):
+            read_bounded_jsonl(
+                source,
+                source_file_relative=source_file_relative,
+                target_size=source.stat().st_size,
+            )
+
+    def test_accepts_lexically_normalized_dot_source_path(self, tmp_path: Path) -> None:
+        source = tmp_path / "session.jsonl"
+        source.write_text("{}\n")
+
+        result = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("project/./session.jsonl"),
+            target_size=source.stat().st_size,
+        )
+
+        assert result.envelopes[0].source_file_relative == Path("project/session.jsonl")
+
     def test_stops_at_captured_target_before_later_append(self, tmp_path: Path) -> None:
         source = tmp_path / "session.jsonl"
         first = b'{"type":"user","text":"first"}'

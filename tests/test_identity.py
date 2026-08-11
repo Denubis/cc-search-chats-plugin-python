@@ -155,9 +155,7 @@ class TestCanonicalLocator:
 
 
 identifier = st.text(
-    alphabet=st.characters(
-        blacklist_characters=":\r\n", blacklist_categories=("Cs",)
-    ),
+    alphabet=st.characters(blacklist_characters=":\r\n", blacklist_categories=("Cs",)),
     min_size=1,
     max_size=40,
 ).filter(lambda value: bool(value.strip()))
@@ -184,9 +182,7 @@ native_locators = st.one_of(
         source_session_id=identifier,
         key_kind=st.just(LocatorKeyKind.ORDINAL),
         key=st.integers(min_value=0, max_value=2**31),
-        record_digest=st.text(
-            alphabet="0123456789abcdef", min_size=64, max_size=64
-        ),
+        record_digest=st.text(alphabet="0123456789abcdef", min_size=64, max_size=64),
     ),
 )
 
@@ -204,9 +200,43 @@ def test_locator_reformatting_is_canonical(locator: NativeLocator) -> None:
     assert format_locator(parsed) == rendered
 
 
-@given(st.text(max_size=200))
-def test_arbitrary_wrong_scheme_never_produces_a_locator(tail: str) -> None:
-    assert not isinstance(parse_locator(f"not-ccchat:{tail}"), NativeLocator)
+@given(native_locators)
+def test_controlled_locator_mutations_never_produce_a_locator(
+    locator: NativeLocator,
+) -> None:
+    rendered = format_locator(locator)
+    parts = rendered.split(":")
+    provider_mismatch = list(parts)
+    provider_mismatch[2] = (
+        Provider.CODEX.value
+        if locator.provider is Provider.CLAUDE
+        else Provider.CLAUDE.value
+    )
+    empty_session = list(parts)
+    empty_session[3] = ""
+    empty_key = list(parts)
+    empty_key[5] = ""
+    malformed = {
+        rendered.replace("ccchat:", "not-ccchat:", 1),
+        rendered.replace(":v1:", ":v2:", 1),
+        ":".join(provider_mismatch),
+        ":".join(empty_session),
+        ":".join(empty_key),
+        ":".join(parts[:-1]),
+        f"{rendered}:extra",
+    }
+    if locator.key_kind is LocatorKeyKind.ORDINAL:
+        noncanonical_ordinal = list(parts)
+        noncanonical_ordinal[5] = f"0{parts[5]}"
+        invalid_digest = list(parts)
+        invalid_digest[7] = f"g{parts[7][1:]}"
+        malformed.update({":".join(noncanonical_ordinal), ":".join(invalid_digest)})
+
+    assert malformed
+    assert all(
+        parse_locator(value) is ResolutionStatus.MALFORMED_LOCATOR
+        for value in malformed
+    )
 
 
 class TestIdentityModels:
@@ -300,6 +330,86 @@ class TestIdentityModels:
             )
 
     @pytest.mark.parametrize(
+        "source_file_relative",
+        [Path("../outside.jsonl"), Path("project/../../outside.jsonl")],
+    )
+    def test_physical_alias_rejects_parent_traversal(
+        self, source_file_relative: Path
+    ) -> None:
+        with pytest.raises(ValueError, match="source_file_relative"):
+            PhysicalAlias(
+                locator=claude_locator(),
+                source_file_relative=source_file_relative,
+                record_ordinal=0,
+                source_line=1,
+                source_byte_offset=0,
+                raw_byte_length=1,
+                source_digest=DIGEST,
+            )
+
+    def test_physical_alias_accepts_lexically_normalized_dot_path(self) -> None:
+        physical_alias = PhysicalAlias(
+            locator=claude_locator(),
+            source_file_relative=Path("project/./session.jsonl"),
+            record_ordinal=0,
+            source_line=1,
+            source_byte_offset=0,
+            raw_byte_length=1,
+            source_digest=DIGEST,
+        )
+
+        assert physical_alias.source_file_relative == Path("project/session.jsonl")
+
+    @pytest.mark.parametrize("cardinality", [0, 2, 7])
+    def test_identified_harness_requires_exactly_one_match(
+        self, cardinality: int
+    ) -> None:
+        locator = claude_locator()
+        with pytest.raises(ValueError, match="exactly one"):
+            NativeMessage(
+                identity=MessageIdentity(
+                    logical_message_id="logical-1",
+                    canonical_locator=locator,
+                    physical_aliases=(alias(locator),),
+                ),
+                timestamp="2026-08-11T00:00:00Z",
+                role="user",
+                session_kind=SessionKind.AGENT,
+                conversation_epoch=0,
+                content_class=ContentClass.PROSE,
+                text="visible text",
+                submitted_by=SubmittedBy.IDENTIFIED_HARNESS,
+                submission_evidence=("native-positive",),
+                submission_match_cardinality=cardinality,
+            )
+
+    @pytest.mark.parametrize(
+        ("evidence", "cardinality"),
+        [((), 1), (("ambiguous",), 0), (("ambiguous",), 2)],
+    )
+    def test_unknown_authorship_cannot_carry_positive_match_state(
+        self, evidence: tuple[str, ...], cardinality: int
+    ) -> None:
+        locator = claude_locator()
+        with pytest.raises(ValueError, match="unknown submissions"):
+            NativeMessage(
+                identity=MessageIdentity(
+                    logical_message_id="logical-1",
+                    canonical_locator=locator,
+                    physical_aliases=(alias(locator),),
+                ),
+                timestamp="2026-08-11T00:00:00Z",
+                role="user",
+                session_kind=SessionKind.UNKNOWN,
+                conversation_epoch=0,
+                content_class=ContentClass.PROSE,
+                text="visible text",
+                submitted_by=SubmittedBy.UNKNOWN,
+                submission_evidence=evidence,
+                submission_match_cardinality=cardinality,
+            )
+
+    @pytest.mark.parametrize(
         (
             "field_name",
             "record_ordinal",
@@ -334,29 +444,50 @@ class TestIdentityModels:
             )
 
 
-@given(st.text(min_size=1), st.text(min_size=1))
+root_component = st.text(
+    alphabet="abcdefghijklmnopqrstuvwxyz0123456789-", min_size=1, max_size=20
+)
+
+
+@given(st.lists(root_component, min_size=2, max_size=2, unique=True))
 def test_provider_root_changes_leave_identity_unchanged(
-    first_root: str, second_root: str
+    root_names: list[str],
 ) -> None:
     relative = Path("project/session.jsonl")
-    identity = MessageIdentity(
+    first_alias = PhysicalAlias(
+        locator=claude_locator(),
+        source_file_relative=relative,
+        record_ordinal=0,
+        source_line=1,
+        source_byte_offset=0,
+        raw_byte_length=1,
+        source_digest=DIGEST,
+    )
+    second_alias = PhysicalAlias(
+        locator=claude_locator(),
+        source_file_relative=Path("project") / "session.jsonl",
+        record_ordinal=0,
+        source_line=1,
+        source_byte_offset=0,
+        raw_byte_length=1,
+        source_digest=DIGEST,
+    )
+    first_identity = MessageIdentity(
         logical_message_id="logical-1",
         canonical_locator=claude_locator(),
-        physical_aliases=(
-            PhysicalAlias(
-                locator=claude_locator(),
-                source_file_relative=relative,
-                record_ordinal=0,
-                source_line=1,
-                source_byte_offset=0,
-                raw_byte_length=1,
-                source_digest=DIGEST,
-            ),
-        ),
+        physical_aliases=(first_alias,),
+    )
+    second_identity = MessageIdentity(
+        logical_message_id="logical-1",
+        canonical_locator=claude_locator(),
+        physical_aliases=(second_alias,),
     )
 
-    # Provider roots locate the same relative source but are deliberately absent
-    # from canonical identity.
-    assert Path(first_root) / relative != Path(second_root) / relative or first_root == second_root
-    assert identity == identity
+    first_root = Path("/") / root_names[0]
+    second_root = Path("/") / root_names[1]
+    assert first_root / relative != second_root / relative
+    assert first_identity == second_identity
+    assert first_identity.canonical_locator == second_identity.canonical_locator
+    assert first_identity.logical_message_id == second_identity.logical_message_id
+    assert first_identity.physical_aliases == second_identity.physical_aliases
     assert "provider_root" not in {field.name for field in fields(MessageIdentity)}

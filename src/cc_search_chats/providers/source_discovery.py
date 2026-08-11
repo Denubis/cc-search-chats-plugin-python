@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from cc_search_chats.core.identity import Provider
+from cc_search_chats.core.identity import Provider, validate_source_file_relative
 
 _ARTIFACT_PROBE_LIMIT = 64 * 1024
 _GIT_ROUTING_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
@@ -156,8 +156,7 @@ def read_bounded_jsonl(
     """
     if target_size < 0:
         raise ValueError("target_size must be nonnegative")
-    if source_file_relative.is_absolute() or source_file_relative == Path("."):
-        raise ValueError("source_file_relative must be a nonempty relative path")
+    validate_source_file_relative(source_file_relative)
 
     envelopes: list[RecordEnvelope] = []
     diagnostics: list[SourceDiagnostic] = []
@@ -253,7 +252,7 @@ def _positive_non_native_diagnostic(path: Path) -> SourceDiagnostic | None:
 
     try:
         payload = json.loads(first_line)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except json.JSONDecodeError, UnicodeDecodeError:
         return None
     if not isinstance(payload, dict):
         return None
@@ -342,9 +341,7 @@ def _root_failure(provider: Provider, root: Path) -> DiscoveryResult | None:
             SourceDiagnosticCode.UNREADABLE_ROOT,
             f"configured provider root could not be inspected: {error}",
         )
-    if mode & 0o444 == 0 or mode & 0o111 == 0 or not os.access(
-        root, os.R_OK | os.X_OK
-    ):
+    if mode & 0o444 == 0 or mode & 0o111 == 0 or not os.access(root, os.R_OK | os.X_OK):
         return _discovery_failure(
             provider,
             root,
