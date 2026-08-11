@@ -183,15 +183,9 @@ def _has_intervening_visible_message(
     return False
 
 
-def _preferred_alias(aliases: tuple[PhysicalAlias, ...]) -> PhysicalAlias:
-    """Prefer a native response-item ID, then stable physical order."""
-    return min(
-        aliases,
-        key=lambda alias: (
-            alias.locator.key_kind is not LocatorKeyKind.ID,
-            _alias_key(alias),
-        ),
-    )
+def _earliest_alias(aliases: tuple[PhysicalAlias, ...]) -> PhysicalAlias:
+    """Freeze canonical identity at the earliest physical occurrence."""
+    return min(aliases, key=_alias_key)
 
 
 def codex_logical_message_id(canonical_alias: PhysicalAlias) -> str:
@@ -215,7 +209,7 @@ def _merge_messages(
             key=_alias_key,
         )
     )
-    canonical_alias = _preferred_alias(aliases)
+    canonical_alias = _earliest_alias(aliases)
     representative_candidate = next(
         candidate
         for candidate in candidates

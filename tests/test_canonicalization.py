@@ -184,6 +184,56 @@ class TestCanonicalPairing:
         assert len(prefix.identity.physical_aliases) == 1
         assert len(paired.identity.physical_aliases) == 2
 
+    @pytest.mark.parametrize(
+        ("first_family", "first_message_id", "second_family", "second_message_id"),
+        [
+            (
+                CodexRecordFamily.RESPONSE_MESSAGE,
+                "native-response-id",
+                CodexRecordFamily.EVENT_MESSAGE,
+                None,
+            ),
+            (
+                CodexRecordFamily.EVENT_MESSAGE,
+                None,
+                CodexRecordFamily.RESPONSE_MESSAGE,
+                "native-response-id",
+            ),
+        ],
+    )
+    def test_earliest_physical_alias_owns_identity_as_aliases_grow(
+        self,
+        first_family: CodexRecordFamily,
+        first_message_id: str | None,
+        second_family: CodexRecordFamily,
+        second_message_id: str | None,
+    ) -> None:
+        first = candidate(
+            ordinal=1,
+            family=first_family,
+            text="same message",
+            message_id=first_message_id,
+        )
+        second = candidate(
+            ordinal=2,
+            family=second_family,
+            text="same message",
+            message_id=second_message_id,
+        )
+
+        prefix = canonicalize_codex_candidates((first,)).messages[0]
+        one_shot = canonicalize_codex_candidates((first, second))
+        permuted = canonicalize_codex_candidates((second, first))
+
+        assert one_shot == permuted
+        assert len(one_shot.messages) == 1
+        identity = one_shot.messages[0].identity
+        assert identity.logical_message_id == prefix.identity.logical_message_id
+        assert identity.canonical_locator == prefix.identity.canonical_locator
+        assert identity.physical_aliases == tuple(
+            sorted(aliases((first, second)), key=lambda value: value.record_ordinal)
+        )
+
     def test_pairs_only_mutually_unique_response_and_event_aliases(self) -> None:
         values = (
             candidate(

@@ -398,6 +398,70 @@ class TestCodexSchemaFamilies:
         assert suffix.canonicalization_diagnostics == ()
         assert suffix.next_state.trailing_candidate is None
 
+    @pytest.mark.parametrize("response_first", [True, False])
+    def test_split_append_preserves_earliest_projection_identity(
+        self, response_first: bool
+    ) -> None:
+        response = {
+            "timestamp": "2026-08-11T09:00:00Z"
+            if response_first
+            else "2026-08-11T09:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "native-response-id",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "paired text"}],
+            },
+        }
+        event = {
+            "timestamp": "2026-08-11T09:00:01Z"
+            if response_first
+            else "2026-08-11T09:00:00Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "paired text"},
+        }
+        first, second = (response, event) if response_first else (event, response)
+        records = sequential_envelopes(
+            {
+                "type": "session_meta",
+                "payload": {"id": "append-session", "source": "cli"},
+            },
+            first,
+            second,
+        )
+
+        one_shot = parse_codex_session(
+            records,
+            context=CodexSessionContext(source_session_id="append-session"),
+        )
+        prefix = parse_codex_session(
+            records[:2],
+            context=CodexSessionContext(source_session_id="append-session"),
+        )
+        suffix = parse_codex_session(
+            records[2:],
+            context=CodexSessionContext(source_session_id="append-session"),
+            prior_state=prefix.next_state,
+        )
+
+        assert len(one_shot.messages) == len(suffix.messages) == 1
+        assert suffix.messages[0].identity == one_shot.messages[0].identity
+        assert (
+            suffix.messages[0].identity.logical_message_id
+            == prefix.messages[0].identity.logical_message_id
+        )
+        assert (
+            suffix.messages[0].identity.canonical_locator
+            == prefix.messages[0].identity.canonical_locator
+        )
+        assert [
+            alias.record_ordinal
+            for alias in suffix.messages[0].identity.physical_aliases
+        ] == [1, 2]
+        assert suffix.canonicalization_diagnostics == ()
+        assert suffix.next_state.trailing_candidate is None
+
     def test_compaction_clears_cross_append_pairing_carry(self) -> None:
         prefix = parse_codex_session(
             sequential_envelopes(
