@@ -1,6 +1,6 @@
 # cc-search-chats
 
-Search and recover context from Claude Code chat history.
+Search and recover context from Claude Code and Codex chat history.
 
 ## The Problem
 
@@ -32,13 +32,53 @@ uv tool install git+https://github.com/Denubis/cc-search-chats-plugin-python
 cc-search-chats
 ```
 
-No runtime dependencies -- the package uses only Python's standard library.
+For semantic search, install the optional model runtime:
+
+```bash
+uv tool install \
+  'cc-search-chats[semantic] @ git+https://github.com/Denubis/cc-search-chats-plugin-python'
+```
+
+## PostgreSQL Setup
+
+The standard CLI uses local database `cc_search_chats` as
+`cc_search_chats_owner`. PostgreSQL 18 and pgvector must already be installed.
+As a PostgreSQL administrator, provision them once:
+
+```sql
+CREATE ROLE cc_search_chats_owner LOGIN;
+\password cc_search_chats_owner
+CREATE DATABASE cc_search_chats OWNER cc_search_chats_owner;
+\connect cc_search_chats
+CREATE EXTENSION vector;
+```
+
+Store the password in `~/.pgpass` (mode `0600`) so cron and agents need no DSN
+or password environment variable:
+
+```text
+127.0.0.1:5432:cc_search_chats:cc_search_chats_owner:YOUR_PASSWORD
+```
+
+Large installations may create the database in an administrator-managed
+tablespace on external storage. The application creates only its own schema; it
+never creates roles, databases, extensions, or tablespaces.
+
+Semantic search uses the pinned local `nvidia/Nemotron-3-Embed-8B-BF16`
+snapshot in the normal Hugging Face cache (`~/.cache/huggingface` or `$HF_HOME`).
+No network access is used at runtime.
 
 ## Quick Start
 
 ```bash
 # Find discussions about a topic
 cc-search-chats search "database migration"
+
+# Idempotently refresh the Claude + Codex corpus and semantic vectors
+cc-search-chats index
+
+# Inspect the resumable checkpoint
+cc-search-chats index --status --json
 
 # Recover the most recent substantial session
 cc-search-chats extract
@@ -57,19 +97,25 @@ cc-search-chats context MESSAGE_UUID
 
 | Command | Description | Key Flags |
 |---------|-------------|-----------|
-| `search "query"` | Full-text search; current project first, broadens to all indexed projects on a miss | `--all`, `--everything`, `--epoch N`, `--days N`, `--project PATH` |
+| `search "query"` | Hybrid PostgreSQL full-text + semantic search | `--literal`, `--provider`, `--limit`, `--json` |
 | `extract [SESSION_ID]` | Extract a conversation (auto-discovers if no ID given) | `--epoch N`, `--verbose` |
 | `list` | List sessions with metadata | `--days N`, `--project PATH` |
 | `context UUID` | Show messages around a specific message | `--depth N` |
-| `index` | Reindex the current project, or every project with `--all` | `--all`, `--project PATH` |
+| `index` | Idempotently refresh Claude + Codex and resume semantic work | `--literal-only`, `--semantic-only`, `--status`, `--json` |
 
 All commands support `--json` for structured output suitable for programmatic consumption. Every payload is an object carrying `schema_version`; e.g. `search` → `results`, `list` → `sessions`.
 
 ## How It Works
 
-Chat sessions are stored by Claude Code as JSONL files in `~/.claude/projects/`. Each file contains timestamped messages with roles, content, and metadata.
+Chat sessions are read from Claude Code JSONL under `~/.claude/projects/` and
+Codex JSONL under `~/.codex/sessions/`.
 
-**cc-search-chats** builds a local SQLite FTS5 (full-text search) index over these files. The index is created just-in-time on first access and updated incrementally when session files change. Sessions are indexed in reverse chronological order so the most recent content is available first.
+**cc-search-chats** stores immutable corpus and semantic revisions in PostgreSQL,
+uses PostgreSQL full-text search and pgvector, and atomically selects complete
+revisions. Indexing commits small batches, resumes missing vectors, reuses
+unchanged vectors after refresh, and prevents concurrent workers with a
+PostgreSQL advisory lock. Semantic indexing automatically runs in a polite,
+memory- and task-bounded systemd user scope.
 
 ### Cross-Project Search
 
@@ -78,21 +124,23 @@ By default `search` looks at the current project (the one matching your working 
 The index only contains projects it has already seen. To make the whole machine searchable, build the global index once:
 
 ```bash
-cc-search-chats index --all
+cc-search-chats index
 ```
 
-This walks every project under `~/.claude/projects/` and indexes it. It is incremental — re-runs only touch new or changed sessions — so it is cheap to schedule. To keep the global index warm, add a cron entry or a systemd user timer:
+This walks both native roots. Re-runs create a fresh corpus receipt, reuse
+unchanged vectors, and resume any interrupted semantic work. To keep the index
+fresh, add a cron entry or a systemd user timer:
 
 ```bash
 # crontab -e  (hourly)
-0 * * * * ~/.local/bin/cc-search-chats index --all >/dev/null 2>&1
+0 * * * * ~/.local/bin/cc-search-chats index >/dev/null 2>&1
 ```
 
 ```ini
 # ~/.config/systemd/user/cc-search-index.service
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/cc-search-chats index --all
+ExecStart=%h/.local/bin/cc-search-chats index
 
 # ~/.config/systemd/user/cc-search-index.timer
 # enable with: systemctl --user enable --now cc-search-index.timer
@@ -181,8 +229,12 @@ Now you can say things like *"that staging bug from the other day"* and Claude w
 ## Requirements
 
 - Python 3.14+
-- SQLite with FTS5 support (included in standard Python builds)
-- Zero external dependencies
+- PostgreSQL 18 with pgvector
+- A CUDA-capable GPU and the pinned local Nemotron model for semantic search
+
+Set `CC_SEARCH_DB_PATH` only to opt into the legacy SQLite implementation.
+`CC_SEARCH_DATABASE_DSN`, `CC_SEARCH_MODEL_PATH`, and source-root variables are
+available as explicit overrides for non-default deployments.
 
 ## Acknowledgements
 
