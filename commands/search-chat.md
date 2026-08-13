@@ -1,77 +1,23 @@
 ---
-description: "Search previous sessions, chat history, last session, earlier conversation, before I made, what we discussed, find where we talked about, previous chat, old session, yesterday's session, recover context, lost context, compression"
+description: "Search or recover previous Claude Code and Codex conversations"
 allowed-tools: ["Bash(cc-search-chats:*)"]
 ---
 
 # Search Chat History
 
-Search, recover, and extract content from Claude Code chat sessions.
+**Request:** $ARGUMENTS
 
-**Arguments provided:** $ARGUMENTS
+Use `cc-search-chats` with `--json` and require `schema_version: 1`.
 
-## Subcommand Routing
+- Topic: `cc-search-chats search "QUERY" --json`
+- Exact/filter search: `cc-search-chats search "QUERY" --literal --json`
+- Recent sessions: `cc-search-chats list --days 7 --json`
+- Recover: `cc-search-chats extract [SESSION_ID] --json`
+- Follow a result: `cc-search-chats context CCCHAT_LOCATOR --depth 10 --json`
+- Reindex: `cc-search-chats index --json`
+- Index progress: `cc-search-chats index --status --json`
 
-Determine the user's intent and route to the appropriate subcommand. Always use the `--json` flag for structured output.
-
-### "search X" / "find where we discussed X"
-
-```bash
-cc-search-chats search "X" --json
-```
-
-Searches the current project first and automatically broadens to all indexed projects when there are no local hits. Optional flags: `--all` (search every project up front), `--everything` (live full-content scan incl. thinking + tool calls), `--epoch N`, `--days N`, `--project PATH` (pin one project; never broadens).
-
-### "what was in my last session" / "recover context"
-
-```bash
-cc-search-chats extract --json
-```
-
-With no session ID, auto-discovers the most recent substantial session. Optional: `--epoch 0` for pre-compression content.
-
-### "show my recent sessions"
-
-```bash
-cc-search-chats list --json
-```
-
-Optional: `--days N` (default: all), `--project PATH`.
-
-### "show context around message X"
-
-```bash
-cc-search-chats context UUID --json
-```
-
-Optional: `--depth N` (surrounding messages, default 5).
-
-### "rebuild the index"
-
-```bash
-cc-search-chats index --json
-```
-
-Reindexes the current project. Use `cc-search-chats index --all` to (incrementally) index every project under `~/.claude/projects/` — needed before cross-project search can find other projects.
-
-## Instructions
-
-1. If no arguments provided, ask the user what they want to search for or recover.
-
-2. Classify the user's request and run the appropriate command above with `--json`.
-
-3. **Check `schema_version` first.** Every `--json` payload is an object carrying `schema_version` (currently `1`). If it is missing or different, the `cc-search-chats` CLI and this plugin are out of sync — stop and tell the user to reinstall the CLI (`uv tool install --reinstall git+https://github.com/Denubis/cc-search-chats-plugin-python`) or update the plugin via `/plugin`. Otherwise parse and present:
-   - For **search results**: read the `results` array. If `scope` is `widened` or `all`, note the matches came from outside the current project and show each result's `project_path`. Show snippets with session IDs, epoch info, and timestamps. Offer to extract specific sessions.
-   - For **extract**: read `epochs`; show the conversation with role labels. Mention epoch boundaries if present.
-   - For **list**: read the `sessions` array; show a table of sessions with dates, message counts, and epoch counts.
-   - For **context**: read `target`/`before`/`after`; show the target message with surrounding conversation.
-
-4. Include session IDs in output so the user can drill down further (e.g. `extract <session-id>`).
-
-5. If no results found (search already auto-broadens to every indexed project): try alternative keywords, increase `--days`, run `cc-search-chats index --all` if the global index may be incomplete, add `--everything` to include thinking and tool calls, or use `list` to see what sessions exist.
-
-## Examples
-
-- `/search-chat "database migration"` -- find discussions about database migrations
-- `/search-chat "auth" --epoch 0` -- find pre-compression auth discussions
-- `/search-chat recover context` -- extract the most recent substantial session
-- `/search-chat list recent sessions` -- show recent sessions
+Search results are in `results`; list results in `sessions`; extract/context/
+resolve results in `messages`. Include provider, session ID, timestamp, and the
+durable `ccchat:v1:` locator when presenting matches. Try alternative terms or
+`--literal` before starting a reindex.

@@ -1,119 +1,57 @@
 ---
 name: search-chat
-description: "Search and recover context from Claude Code chat history — use when asked about previous conversations, lost context, cross-referencing sessions, what we discussed, earlier today, yesterday's session, find where we talked about, recover from compression"
-user-invocable: true
+description: "Search and recover context from Claude Code and Codex chat history. Use for previous conversations, lost context, cross-session references, earlier discussions, or recovering work after compression or a crash."
 allowed-tools: ["Bash(cc-search-chats:*)"]
 ---
 
-# Progressive Search Workflow
+# Search Chat History
 
-This skill guides you through finding and recovering content from Claude Code chat history. Follow the steps in order.
+Use the PostgreSQL-backed CLI with `--json`. Check `schema_version` is `1`
+before interpreting output.
 
-## Step 1: Classify the Query
-
-Determine what the user is asking for:
-
-| Intent | Signal phrases | Action |
-|--------|---------------|--------|
-| **Temporal** | "what did we discuss yesterday", "my last session", "earlier today" | `extract` with no args, or `list --days N` |
-| **Topic** | "find the auth discussion", "where did we talk about database" | `search "keywords"` |
-| **Recovery** | "I lost context", "the session crashed", "what was I working on" | `extract` with no args (auto-discovers recent substantial session) |
-| **Hybrid** | "what did we discuss about auth yesterday" | `search "auth" --days 1` |
-
-## Step 2: Execute Search
-
-Run the appropriate command with `--json` for structured output:
+## Route the request
 
 ```bash
-# Topic search
+# Topic or natural-language search (hybrid FTS + semantic)
 cc-search-chats search "query" --json
 
-# Recovery / temporal (auto-discovers most recent session)
-cc-search-chats extract --json
+# Exact words, filters, or semantic runtime unavailable
+cc-search-chats search "query" --literal --json
+cc-search-chats search "query" --literal --provider codex --days 7 --json
 
-# List recent sessions
+# Recent sessions across Claude and Codex
 cc-search-chats list --days 7 --json
 
-# Pre-compression content specifically
-cc-search-chats extract --epoch 0 --json
+# Recover a session; omit ID for the most recent substantial session
+cc-search-chats extract [SESSION_ID] --json
 
-# Hybrid: topic + recency
-cc-search-chats search "query" --days 3 --json
+# Surrounding messages from a search-result locator
+cc-search-chats context CCCHAT_LOCATOR --depth 10 --json
 
-# Search every indexed project up front (instead of waiting for a local miss)
-cc-search-chats search "query" --all --json
+# Exact resolution of a durable locator
+cc-search-chats resolve CCCHAT_LOCATOR --json
 
-# Include thinking + tool calls (live full-content scan, not persisted)
-cc-search-chats search "query" --everything --json
+# Idempotent refresh, or inspect a resumable semantic checkpoint
+cc-search-chats index --json
+cc-search-chats index --status --json
 ```
 
-## Step 3: Interpret Results
+Do not run `index` merely because a search misses. Try alternative terms and
+literal mode first; indexing scans both complete native roots and may require
+the GPU for new prose.
 
-**Check `schema_version` first.** Every `--json` payload is an object carrying `schema_version`. This skill targets `schema_version: 1`. If it is missing or a different number, the installed `cc-search-chats` CLI is out of sync with this plugin — **stop, do not interpret the output**, and tell the user to update the CLI:
+## Interpret output
 
-```bash
-uv tool install --reinstall git+https://github.com/Denubis/cc-search-chats-plugin-python
-```
+- `search`: read `results`; show provider, session ID, timestamp, role, text,
+  and locator. Offer `context` or `extract` for follow-up.
+- `list`: read `sessions`; show provider, session ID, kind, latest timestamp,
+  message count, repository, and cwd.
+- `extract`, `context`, `resolve`: read `messages` in order.
+- `index --status`: read `completed`, `total`, and `selected`.
 
-(or update the plugin via `/plugin` if the CLI is the newer one).
+Always retain provider-qualified session IDs and `ccchat:v1:` locators. A
+vendor `role=user` does not prove human authorship; use `submitted_by` only when
+the result provides positive provenance.
 
-Then parse and present to the user:
-
-- **Search results**: read the `results` array. When `scope` is `widened` or `all`, tell the user the match came from another project and show each result's `project_path`. Show matching snippets with session IDs, timestamps, and epoch numbers. Explain that epoch 0 is pre-compression content.
-- **Extract output**: read `epochs`. Show the conversation with role labels. Note epoch boundaries if compression occurred.
-- **Session list**: read the `sessions` array. Show dates, message counts, and epoch counts for each session.
-- **Context**: read `target` / `before` / `after`. Show the target message with surrounding conversation.
-
-Always include session IDs so the user can drill down further.
-
-## Step 4: Broaden if No Results
-
-Search already broadens to **every indexed project** automatically when the current project has no hits (the result `scope` will be `widened`). If it still finds nothing:
-
-1. **Remove epoch filter** if one was set (search across all epochs)
-2. **Increase `--days` range** (try 30, then 90)
-3. **Run `index --all`** if the global index may be incomplete — a project you never opened is not indexed until then
-4. **Add `--everything`** to also search thinking and tool calls
-5. **Try alternative keywords** (synonyms, related terms)
-6. **Fall back to `list`** to show what sessions exist
-
-```bash
-# Broader search across all epochs and days
-cc-search-chats search "query" --days 90 --json
-
-# Make sure every project is indexed, then search everything
-cc-search-chats index --all
-cc-search-chats search "query" --all --json
-
-# Include reasoning + tool calls
-cc-search-chats search "query" --everything --json
-
-# See what exists
-cc-search-chats list --json
-```
-
-## Step 5: Drill Down
-
-When the user wants more detail on a specific result:
-
-```bash
-# Full conversation from a session
-cc-search-chats extract SESSION_ID --json
-
-# Pre-compression content only
-cc-search-chats extract SESSION_ID --epoch 0 --json
-
-# Context around a specific message
-cc-search-chats context MESSAGE_UUID --json
-
-# More surrounding context
-cc-search-chats context MESSAGE_UUID --depth 10 --json
-```
-
-## Key Concepts
-
-- **Epoch 0**: Content from before Claude Code's compression. This is the "lost context" that users most commonly want to recover.
-- **Compression boundary**: When Claude Code compresses a session, it creates a new epoch. The boundary marks where context was summarised.
-- **JIT indexing**: The tool indexes the current project's sessions on first access. `index --all` builds a global index across every project (incremental, cron-friendly).
-- **Project scope**: Search looks at the current project first and broadens to all indexed projects on a miss (`scope`: local / widened / all). `--all` forces machine-wide; `--project PATH` pins one project and never broadens.
-- **Full-content scan**: `--everything` searches the full text — thinking blocks and tool inputs/outputs — via a throwaway in-memory index. The persistent index keeps only the clean conversation.
+If `schema_version` is missing or not `1`, stop and report that the plugin and
+CLI are out of sync.
