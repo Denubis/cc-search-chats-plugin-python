@@ -439,7 +439,12 @@ def _extract_content(
             )
         else:
             rows.insert(0, (ContentClass.PROSE, "\n".join(prose)))
-    return rows, diagnostics
+    grouped: dict[ContentClass, list[str]] = {}
+    for content_class, text in rows:
+        grouped.setdefault(content_class, []).append(text)
+    return [
+        (content_class, "\n".join(texts)) for content_class, texts in grouped.items()
+    ], diagnostics
 
 
 def _native_message(

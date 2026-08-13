@@ -178,6 +178,27 @@ class TestClaudeRecognizedShapes:
             1,
         ]
 
+    def test_multiple_tools_share_one_row_per_content_class(self) -> None:
+        result = parse_fixture(
+            "claude_multiple_tools.jsonl",
+            session_id="claude-multiple-tools",
+            source_file_relative=Path("project/claude-multiple-tools.jsonl"),
+        )
+
+        assert [
+            (message.content_class, message.text) for message in result.messages
+        ] == [
+            (ContentClass.TOOL_NAME, "Read\nGrep"),
+            (
+                ContentClass.TOOL_INPUT,
+                '{"file_path":"one.txt"}\n{"pattern":"needle"}',
+            ),
+        ]
+        assert any(
+            diagnostic.code is ClaudeDiagnosticCode.INVALID_UNICODE
+            for diagnostic in result.diagnostics
+        )
+
     def test_compact_boundary_is_retained_but_never_searchable(self) -> None:
         result = parse_fixture(
             "claude_primary.jsonl",
@@ -395,7 +416,11 @@ class TestClaudeFailClosedDiagnostics:
         ]
 
 
-visible_text = st.text(min_size=1, max_size=200)
+visible_text = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters="\x00"),
+    min_size=1,
+    max_size=200,
+)
 non_boolean_json = st.recursive(
     st.none()
     | st.integers()

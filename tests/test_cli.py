@@ -24,7 +24,7 @@ from typing import Literal
 
 import pytest
 
-from cc_search_chats.cli import build_parser, main
+from cc_search_chats.cli import _contain_semantic_index, build_parser, main
 from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.storage.index import (
@@ -52,6 +52,23 @@ FAKE_PROJECT_PATH = "/home/testuser/myproject"
 # ============================================================
 # Helpers
 # ============================================================
+
+
+def test_semantic_index_reexecs_inside_bounded_systemd_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = build_parser().parse_args(["index", "--semantic-only"])
+    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "index", "--semantic-only"])
+    launched = []
+    monkeypatch.setattr("os.execvp", lambda executable, command: launched.append(command))
+
+    _contain_semantic_index(args)
+
+    command = launched[0]
+    assert command[:3] == ["systemd-run", "--user", "--scope"]
+    assert "--property=MemoryMax=32G" in command
+    assert "--property=TasksMax=256" in command
+    assert command[-3:] == ["cc-search-chats", "index", "--semantic-only"]
 
 
 def _setup_project_dir(tmp_path: Path) -> Path:
@@ -254,6 +271,7 @@ class TestMainErrors:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.setenv("CC_SEARCH_DB_PATH", "/tmp/test-index.sqlite")
         monkeypatch.setattr(
             sys, "argv", ["cc-search-chats", "search", "query", "--all"]
         )

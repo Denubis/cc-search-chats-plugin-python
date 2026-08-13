@@ -97,8 +97,8 @@ def validate_source_file_relative(value: Path) -> None:
 
 
 def is_unicode_scalar_text(value: object) -> bool:
-    """Return whether text can be represented as strict UTF-8 scalar values."""
-    if not isinstance(value, str):
+    """Return whether text is strict UTF-8 accepted by PostgreSQL text fields."""
+    if not isinstance(value, str) or "\x00" in value:
         return False
     try:
         value.encode("utf-8", errors="strict")

@@ -4,9 +4,15 @@ Imperative Shell — parses arguments and orchestrates storage/output layers.
 """
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
+from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import psycopg
 
 from cc_search_chats.core.discovery import (
     decode_project_path,
@@ -15,6 +21,7 @@ from cc_search_chats.core.discovery import (
     list_session_files,
     rank_sessions,
 )
+from cc_search_chats.core.identity import NativeLocator, parse_locator
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.output import (
     format_context,
@@ -28,6 +35,7 @@ from cc_search_chats.output import (
     json_search_results,
     json_session_list,
 )
+from cc_search_chats.semantic import ModelUnavailable, embed_passages, embed_query
 from cc_search_chats.storage.index import (
     ProjectRebuildError,
     close_db,
@@ -47,6 +55,339 @@ from cc_search_chats.storage.index import (
     search,
     search_full_content,
 )
+from cc_search_chats.storage.postgresql import (
+    context_messages as pg_context_messages,
+)
+from cc_search_chats.storage.postgresql import (
+    extract_session as pg_extract_session,
+)
+from cc_search_chats.storage.postgresql import (
+    index_embeddings,
+    refresh_native_sources,
+    search_messages,
+)
+from cc_search_chats.storage.postgresql import (
+    list_sessions as pg_list_sessions,
+)
+from cc_search_chats.storage.postgresql import (
+    resolve_message as pg_resolve_message,
+)
+from cc_search_chats.storage.postgresql.semantic import hybrid_search
+
+_DEFAULT_POSTGRES_DSN = (
+    "host=127.0.0.1 port=5432 dbname=cc_search_chats user=cc_search_chats_owner"
+)
+
+
+def _contain_semantic_index(args: argparse.Namespace) -> None:
+    """Re-enter semantic indexing in a host-safe systemd scope."""
+    if (
+        args.command != "index"
+        or args.literal_only
+        or args.status
+        or "/run-r" in Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    ):
+        return
+    command = [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--property=MemoryHigh=24G",
+        "--property=MemoryMax=32G",
+        "--property=MemorySwapMax=4G",
+        "--property=TasksMax=256",
+        "--property=CPUWeight=25",
+        "--property=IOWeight=25",
+        "--",
+        *sys.argv,
+    ]
+    try:
+        os.execvp(command[0], command)
+    except OSError as error:
+        raise RuntimeError(
+            "semantic indexing requires a working systemd user session for resource "
+            "containment"
+        ) from error
+
+
+def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
+    """Run the migrated index/search surface against PostgreSQL."""
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        if args.command == "index":
+            if args.status:
+                status = next(
+                    connection.execute(
+                        """
+                        SELECT cs.current_revision_id, sr.semantic_revision_id,
+                               COALESCE(sr.completed, 0),
+                               (SELECT count(*) FROM cc_search_chats.message AS m
+                                WHERE m.revision_id = cs.current_revision_id
+                                  AND m.content_class = 'prose'
+                                  AND m.prose_content ~ '[^[:space:]]'),
+                               COALESCE(sr.selected, false)
+                        FROM cc_search_chats.corpus_state AS cs
+                        LEFT JOIN LATERAL (
+                            SELECT r.semantic_revision_id,
+                                   count(e.semantic_revision_id) AS completed,
+                                   ss.current_semantic_revision_id =
+                                       r.semantic_revision_id AS selected
+                            FROM cc_search_chats.semantic_revision AS r
+                            LEFT JOIN cc_search_chats.message_embedding AS e
+                              ON e.semantic_revision_id = r.semantic_revision_id
+                            LEFT JOIN cc_search_chats.semantic_state AS ss
+                              ON ss.singleton
+                            WHERE r.corpus_revision_id = cs.current_revision_id
+                            GROUP BY r.semantic_revision_id,
+                                     ss.current_semantic_revision_id
+                            ORDER BY completed DESC
+                            LIMIT 1
+                        ) AS sr ON true
+                        WHERE cs.singleton
+                        """
+                    ),
+                    None,
+                )
+                revision, semantic_revision, completed, total, selected = status or (
+                    None,
+                    None,
+                    0,
+                    0,
+                    False,
+                )
+                payload = {
+                    "schema_version": 1,
+                    "revision_id": revision,
+                    "semantic_revision_id": semantic_revision,
+                    "completed": completed,
+                    "total": total,
+                    "selected": bool(selected),
+                }
+                if args.json:
+                    print(json.dumps(payload, sort_keys=True))
+                else:
+                    print(f"Semantic index: {completed}/{total} passages")
+                return 0
+
+            def progress(provider: str, completed: int, total: int) -> None:
+                if completed == total or completed % 100 == 0:
+                    print(
+                        f"Indexing {provider}: {completed}/{total} sources",
+                        file=sys.stderr,
+                    )
+
+            if args.semantic_only:
+                revision_id, source_count, message_count = next(
+                    connection.execute(
+                        """
+                        SELECT s.current_revision_id, 0, count(*)
+                        FROM cc_search_chats.corpus_state AS s
+                        JOIN cc_search_chats.message AS m
+                          ON m.revision_id = s.current_revision_id
+                        WHERE s.singleton
+                        GROUP BY s.current_revision_id
+                        """
+                    )
+                )
+            else:
+                result = refresh_native_sources(
+                    connection,
+                    claude_root=Path(
+                        os.environ.get("CC_SEARCH_CLAUDE_ROOT", "~/.claude/projects")
+                    )
+                    .expanduser()
+                    .resolve(),
+                    codex_root=Path(
+                        os.environ.get("CC_SEARCH_CODEX_ROOT", "~/.codex/sessions")
+                    )
+                    .expanduser()
+                    .resolve(),
+                    progress=progress,
+                )
+                revision_id = result.revision_id
+                source_count = result.source_count
+                message_count = result.message_count
+            vector_count = 0
+            if not args.literal_only:
+                last_embedding_report: int | None = None
+
+                def embedding_progress(completed: int, total: int) -> None:
+                    nonlocal last_embedding_report
+                    if (
+                        last_embedding_report is None
+                        or completed == total
+                        or completed - last_embedding_report >= 100
+                    ):
+                        print(
+                            f"Embedding passages: {completed}/{total}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        last_embedding_report = completed
+
+                vector_count = index_embeddings(
+                    connection, embed_passages, progress=embedding_progress
+                )
+            payload = {
+                "schema_version": 1,
+                "revision_id": revision_id,
+                "sources": source_count,
+                "messages": message_count,
+                "embeddings": vector_count,
+                "status": "complete",
+            }
+            if args.json:
+                print(json.dumps(payload, sort_keys=True))
+            else:
+                print(
+                    f"Indexed {message_count} messages from "
+                    f"{source_count} sources into revision {revision_id}",
+                    file=sys.stderr,
+                )
+            return 0
+
+        if args.command == "list":
+            sessions = pg_list_sessions(
+                connection,
+                provider=args.provider,
+                project=args.project,
+                since=_since_days(args.days),
+            )
+            values = [
+                {
+                    "provider": value.provider,
+                    "session_id": value.source_session_id,
+                    "session_kind": value.session_kind,
+                    "latest_timestamp": value.latest_timestamp,
+                    "message_count": value.message_count,
+                    "repository": value.repository,
+                    "cwd": value.cwd,
+                }
+                for value in sessions
+            ]
+            if args.json:
+                print(json.dumps({"schema_version": 1, "sessions": values}))
+            else:
+                for value in values:
+                    print(
+                        f"{value['provider']}:{value['session_id']} "
+                        f"({value['session_kind']}, {value['message_count']} messages)"
+                    )
+            return 0
+
+        if args.command == "extract":
+            session_id = args.session_id
+            if session_id is None:
+                sessions = pg_list_sessions(
+                    connection, provider=args.provider, project=args.project
+                )
+                if not sessions:
+                    raise ValueError("no matching sessions")
+                session_id = sessions[0].source_session_id
+            messages = pg_extract_session(
+                connection,
+                session_id,
+                provider=args.provider,
+                epoch=args.epoch,
+            )
+            values = [asdict(message) for message in messages]
+            if args.json:
+                print(json.dumps({"schema_version": 1, "messages": values}))
+            else:
+                for value in messages:
+                    print(f"[{value.timestamp}] {value.role}:\n{value.text}")
+            return 0
+
+        if args.command in {"context", "resolve"}:
+            if args.command == "resolve" and not isinstance(
+                parse_locator(args.uuid), NativeLocator
+            ):
+                print("Malformed ccchat locator", file=sys.stderr)
+                return 2
+            messages = (
+                pg_context_messages(connection, args.uuid, depth=args.depth)
+                if args.command == "context"
+                else pg_resolve_message(connection, args.uuid)
+            )
+            values = [asdict(message) for message in messages]
+            if args.json:
+                print(json.dumps({"schema_version": 1, "messages": values}))
+            else:
+                for value in messages:
+                    print(f"[{value.timestamp}] {value.role}:\n{value.text}")
+            return 0 if messages else 3
+
+        project = args.project
+        if args.literal:
+            hits = search_messages(
+                connection,
+                args.query,
+                limit=args.limit,
+                provider=args.provider,
+                role=args.role,
+                project=project,
+                since=_since_days(args.days),
+            )
+        else:
+            if args.role is not None or project is not None or args.days is not None:
+                raise ValueError(
+                    "hybrid filters are not wired yet; use search --literal"
+                )
+            hits = tuple(
+                value.message
+                for value in hybrid_search(
+                    connection,
+                    args.query,
+                    embed_query(args.query),
+                    limit=args.limit,
+                    provider=args.provider,
+                )
+            )
+        results = [
+            {
+                "provider": hit.provider,
+                "session_id": hit.source_session_id,
+                "logical_message_id": hit.logical_message_id,
+                "locator": hit.canonical_locator,
+                "timestamp": hit.timestamp,
+                "role": hit.role,
+                "session_kind": hit.session_kind,
+                "text": hit.text,
+                "repository": hit.repository,
+                "cwd": hit.cwd,
+                "score": hit.rank,
+            }
+            for hit in hits
+        ]
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "complete",
+                        "result_limit": args.limit,
+                        "results": results,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        else:
+            for result in results:
+                print(
+                    f"[{result['timestamp']}] {result['provider']}:"
+                    f"{result['session_id']} ({result['role']})\n"
+                    f"  {result['text']}\n  {result['locator']}"
+                )
+        return 0
+
+
+def _since_days(days: int | None) -> str | None:
+    if days is None:
+        return None
+    if days < 0:
+        raise ValueError("days must be nonnegative")
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
 
 def _resolve_project(args: argparse.Namespace) -> str:
@@ -410,6 +751,16 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument(
         "--days", type=int, default=None, help="limit search to last N days"
     )
+    search_parser.add_argument(
+        "--provider", choices=("claude", "codex"), help="limit by provider"
+    )
+    search_parser.add_argument("--role", help="limit by conversational role")
+    search_parser.add_argument(
+        "--limit", type=int, default=20, help="maximum ranked results (default: 20)"
+    )
+    search_parser.add_argument(
+        "--literal", action="store_true", help="use PostgreSQL FTS without the model"
+    )
     search_parser.set_defaults(func=_handle_search)
 
     # extract
@@ -439,6 +790,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--project", type=str, default=None, help="project path"
     )
     extract_parser.add_argument(
+        "--provider", choices=("claude", "codex"), help="limit by provider"
+    )
+    extract_parser.add_argument(
         "--verbose",
         action="store_true",
         default=False,
@@ -465,6 +819,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument(
         "--days", type=int, default=None, help="limit to last N days"
     )
+    list_parser.add_argument(
+        "--provider", choices=("claude", "codex"), help="limit by provider"
+    )
     list_parser.set_defaults(func=_handle_list)
 
     # index
@@ -489,6 +846,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="index every project under ~/.claude/projects (incremental)",
     )
+    index_mode = index_parser.add_mutually_exclusive_group()
+    index_mode.add_argument(
+        "--literal-only",
+        action="store_true",
+        help="skip local semantic embedding generation",
+    )
+    index_mode.add_argument(
+        "--semantic-only",
+        action="store_true",
+        help="embed the selected corpus without refreshing native sources",
+    )
+    index_mode.add_argument(
+        "--status",
+        action="store_true",
+        help="show semantic indexing checkpoint without doing work",
+    )
     index_parser.set_defaults(func=_handle_index)
 
     # context
@@ -503,7 +876,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  cc-search-chats context abc12345-6789-... --json"
         ),
     )
-    context_parser.add_argument("uuid", type=str, help="message UUID")
+    context_parser.add_argument("uuid", type=str, help="message UUID or ccchat locator")
     context_parser.add_argument(
         "--depth",
         type=int,
@@ -518,6 +891,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     context_parser.set_defaults(func=_handle_context)
 
+    resolve_parser = subparsers.add_parser(
+        "resolve",
+        help="resolve an exact ccchat locator",
+        parents=[common_parser],
+    )
+    resolve_parser.add_argument("uuid", type=str, help="exact ccchat locator")
+    resolve_parser.set_defaults(func=None)
+
     return parser
 
 
@@ -529,6 +910,36 @@ def main() -> None:
     if args.command is None:
         parser.print_help()
         sys.exit(0)
+
+    dsn = os.environ.get("CC_SEARCH_DATABASE_DSN")
+    postgres_commands = {"index", "search", "list", "extract", "context", "resolve"}
+    if (
+        dsn is None
+        and args.command in postgres_commands
+        and "CC_SEARCH_DB_PATH" not in os.environ
+    ):
+        dsn = _DEFAULT_POSTGRES_DSN
+    if dsn and args.command in postgres_commands:
+        try:
+            _contain_semantic_index(args)
+            sys.exit(_handle_postgres(args, dsn))
+        except ModelUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(8)
+        except (OSError, psycopg.Error, RuntimeError, ValueError) as exc:
+            detail = (
+                exc.diag.message_primary
+                if isinstance(exc, psycopg.Error) and exc.diag.message_primary
+                else str(exc)
+            )
+            print(
+                f"PostgreSQL operation failed: {detail}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    if args.command == "resolve":
+        print("CC_SEARCH_DATABASE_DSN is required for resolve", file=sys.stderr)
+        sys.exit(1)
 
     # Check FTS5 availability before opening the database.
     try:

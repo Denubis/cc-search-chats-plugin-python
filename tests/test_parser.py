@@ -25,163 +25,56 @@ SESSION_ID = "session-abc-123"
 # --- AC1.1: User message parsing ---
 
 
-class TestParseUserMessage:
-    """cc-search-v2.AC1.1: User message with string content."""
-
-    def test_returns_session_record(self, user_message_line: str) -> None:
-        result = parse_record(user_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-
-    def test_record_type(self, user_message_line: str) -> None:
-        result = parse_record(user_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.record_type == "user"
-
-    def test_role(self, user_message_line: str) -> None:
-        result = parse_record(user_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.role == "user"
-
-    def test_text_content(self, user_message_line: str) -> None:
-        result = parse_record(user_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.text_content == "How do I parse JSONL files in Python?"
-
-    def test_uuid(self, user_message_line: str) -> None:
-        result = parse_record(user_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.uuid == "msg-user-001"
-
-    def test_parent_uuid(self, user_message_line: str) -> None:
-        result = parse_record(user_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.parent_uuid == "msg-parent-000"
-
-    def test_timestamp(self, user_message_line: str) -> None:
-        result = parse_record(user_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.timestamp == "2026-02-07T10:30:00.000Z"
-
-    def test_session_id(self, user_message_line: str) -> None:
-        result = parse_record(user_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.session_id == SESSION_ID
-
-    def test_leaf_uuid_is_none(self, user_message_line: str) -> None:
-        result = parse_record(user_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.leaf_uuid is None
+def test_parse_user_message(user_message_line: str) -> None:
+    result = parse_record(user_message_line, SESSION_ID)
+    assert result == SessionRecord(
+        record_type="user",
+        uuid="msg-user-001",
+        parent_uuid="msg-parent-000",
+        timestamp="2026-02-07T10:30:00.000Z",
+        session_id=SESSION_ID,
+        role="user",
+        text_content="How do I parse JSONL files in Python?",
+        leaf_uuid=None,
+        cwd=None,
+    )
 
 
 # --- AC1.2: Assistant message with list content ---
 
 
-class TestParseAssistantMessage:
-    """cc-search-v2.AC1.2: Assistant message with list content."""
-
-    def test_returns_session_record(self, assistant_message_line: str) -> None:
-        result = parse_record(assistant_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-
-    def test_record_type(self, assistant_message_line: str) -> None:
-        result = parse_record(assistant_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.record_type == "assistant"
-
-    def test_role(self, assistant_message_line: str) -> None:
-        result = parse_record(assistant_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.role == "assistant"
-
-    def test_text_content_contains_text_items(
-        self, assistant_message_line: str
-    ) -> None:
-        result = parse_record(assistant_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert "You can use the json module." in result.text_content
-        assert "Here is an example:" in result.text_content
-
-    def test_text_content_contains_tool_use_summary(
-        self, assistant_message_line: str
-    ) -> None:
-        result = parse_record(assistant_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert "[tool: Read]" in result.text_content
-
-    def test_text_items_joined_by_newline(self, assistant_message_line: str) -> None:
-        result = parse_record(assistant_message_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        expected = "You can use the json module.\n[tool: Read]\nHere is an example:"
-        assert result.text_content == expected
+def test_parse_assistant_message(assistant_message_line: str) -> None:
+    result = parse_record(assistant_message_line, SESSION_ID)
+    assert isinstance(result, SessionRecord)
+    assert result.record_type == result.role == "assistant"
+    assert result.text_content == (
+        "You can use the json module.\n[tool: Read]\nHere is an example:"
+    )
 
 
 # --- AC1.3: compact_boundary -> CompactEvent ---
 
 
-class TestParseCompactBoundary:
-    """cc-search-v2.AC1.3: compact_boundary produces CompactEvent."""
-
-    def test_returns_compact_event(self, compact_boundary_line: str) -> None:
-        result = parse_record(compact_boundary_line, SESSION_ID)
-        assert isinstance(result, CompactEvent)
-
-    def test_trigger(self, compact_boundary_line: str) -> None:
-        result = parse_record(compact_boundary_line, SESSION_ID)
-        assert isinstance(result, CompactEvent)
-        assert result.trigger == "auto"
-
-    def test_pre_tokens(self, compact_boundary_line: str) -> None:
-        result = parse_record(compact_boundary_line, SESSION_ID)
-        assert isinstance(result, CompactEvent)
-        assert result.pre_tokens == 42000
-
-    def test_uuid(self, compact_boundary_line: str) -> None:
-        result = parse_record(compact_boundary_line, SESSION_ID)
-        assert isinstance(result, CompactEvent)
-        assert result.uuid == "msg-compact-003"
-
-    def test_session_id(self, compact_boundary_line: str) -> None:
-        result = parse_record(compact_boundary_line, SESSION_ID)
-        assert isinstance(result, CompactEvent)
-        assert result.session_id == SESSION_ID
-
-    def test_timestamp(self, compact_boundary_line: str) -> None:
-        result = parse_record(compact_boundary_line, SESSION_ID)
-        assert isinstance(result, CompactEvent)
-        assert result.timestamp == "2026-02-07T11:00:00.000Z"
+def test_parse_compact_boundary(compact_boundary_line: str) -> None:
+    assert parse_record(compact_boundary_line, SESSION_ID) == CompactEvent(
+        uuid="msg-compact-003",
+        session_id=SESSION_ID,
+        timestamp="2026-02-07T11:00:00.000Z",
+        trigger="auto",
+        pre_tokens=42000,
+    )
 
 
 # --- AC1.4: Summary record ---
 
 
-class TestParseSummary:
-    """cc-search-v2.AC1.4: Summary record extracts text and leafUuid."""
-
-    def test_returns_session_record(self, summary_line: str) -> None:
-        result = parse_record(summary_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-
-    def test_record_type(self, summary_line: str) -> None:
-        result = parse_record(summary_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.record_type == "summary"
-
-    def test_text_content(self, summary_line: str) -> None:
-        result = parse_record(summary_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert (
-            result.text_content == "The user asked about parsing JSONL files in Python."
-        )
-
-    def test_leaf_uuid(self, summary_line: str) -> None:
-        result = parse_record(summary_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.leaf_uuid == "msg-asst-002"
-
-    def test_role_is_none(self, summary_line: str) -> None:
-        result = parse_record(summary_line, SESSION_ID)
-        assert isinstance(result, SessionRecord)
-        assert result.role is None
+def test_parse_summary(summary_line: str) -> None:
+    result = parse_record(summary_line, SESSION_ID)
+    assert isinstance(result, SessionRecord)
+    assert result.record_type == "summary"
+    assert result.text_content == "The user asked about parsing JSONL files in Python."
+    assert result.leaf_uuid == "msg-asst-002"
+    assert result.role is None
 
 
 # --- AC1.5: Malformed JSON ---

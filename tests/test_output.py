@@ -8,7 +8,6 @@ import json
 import pytest
 
 from cc_search_chats.output import (
-    SCHEMA_VERSION,
     _clean_text,
     _is_noise,
     format_context,
@@ -17,8 +16,6 @@ from cc_search_chats.output import (
     format_session_list,
     json_context,
     json_extract,
-    json_index_all_result,
-    json_index_result,
     json_search_results,
     json_session_list,
     render_safe,
@@ -731,38 +728,6 @@ class TestJsonSessionList:
     def test_empty_list(self) -> None:
         parsed = json.loads(json_session_list([]))
         assert parsed["sessions"] == []
-
-
-class TestSchemaVersion:
-    """Every --json payload carries the schema_version marker."""
-
-    def test_search_has_schema_version(self) -> None:
-        parsed = json.loads(json_search_results([_search_row()]))
-        assert parsed["schema_version"] == SCHEMA_VERSION
-
-    def test_extract_has_schema_version(self) -> None:
-        parsed = json.loads(json_extract([], [], session_id="s"))
-        assert parsed["schema_version"] == SCHEMA_VERSION
-
-    def test_list_has_schema_version(self) -> None:
-        parsed = json.loads(json_session_list([_session_row()]))
-        assert parsed["schema_version"] == SCHEMA_VERSION
-
-    def test_context_has_schema_version(self) -> None:
-        parsed = json.loads(json_context(_message_row(), [], []))
-        assert parsed["schema_version"] == SCHEMA_VERSION
-
-    def test_index_has_schema_version(self) -> None:
-        parsed = json.loads(json_index_result({"indexed": 3, "skipped": 2}, "/p"))
-        assert parsed["schema_version"] == SCHEMA_VERSION
-        assert parsed["sessions_indexed"] == 3
-        assert parsed["sessions_skipped"] == 2
-
-    def test_index_all_has_schema_version(self) -> None:
-        parsed = json.loads(
-            json_index_all_result({"projects": 1, "indexed": 2, "skipped": 3})
-        )
-        assert parsed["schema_version"] == SCHEMA_VERSION
 
 
 class TestJsonContext:

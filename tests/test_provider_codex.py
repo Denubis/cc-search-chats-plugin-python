@@ -476,9 +476,7 @@ class TestCodexSchemaFamilies:
                         "type": "message",
                         "id": "before-boundary",
                         "role": "assistant",
-                        "content": [
-                            {"type": "output_text", "text": "same text"}
-                        ],
+                        "content": [{"type": "output_text", "text": "same text"}],
                     },
                 },
             ),
@@ -1177,7 +1175,11 @@ class TestCodexFailClosedDiagnostics:
         ]
 
 
-visible_text = st.text(min_size=1, max_size=200)
+visible_text = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters="\x00"),
+    min_size=1,
+    max_size=200,
+)
 unknown_block_type = st.text(
     alphabet=st.characters(blacklist_categories=("Cs",)), min_size=1, max_size=30
 ).filter(

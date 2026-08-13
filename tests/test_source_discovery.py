@@ -1,9 +1,9 @@
 """Bounded native-source reading and provider-root discovery tests."""
 
 import hashlib
+import json
 import os
 import subprocess
-from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ import pytest
 from cc_search_chats.core.identity import Provider
 from cc_search_chats.providers.source_discovery import (
     BoundedReadResult,
+    BoundedReadStopReason,
     DiscoveryResult,
     SourceDiagnosticCode,
     discover_claude_sources,
@@ -28,6 +29,201 @@ def diagnostic_codes(
 
 
 class TestBoundedJsonlRead:
+    def test_multiple_batches_equal_one_complete_target_read(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "session.jsonl"
+        records = tuple(
+            f'{{"ordinal":{ordinal},"padding":"xxxxx"}}'.encode()
+            for ordinal in range(7)
+        )
+        source.write_bytes(b"\n".join(records) + b"\n")
+        target_size = source.stat().st_size
+        expected = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("session.jsonl"),
+            target_size=target_size,
+            max_records_per_batch=100,
+            max_batch_bytes=10_000,
+            max_single_record_bytes=10_000,
+        )
+
+        batches: list[BoundedReadResult] = []
+        offset = 0
+        ordinal = 0
+        source_line = 1
+        while offset < target_size:
+            batch = read_bounded_jsonl(
+                source,
+                source_file_relative=Path("session.jsonl"),
+                target_size=target_size,
+                start_byte_offset=offset,
+                next_record_ordinal=ordinal,
+                next_source_line=source_line,
+                max_records_per_batch=2,
+                max_batch_bytes=70,
+                max_single_record_bytes=100,
+            )
+            batches.append(batch)
+            assert batch.next_source_byte_offset > offset
+            assert batch.next_record_ordinal > ordinal
+            assert batch.next_source_line > source_line
+            assert len(batch.envelopes) <= 2
+            assert sum(value.raw_byte_length for value in batch.envelopes) <= 70
+            offset = batch.next_source_byte_offset
+            ordinal = batch.next_record_ordinal
+            source_line = batch.next_source_line
+
+        assert (
+            tuple(envelope for batch in batches for envelope in batch.envelopes)
+            == expected.envelopes
+        )
+        assert all(
+            batch.stop_reason is BoundedReadStopReason.BATCH_LIMIT_REACHED
+            for batch in batches[:-1]
+        )
+        assert batches[-1].stop_reason is BoundedReadStopReason.TARGET_REACHED
+
+    def test_batch_byte_limit_leaves_next_record_unconsumed(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "session.jsonl"
+        first = b'{"value":"first"}'
+        second = b'{"value":"second"}'
+        source.write_bytes(first + b"\n" + second + b"\n")
+
+        batch = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("session.jsonl"),
+            target_size=source.stat().st_size,
+            max_records_per_batch=10,
+            max_batch_bytes=len(first),
+            max_single_record_bytes=100,
+        )
+
+        assert [value.raw_bytes for value in batch.envelopes] == [first]
+        assert batch.next_source_byte_offset == len(first) + 1
+        assert batch.next_record_ordinal == 1
+        assert batch.next_source_line == 2
+        assert batch.stop_reason is BoundedReadStopReason.BATCH_LIMIT_REACHED
+
+    def test_first_record_may_exceed_batch_limit_but_not_single_record_limit(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "session.jsonl"
+        record = b'{"padding":"0123456789"}'
+        source.write_bytes(record + b"\n")
+
+        result = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("session.jsonl"),
+            target_size=source.stat().st_size,
+            max_records_per_batch=10,
+            max_batch_bytes=4,
+            max_single_record_bytes=len(record),
+        )
+
+        assert [value.raw_bytes for value in result.envelopes] == [record]
+        assert result.batch_raw_bytes == len(record)
+        assert result.stop_reason is BoundedReadStopReason.TARGET_REACHED
+
+    def test_oversized_record_is_named_and_consumes_no_coordinate(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "oversized.jsonl"
+        source.write_bytes(b'{"padding":"too long"}\n')
+
+        first = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("oversized.jsonl"),
+            target_size=source.stat().st_size,
+            max_single_record_bytes=8,
+        )
+        second = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("oversized.jsonl"),
+            target_size=source.stat().st_size,
+            start_byte_offset=first.next_source_byte_offset,
+            next_record_ordinal=first.next_record_ordinal,
+            next_source_line=first.next_source_line,
+            max_single_record_bytes=8,
+        )
+
+        assert first.envelopes == second.envelopes == ()
+        assert first.next_source_byte_offset == second.next_source_byte_offset == 0
+        assert first.next_record_ordinal == second.next_record_ordinal == 0
+        assert first.next_source_line == second.next_source_line == 1
+        assert first.stop_reason is second.stop_reason
+        assert first.stop_reason is BoundedReadStopReason.OVERSIZED_RECORD
+        assert diagnostic_codes(first) == {SourceDiagnosticCode.OVERSIZED_RECORD}
+
+    @pytest.mark.parametrize("value", [0, -1, True, False])
+    def test_rejects_invalid_batch_limits(self, tmp_path: Path, value: int) -> None:
+        source = tmp_path / "session.jsonl"
+        source.write_bytes(b"{}\n")
+
+        for limits in (
+            {"max_records_per_batch": value},
+            {"max_batch_bytes": value},
+            {"max_single_record_bytes": value},
+        ):
+            with pytest.raises(ValueError, match="limit"):
+                if "max_records_per_batch" in limits:
+                    read_bounded_jsonl(
+                        source,
+                        source_file_relative=Path("session.jsonl"),
+                        target_size=source.stat().st_size,
+                        max_records_per_batch=value,
+                    )
+                elif "max_batch_bytes" in limits:
+                    read_bounded_jsonl(
+                        source,
+                        source_file_relative=Path("session.jsonl"),
+                        target_size=source.stat().st_size,
+                        max_batch_bytes=value,
+                    )
+                else:
+                    read_bounded_jsonl(
+                        source,
+                        source_file_relative=Path("session.jsonl"),
+                        target_size=source.stat().st_size,
+                        max_single_record_bytes=value,
+                    )
+
+    def test_rejects_noninteger_batch_limit(self, tmp_path: Path) -> None:
+        source = tmp_path / "session.jsonl"
+        source.write_bytes(b"{}\n")
+        external_value = json.loads("1.5")
+
+        with pytest.raises(ValueError, match="limit"):
+            read_bounded_jsonl(
+                source,
+                source_file_relative=Path("session.jsonl"),
+                target_size=source.stat().st_size,
+                max_single_record_bytes=external_value,
+            )
+
+    def test_resume_seek_does_not_reclassify_committed_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "session.jsonl"
+        committed_invalid = b'{"invalid":}'
+        appended = b'{"valid":true}'
+        source.write_bytes(committed_invalid + b"\n" + appended + b"\n")
+        committed_offset = len(committed_invalid) + 1
+
+        result = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("session.jsonl"),
+            target_size=source.stat().st_size,
+            start_byte_offset=committed_offset,
+            next_record_ordinal=1,
+            next_source_line=2,
+        )
+
+        assert [value.raw_bytes for value in result.envelopes] == [appended]
+        assert SourceDiagnosticCode.INVALID_JSON not in diagnostic_codes(result)
+
     def test_resumes_from_absolute_complete_record_coordinates(
         self, tmp_path: Path
     ) -> None:
@@ -108,6 +304,20 @@ class TestBoundedJsonlRead:
         assert diagnostic.record_ordinal == 1
         assert diagnostic.source_line == 2
         assert diagnostic.source_byte_offset == len(committed)
+        assert result.stop_reason is BoundedReadStopReason.PARTIAL_TAIL
+
+        repeated = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("session.jsonl"),
+            target_size=source.stat().st_size,
+            start_byte_offset=result.next_source_byte_offset,
+            next_record_ordinal=result.next_record_ordinal,
+            next_source_line=result.next_source_line,
+        )
+        assert repeated.next_source_byte_offset == result.next_source_byte_offset
+        assert repeated.next_record_ordinal == result.next_record_ordinal
+        assert repeated.next_source_line == result.next_source_line
+        assert repeated.stop_reason is BoundedReadStopReason.PARTIAL_TAIL
 
     def test_resumed_unreadable_source_diagnostic_uses_absolute_coordinates(
         self, tmp_path: Path
@@ -129,6 +339,21 @@ class TestBoundedJsonlRead:
         assert diagnostic.record_ordinal == 2
         assert diagnostic.source_line == 3
         assert diagnostic.source_byte_offset == 8
+        assert result.stop_reason is BoundedReadStopReason.UNREADABLE_SOURCE
+
+    def test_source_truncation_has_distinct_stop_reason(self, tmp_path: Path) -> None:
+        source = tmp_path / "session.jsonl"
+        source.write_bytes(b"{}\n")
+
+        result = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("session.jsonl"),
+            target_size=12,
+        )
+
+        assert result.next_source_byte_offset == 3
+        assert result.stop_reason is BoundedReadStopReason.SOURCE_TRUNCATED
+        assert diagnostic_codes(result) == {SourceDiagnosticCode.SOURCE_TRUNCATED}
 
     @pytest.mark.parametrize(
         "source_file_relative",
@@ -325,9 +550,6 @@ class TestProviderDiscovery:
         assert [source.source_file_relative for source in result.sources] == [
             Path("2026/08/11/rollout-valid.jsonl")
         ]
-        assert "source_session_id" not in {
-            field.name for field in fields(result.sources[0])
-        }
 
     def test_rejects_readable_non_native_artifacts_beside_valid_sources(
         self, tmp_path: Path

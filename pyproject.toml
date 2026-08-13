@@ -14,9 +14,18 @@ authors = [
     {name = "akatz-ai"},
     {name = "Brian Ballsun-Stanton"},
 ]
+dependencies = [
+    "psycopg[c]>=3.3.4,<3.4",
+]
 
 [project.scripts]
 cc-search-chats = "cc_search_chats.cli:main"
+
+[project.optional-dependencies]
+semantic = [
+    "torch>=2.9,<3",
+    "transformers>=5.2,<6",
+]
 
 [dependency-groups]
 dev = [
@@ -49,3 +58,4 @@ python-version = "3.14"
 testpaths = ["tests"]
 addopts = ["--import-mode=importlib", "-ra", "--strict-markers", "--tb=short"]
 pythonpath = ["src"]
+markers = ["postgresql: requires the disposable PostgreSQL 18 test cluster"]

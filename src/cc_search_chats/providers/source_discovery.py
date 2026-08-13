@@ -20,6 +20,9 @@ from cc_search_chats.core.identity import Provider, validate_source_file_relativ
 
 _ARTIFACT_PROBE_LIMIT = 64 * 1024
 _GIT_ROUTING_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+DEFAULT_MAX_RECORDS_PER_BATCH = 1_024
+DEFAULT_MAX_BATCH_BYTES = 4 * 1024 * 1024
+DEFAULT_MAX_SINGLE_RECORD_BYTES = 16 * 1024 * 1024
 
 
 class SourceDiagnosticCode(StrEnum):
@@ -28,6 +31,7 @@ class SourceDiagnosticCode(StrEnum):
     PARTIAL_TAIL = "partial_tail"
     INVALID_JSON = "invalid_json"
     UNREADABLE_SOURCE = "unreadable_source"
+    OVERSIZED_RECORD = "oversized_record"
     SOURCE_TRUNCATED = "source_truncated"
     MISSING_ROOT = "missing_root"
     UNREADABLE_ROOT = "unreadable_root"
@@ -35,6 +39,17 @@ class SourceDiagnosticCode(StrEnum):
     NON_NATIVE_AGY = "non_native_agy"
     NON_NATIVE_TRANSPORT_ARCHIVE = "non_native_transport_archive"
     GIT_PROBE_FAILED = "git_probe_failed"
+
+
+class BoundedReadStopReason(StrEnum):
+    """Closed reason why one bounded batch stopped."""
+
+    TARGET_REACHED = "target_reached"
+    BATCH_LIMIT_REACHED = "batch_limit_reached"
+    PARTIAL_TAIL = "partial_tail"
+    OVERSIZED_RECORD = "oversized_record"
+    SOURCE_TRUNCATED = "source_truncated"
+    UNREADABLE_SOURCE = "unreadable_source"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +88,8 @@ class BoundedReadResult:
     next_source_byte_offset: int
     next_record_ordinal: int
     next_source_line: int
+    stop_reason: BoundedReadStopReason
+    batch_raw_bytes: int
 
     @property
     def pending_bytes(self) -> int | None:
@@ -148,6 +165,49 @@ def _record_diagnostic(
     )
 
 
+def _envelope(
+    *,
+    source_file_relative: Path,
+    record_bytes: bytes,
+    ordinal: int,
+    source_line: int,
+    offset: int,
+) -> RecordEnvelope:
+    """Construct one exact physical envelope from a complete record."""
+    return RecordEnvelope(
+        source_file_relative=source_file_relative,
+        record_ordinal=ordinal,
+        source_line=source_line,
+        source_byte_offset=offset,
+        raw_bytes=record_bytes,
+        raw_byte_length=len(record_bytes),
+        source_digest=hashlib.sha256(record_bytes).hexdigest(),
+    )
+
+
+def _invalid_json_diagnostic(
+    record_bytes: bytes,
+    *,
+    path: Path,
+    ordinal: int,
+    source_line: int,
+    offset: int,
+) -> SourceDiagnostic | None:
+    """Classify malformed complete JSON without excluding its envelope."""
+    try:
+        json.loads(record_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        return _record_diagnostic(
+            SourceDiagnosticCode.INVALID_JSON,
+            path,
+            f"complete record is not valid JSON: {error}",
+            ordinal,
+            source_line,
+            offset,
+        )
+    return None
+
+
 def read_bounded_jsonl(
     path: Path,
     *,
@@ -156,18 +216,37 @@ def read_bounded_jsonl(
     start_byte_offset: int = 0,
     next_record_ordinal: int = 0,
     next_source_line: int = 1,
+    max_records_per_batch: int = DEFAULT_MAX_RECORDS_PER_BATCH,
+    max_batch_bytes: int = DEFAULT_MAX_BATCH_BYTES,
+    max_single_record_bytes: int = DEFAULT_MAX_SINGLE_RECORD_BYTES,
 ) -> BoundedReadResult:
-    """Read complete JSONL records ending at or before ``target_size``.
+    """Read one bounded batch ending at or before ``target_size``.
 
     The digest is SHA-256 over exact record bytes after removing the JSONL line
     delimiter. A fragment without a terminating newline is diagnostic only and
-    does not consume an ordinal.
+    does not consume an ordinal. The first complete record may exceed the batch
+    byte limit, but never the separate single-record limit, so every valid
+    record can make progress without allowing unbounded allocation.
     """
     coordinates = (start_byte_offset, next_record_ordinal, next_source_line)
-    if any(isinstance(value, bool) or not isinstance(value, int) for value in coordinates):
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) for value in coordinates
+    ):
         raise ValueError("resume coordinates must be integers")
+    if isinstance(target_size, bool) or not isinstance(target_size, int):
+        raise ValueError("target_size must be an integer")
     if target_size < 0:
         raise ValueError("target_size must be nonnegative")
+    limits = (
+        max_records_per_batch,
+        max_batch_bytes,
+        max_single_record_bytes,
+    )
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in limits
+    ):
+        raise ValueError("batch and single-record limits must be positive integers")
     if start_byte_offset < 0 or next_record_ordinal < 0 or next_source_line < 1:
         raise ValueError("resume coordinates must be nonnegative with a one-based line")
     if next_source_line != next_record_ordinal + 1:
@@ -181,66 +260,78 @@ def read_bounded_jsonl(
     offset = start_byte_offset
     ordinal = next_record_ordinal
     source_line = next_source_line
+    batch_raw_bytes = 0
+    stop_reason = BoundedReadStopReason.TARGET_REACHED
 
     try:
         with path.open("rb") as handle:
             handle.seek(start_byte_offset)
             while offset < target_size:
-                line = handle.readline(target_size - offset)
-                if not line:
-                    diagnostics.append(
-                        _record_diagnostic(
-                            SourceDiagnosticCode.SOURCE_TRUNCATED,
-                            path,
-                            "source ended before the captured target size",
-                            ordinal,
-                            source_line,
-                            offset,
-                        )
-                    )
-                    break
-                if not line.endswith(b"\n"):
-                    diagnostics.append(
-                        _record_diagnostic(
-                            SourceDiagnosticCode.PARTIAL_TAIL,
-                            path,
-                            "captured target ends with an incomplete JSONL record",
-                            ordinal,
-                            source_line,
-                            offset,
-                        )
-                    )
+                if len(envelopes) >= max_records_per_batch:
+                    stop_reason = BoundedReadStopReason.BATCH_LIMIT_REACHED
                     break
 
-                record_bytes = line[:-1]
-                if record_bytes.endswith(b"\r"):
-                    record_bytes = record_bytes[:-1]
-                envelope = RecordEnvelope(
-                    source_file_relative=source_file_relative,
-                    record_ordinal=ordinal,
-                    source_line=source_line,
-                    source_byte_offset=offset,
-                    raw_bytes=record_bytes,
-                    raw_byte_length=len(record_bytes),
-                    source_digest=hashlib.sha256(record_bytes).hexdigest(),
-                )
-                envelopes.append(envelope)
-                try:
-                    json.loads(record_bytes)
-                except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                    diagnostics.append(
-                        _record_diagnostic(
-                            SourceDiagnosticCode.INVALID_JSON,
-                            path,
-                            f"complete record is not valid JSON: {error}",
-                            ordinal,
-                            source_line,
-                            offset,
+                remaining = target_size - offset
+                read_limit = min(remaining, max_single_record_bytes + 2)
+                line = handle.readline(read_limit)
+                if not line:
+                    code = SourceDiagnosticCode.SOURCE_TRUNCATED
+                    stop_reason = BoundedReadStopReason.SOURCE_TRUNCATED
+                    detail = "source ended before the captured target size"
+                elif not line.endswith(b"\n"):
+                    if len(line) == read_limit and read_limit < remaining:
+                        code = SourceDiagnosticCode.OVERSIZED_RECORD
+                        stop_reason = BoundedReadStopReason.OVERSIZED_RECORD
+                        detail = "complete record exceeds the single-record byte limit"
+                    elif len(line) < remaining:
+                        code = SourceDiagnosticCode.SOURCE_TRUNCATED
+                        stop_reason = BoundedReadStopReason.SOURCE_TRUNCATED
+                        detail = "source ended before the captured target size"
+                    else:
+                        code = SourceDiagnosticCode.PARTIAL_TAIL
+                        stop_reason = BoundedReadStopReason.PARTIAL_TAIL
+                        detail = "captured target ends with an incomplete JSONL record"
+                else:
+                    record_bytes = line[:-1].removesuffix(b"\r")
+                    if len(record_bytes) > max_single_record_bytes:
+                        code = SourceDiagnosticCode.OVERSIZED_RECORD
+                        stop_reason = BoundedReadStopReason.OVERSIZED_RECORD
+                        detail = "complete record exceeds the single-record byte limit"
+                    elif (
+                        envelopes
+                        and batch_raw_bytes + len(record_bytes) > max_batch_bytes
+                    ):
+                        stop_reason = BoundedReadStopReason.BATCH_LIMIT_REACHED
+                        break
+                    else:
+                        envelopes.append(
+                            _envelope(
+                                source_file_relative=source_file_relative,
+                                record_bytes=record_bytes,
+                                ordinal=ordinal,
+                                source_line=source_line,
+                                offset=offset,
+                            )
                         )
-                    )
-                offset += len(line)
-                ordinal += 1
-                source_line += 1
+                        batch_raw_bytes += len(record_bytes)
+                        diagnostic = _invalid_json_diagnostic(
+                            record_bytes,
+                            path=path,
+                            ordinal=ordinal,
+                            source_line=source_line,
+                            offset=offset,
+                        )
+                        if diagnostic is not None:
+                            diagnostics.append(diagnostic)
+                        offset += len(line)
+                        ordinal += 1
+                        source_line += 1
+                        continue
+
+                diagnostics.append(
+                    _record_diagnostic(code, path, detail, ordinal, source_line, offset)
+                )
+                break
     except OSError as error:
         diagnostics.append(
             _diagnostic(
@@ -252,6 +343,7 @@ def read_bounded_jsonl(
                 source_byte_offset=offset,
             )
         )
+        stop_reason = BoundedReadStopReason.UNREADABLE_SOURCE
 
     try:
         final_size = path.stat().st_size
@@ -265,6 +357,8 @@ def read_bounded_jsonl(
         next_source_byte_offset=offset,
         next_record_ordinal=ordinal,
         next_source_line=source_line,
+        stop_reason=stop_reason,
+        batch_raw_bytes=batch_raw_bytes,
     )
 
 

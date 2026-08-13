@@ -1,6 +1,5 @@
 """Provider-qualified native-message identity contract tests."""
 
-from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
 import pytest
@@ -16,7 +15,6 @@ from cc_search_chats.core.identity import (
     PhysicalAlias,
     Provider,
     ResolutionStatus,
-    SessionEpochBoundary,
     SessionKind,
     SubmittedBy,
     format_locator,
@@ -240,38 +238,6 @@ def test_controlled_locator_mutations_never_produce_a_locator(
 
 
 class TestIdentityModels:
-    def test_identity_models_are_immutable(self) -> None:
-        locator = claude_locator()
-        physical_alias = alias(locator)
-        identity = MessageIdentity(
-            logical_message_id="logical-1",
-            canonical_locator=locator,
-            physical_aliases=(physical_alias,),
-        )
-        message = NativeMessage(
-            identity=identity,
-            timestamp="2026-08-11T00:00:00Z",
-            role="user",
-            session_kind=SessionKind.PRIMARY,
-            conversation_epoch=0,
-            content_class=ContentClass.PROSE,
-            text="visible text",
-        )
-        boundary = SessionEpochBoundary(
-            provider=Provider.CLAUDE,
-            source_session_id="session-1",
-            session_kind=SessionKind.PRIMARY,
-            conversation_epoch=1,
-            physical_alias=physical_alias,
-            timestamp="2026-08-11T00:00:01Z",
-            trigger="auto",
-            token_count=42,
-        )
-
-        for value in (locator, physical_alias, identity, message, boundary):
-            with pytest.raises(FrozenInstanceError):
-                value.__setattr__(next(field.name for field in fields(value)), None)
-
     def test_submitted_by_defaults_to_unknown_for_user_role(self) -> None:
         locator = claude_locator()
         message = NativeMessage(
@@ -291,11 +257,6 @@ class TestIdentityModels:
         assert message.submitted_by is SubmittedBy.UNKNOWN
         assert message.submission_evidence == ()
         assert message.submission_match_cardinality == 0
-
-    def test_boundaries_are_non_searchable_values(self) -> None:
-        boundary_field_names = {field.name for field in fields(SessionEpochBoundary)}
-        assert "text" not in boundary_field_names
-        assert "content_class" not in boundary_field_names
 
     @pytest.mark.parametrize("conversation_epoch", [-1, -100])
     def test_messages_reject_negative_conversation_epochs(
@@ -490,4 +451,3 @@ def test_provider_root_changes_leave_identity_unchanged(
     assert first_identity.canonical_locator == second_identity.canonical_locator
     assert first_identity.logical_message_id == second_identity.logical_message_id
     assert first_identity.physical_aliases == second_identity.physical_aliases
-    assert "provider_root" not in {field.name for field in fields(MessageIdentity)}

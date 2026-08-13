@@ -491,7 +491,11 @@ def test_compatibility_work_is_bounded_by_exact_fact_buckets() -> None:
     assert _compatibility_comparison_count(larger_values) == pair_count * 2
 
 
-generated_text = st.text(min_size=1, max_size=100)
+generated_text = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters="\x00"),
+    min_size=1,
+    max_size=100,
+)
 
 
 @given(generated_text)
