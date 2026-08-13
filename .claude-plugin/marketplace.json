@@ -4,12 +4,12 @@
     "name": "Denubis"
   },
   "metadata": {
-    "description": "Context recovery and cross-referencing for Claude Code chat history"
+    "description": "Search and recover Claude Code and Codex chat history"
   },
   "plugins": [
     {
       "name": "cc-search-chats",
-      "description": "Context recovery and cross-referencing for Claude Code chat history — recover from compression, search sessions, extract conversations",
+      "description": "Search and recover Claude Code and Codex chat history",
       "version": "2.0.0a5",
       "source": "./",
       "author": {
@@ -18,7 +18,7 @@
       "homepage": "https://github.com/Denubis/cc-search-chats-plugin-python",
       "repository": "https://github.com/Denubis/cc-search-chats-plugin-python",
       "license": "MIT",
-      "keywords": ["search", "chat-history", "sessions", "context-recovery", "compression", "fts5"]
+      "keywords": ["search", "chat-history", "sessions", "context-recovery", "claude-code", "codex", "postgresql", "pgvector"]
     }
   ]
 }
