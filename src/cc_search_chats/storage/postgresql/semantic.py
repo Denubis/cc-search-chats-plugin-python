@@ -210,7 +210,7 @@ def _index_embeddings(
         )[0]
     else:
         semantic_revision, completed = partial
-    if progress is not None and completed:
+    if progress is not None:
         progress(completed, total)
     while completed < total:
         rows = tuple(
@@ -288,6 +288,10 @@ def semantic_search(
     *,
     limit: int = 20,
     provider: str | None = None,
+    role: str | None = None,
+    project: str | None = None,
+    since: str | None = None,
+    epoch: int | None = None,
 ) -> tuple[SearchHit, ...]:
     """Return exact cosine-ranked messages from the selected revision."""
     if limit <= 0:
@@ -308,8 +312,22 @@ def semantic_search(
     )
     if state is None or state[0] is not True:
         raise ValueError("semantic revision is unavailable or stale")
+    filters = []
+    params: list[object] = [vector]
+    for value, clause in (
+        (provider, "m.provider = %s"),
+        (role, "m.role = %s"),
+        (project, "COALESCE(m.repository, m.cwd) = %s"),
+        (since, "m.timestamp_text >= %s"),
+        (epoch, "m.conversation_epoch = %s"),
+    ):
+        if value is not None:
+            filters.append(clause)
+            params.append(value)
+    params.extend((vector, limit))
+    where = f" AND {' AND '.join(filters)}" if filters else ""
     rows = connection.execute(
-        """
+        f"""
         SELECT m.provider, m.source_session_id, m.logical_message_id,
                m.canonical_locator, m.timestamp_text, m.role, m.session_kind,
                m.prose_content, m.repository, m.cwd,
@@ -322,12 +340,12 @@ def semantic_search(
           ON s.current_revision_id = e.revision_id
         JOIN cc_search_chats.semantic_state AS ss
           ON ss.current_semantic_revision_id = e.semantic_revision_id
-        WHERE (%s::text IS NULL OR m.provider = %s)
+        WHERE TRUE {where}
         ORDER BY e.embedding <=> %s::vector,
                  m.provider, m.source_session_id, m.logical_message_id
         LIMIT %s
-        """,
-        (vector, provider, provider, vector, limit),
+        """.encode(),
+        params,
     )
     return tuple(SearchHit(*row) for row in rows)
 
@@ -339,12 +357,34 @@ def hybrid_search(
     *,
     limit: int = 20,
     provider: str | None = None,
+    role: str | None = None,
+    project: str | None = None,
+    since: str | None = None,
+    epoch: int | None = None,
     rank_constant: int = 60,
 ) -> tuple[HybridHit, ...]:
     """Fuse bounded literal and exact-vector ranks with RRF."""
     depth = max(limit * 4, limit)
-    literal = search_messages(connection, query, limit=depth, provider=provider)
-    semantic = semantic_search(connection, embedding, limit=depth, provider=provider)
+    literal = search_messages(
+        connection,
+        query,
+        limit=depth,
+        provider=provider,
+        role=role,
+        project=project,
+        since=since,
+        epoch=epoch,
+    )
+    semantic = semantic_search(
+        connection,
+        embedding,
+        limit=depth,
+        provider=provider,
+        role=role,
+        project=project,
+        since=since,
+        epoch=epoch,
+    )
     literal_ranks = {
         value.canonical_locator: rank for rank, value in enumerate(literal, 1)
     }

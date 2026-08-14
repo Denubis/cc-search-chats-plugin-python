@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 
 from cc_search_chats.cli import main
 
@@ -38,7 +39,14 @@ def test_postgresql_cli_journey(
         FIXTURES / "codex_modern_primary_145.jsonl",
         codex_day / "rollout-modern.jsonl",
     )
-    monkeypatch.setenv("CC_SEARCH_DATABASE_DSN", postgres_cluster.dsn)
+    connection = conninfo_to_dict(postgres_cluster.dsn)
+    for variable, key in (
+        ("PGHOST", "host"),
+        ("PGPORT", "port"),
+        ("PGDATABASE", "dbname"),
+        ("PGUSER", "user"),
+    ):
+        monkeypatch.setenv(variable, str(connection[key]))
     monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
     monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
 
@@ -62,6 +70,21 @@ def test_postgresql_cli_journey(
     assert code == 0
     assert result["provider"] == "codex"
     locator = result["locator"]
+
+    code, searched = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "modern assistant",
+        "--everything",
+        "--project",
+        "/synthetic/repository",
+        "--epoch",
+        "0",
+        "--json",
+    )
+    assert code == 0
+    assert json.loads(searched.out)["results"]
 
     for command in (
         ("list", "--provider", "codex", "--json"),

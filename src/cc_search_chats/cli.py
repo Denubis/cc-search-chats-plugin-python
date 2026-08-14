@@ -11,6 +11,7 @@ import sys
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 
 import psycopg
 
@@ -74,9 +75,13 @@ from cc_search_chats.storage.postgresql import (
 )
 from cc_search_chats.storage.postgresql.semantic import hybrid_search
 
-_DEFAULT_POSTGRES_DSN = (
-    "host=127.0.0.1 port=5432 dbname=cc_search_chats user=cc_search_chats_owner"
-)
+_DEFAULT_POSTGRES_DSN = "service=cc_search_chats"
+
+
+def _eta(seconds: float) -> str:
+    minutes, seconds = divmod(max(0, round(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{seconds:02d}s"
 
 
 def _contain_semantic_index(args: argparse.Namespace) -> None:
@@ -210,16 +215,34 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
             vector_count = 0
             if not args.literal_only:
                 last_embedding_report: int | None = None
+                embedding_started = monotonic()
+                embedding_baseline = 0
 
                 def embedding_progress(completed: int, total: int) -> None:
-                    nonlocal last_embedding_report
+                    nonlocal embedding_baseline, last_embedding_report
+                    if last_embedding_report is None:
+                        embedding_baseline = completed
+                        print(
+                            f"Semantic refresh: {completed} reused, "
+                            f"{total - completed} new passages",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        last_embedding_report = completed
+                        return
                     if (
-                        last_embedding_report is None
-                        or completed == total
+                        completed == total
                         or completed - last_embedding_report >= 100
                     ):
+                        embedded = completed - embedding_baseline
+                        elapsed = monotonic() - embedding_started
+                        rate = embedded / elapsed if elapsed > 0 else 0
+                        remaining = total - completed
+                        eta = _eta(remaining / rate) if rate else "calculating"
                         print(
-                            f"Embedding passages: {completed}/{total}",
+                            f"Semantic refresh: {embedding_baseline} reused, "
+                            f"{embedded} embedded, {remaining} remaining, "
+                            f"{rate:.1f}/s, ETA {eta}",
                             file=sys.stderr,
                             flush=True,
                         )
@@ -318,7 +341,7 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
             return 0 if messages else 3
 
         project = args.project
-        if args.literal:
+        if args.literal or args.everything:
             hits = search_messages(
                 connection,
                 args.query,
@@ -327,12 +350,9 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
                 role=args.role,
                 project=project,
                 since=_since_days(args.days),
+                epoch=args.epoch,
             )
         else:
-            if args.role is not None or project is not None or args.days is not None:
-                raise ValueError(
-                    "hybrid filters are not wired yet; use search --literal"
-                )
             hits = tuple(
                 value.message
                 for value in hybrid_search(
@@ -341,6 +361,10 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
                     embed_query(args.query),
                     limit=args.limit,
                     provider=args.provider,
+                    role=args.role,
+                    project=project,
+                    since=_since_days(args.days),
+                    epoch=args.epoch,
                 )
             )
         results = [
@@ -743,7 +767,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--everything",
         action="store_true",
         default=False,
-        help="live full-content scan incl. thinking and tool calls (not persisted)",
+        help="include indexed thinking and tool calls using literal search",
     )
     search_parser.add_argument(
         "--epoch", type=int, default=None, help="epoch number to search within"
@@ -911,18 +935,22 @@ def main() -> None:
         parser.print_help()
         sys.exit(0)
 
-    dsn = os.environ.get("CC_SEARCH_DATABASE_DSN")
     postgres_commands = {"index", "search", "list", "extract", "context", "resolve"}
-    if (
-        dsn is None
-        and args.command in postgres_commands
-        and "CC_SEARCH_DB_PATH" not in os.environ
-    ):
-        dsn = _DEFAULT_POSTGRES_DSN
-    if dsn and args.command in postgres_commands:
+    postgres = (
+        args.command in postgres_commands and "CC_SEARCH_DB_PATH" not in os.environ
+    )
+    standard_connection = any(
+        key in os.environ
+        for key in ("PGSERVICE", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER")
+    )
+    if postgres:
         try:
             _contain_semantic_index(args)
-            sys.exit(_handle_postgres(args, dsn))
+            sys.exit(
+                _handle_postgres(
+                    args, "" if standard_connection else _DEFAULT_POSTGRES_DSN
+                )
+            )
         except ModelUnavailable as exc:
             print(str(exc), file=sys.stderr)
             sys.exit(8)
@@ -938,7 +966,7 @@ def main() -> None:
             )
             sys.exit(1)
     if args.command == "resolve":
-        print("CC_SEARCH_DATABASE_DSN is required for resolve", file=sys.stderr)
+        print("PostgreSQL connection is required for resolve", file=sys.stderr)
         sys.exit(1)
 
     # Check FTS5 availability before opening the database.

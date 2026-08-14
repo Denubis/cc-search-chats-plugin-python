@@ -19,6 +19,9 @@ cc-search-chats search "query" --json
 cc-search-chats search "query" --literal --json
 cc-search-chats search "query" --literal --provider codex --days 7 --json
 
+# Thinking and tool calls (persisted full-content literal search)
+cc-search-chats search "query" --everything --json
+
 # Recent sessions across Claude and Codex
 cc-search-chats list --days 7 --json
 
@@ -36,9 +39,12 @@ cc-search-chats index --json
 cc-search-chats index --status --json
 ```
 
-Do not run `index` merely because a search misses. Try alternative terms and
-literal mode first; indexing scans both complete native roots and may require
-the GPU for new prose.
+Run `index` when freshness matters or the newest indexed session predates the
+requested conversation. It is idempotent, reuses unchanged vectors, resumes
+interruptions, and reports reused/new/remaining work with an ETA. A miss alone
+still merits trying alternative terms or `--literal` before refreshing.
+Do not add `--project` unless `list` shows the desired path; older Codex rows
+may have no project metadata and therefore cannot match that filter.
 
 ## Interpret output
 

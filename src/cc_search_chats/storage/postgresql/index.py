@@ -193,6 +193,7 @@ def search_messages(
     role: str | None = None,
     project: str | None = None,
     since: str | None = None,
+    epoch: int | None = None,
 ) -> tuple[SearchHit, ...]:
     """Search the current revision with PostgreSQL's plain-text query parser."""
     if not query.strip():
@@ -206,6 +207,7 @@ def search_messages(
         (role, "m.role = %s"),
         (project, "COALESCE(m.repository, m.cwd) = %s"),
         (since, "m.timestamp_text >= %s"),
+        (epoch, "m.conversation_epoch = %s"),
     ):
         if value is not None:
             filters.append(clause)

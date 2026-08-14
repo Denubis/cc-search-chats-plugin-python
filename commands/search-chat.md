@@ -11,6 +11,7 @@ Use `cc-search-chats` with `--json` and require `schema_version: 1`.
 
 - Topic: `cc-search-chats search "QUERY" --json`
 - Exact/filter search: `cc-search-chats search "QUERY" --literal --json`
+- Thinking/tool search: `cc-search-chats search "QUERY" --everything --json`
 - Recent sessions: `cc-search-chats list --days 7 --json`
 - Recover: `cc-search-chats extract [SESSION_ID] --json`
 - Follow a result: `cc-search-chats context CCCHAT_LOCATOR --depth 10 --json`
@@ -19,5 +20,7 @@ Use `cc-search-chats` with `--json` and require `schema_version: 1`.
 
 Search results are in `results`; list results in `sessions`; extract/context/
 resolve results in `messages`. Include provider, session ID, timestamp, and the
-durable `ccchat:v1:` locator when presenting matches. Try alternative terms or
-`--literal` before starting a reindex.
+durable `ccchat:v1:` locator when presenting matches. Run the idempotent index
+when freshness matters; a miss alone merits alternative terms or `--literal`
+first. Do not pin `--project` unless `list` shows that exact repository/cwd;
+older Codex rows may not carry project metadata.

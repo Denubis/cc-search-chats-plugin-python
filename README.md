@@ -53,8 +53,18 @@ CREATE DATABASE cc_search_chats OWNER cc_search_chats_owner;
 CREATE EXTENSION vector;
 ```
 
-Store the password in `~/.pgpass` (mode `0600`) so cron and agents need no DSN
-or password environment variable:
+Configure the standard libpq service once in `~/.pg_service.conf`:
+
+```ini
+[cc_search_chats]
+host=127.0.0.1
+port=5432
+dbname=cc_search_chats
+user=cc_search_chats_owner
+```
+
+Store the password separately in `~/.pgpass` (mode `0600`) so cron and agents
+need no connection or password environment variables:
 
 ```text
 127.0.0.1:5432:cc_search_chats:cc_search_chats_owner:YOUR_PASSWORD
@@ -117,9 +127,31 @@ unchanged vectors after refresh, and prevents concurrent workers with a
 PostgreSQL advisory lock. Semantic indexing automatically runs in a polite,
 memory- and task-bounded systemd user scope.
 
+### Refresh behavior
+
+`cc-search-chats index` is the ordinary safe refresh command for humans, cron,
+and agents. It scans both native roots, creates a new corpus revision when the
+snapshot changed, reuses identical vectors, embeds every new eligible passage,
+and atomically selects the result only when complete. With no semantic delta it
+returns without loading the model. Interrupted work resumes from committed
+batches, while the last complete revision remains searchable.
+
+Progress distinguishes work already reused from work actually required:
+
+```text
+Semantic refresh: 256081 reused, 2143 new passages
+Semantic refresh: 256081 reused, 300 embedded, 1843 remaining, 4.8/s, ETA 6m24s
+```
+
+An explicit `index` does not suppress real changes behind a threshold: any new
+eligible prose is indexed. Use `index --status --json` for a read-only durable
+checkpoint. Search itself does not silently start a refresh.
+
 ### Cross-Project Search
 
-By default `search` looks at the current project (the one matching your working directory). If that turns up nothing, it automatically widens to **every indexed project** and tells you it did (`scope: widened`). Use `--all` to search everything up front, or `--project PATH` to pin a single project (which never broadens).
+PostgreSQL searches the whole indexed corpus by default. Use `--project PATH`
+only when the indexed rows show that exact path in `repository` or `cwd`;
+older Codex rows without project metadata cannot match a project filter.
 
 The index only contains projects it has already seen. To make the whole machine searchable, build the global index once:
 
@@ -154,13 +186,15 @@ WantedBy=timers.target
 
 ### Searching Thinking and Tool Calls
 
-The persistent index stores the clean conversation only. To search reasoning and tool inputs/outputs as well, add `--everything`:
+PostgreSQL persists conversation text, reasoning, and tool inputs/outputs. Add
+`--everything` to select literal full-content search without loading the
+embedding model:
 
 ```bash
 cc-search-chats search "that regex we tried" --everything
 ```
 
-This is a live scan: it builds a throwaway in-memory index over the in-scope sessions' full content and discards it afterwards — nothing extra is stored. It defaults to the current project; add `--all` to scan every project (slower, since it re-reads the raw files).
+The legacy SQLite backend retains its slower live-scan behavior.
 
 ### Epoch Model
 
@@ -233,8 +267,9 @@ Now you can say things like *"that staging bug from the other day"* and Claude w
 - A CUDA-capable GPU and the pinned local Nemotron model for semantic search
 
 Set `CC_SEARCH_DB_PATH` only to opt into the legacy SQLite implementation.
-`CC_SEARCH_DATABASE_DSN`, `CC_SEARCH_MODEL_PATH`, and source-root variables are
-available as explicit overrides for non-default deployments.
+Standard libpq variables such as `PGSERVICE` and `PGHOST`, plus
+`CC_SEARCH_MODEL_PATH` and source-root variables, remain available for
+non-default deployments.
 
 ## Acknowledgements
 

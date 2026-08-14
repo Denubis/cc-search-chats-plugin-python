@@ -14,7 +14,6 @@ _BIN = Path("/usr/lib/postgresql/18/bin")
 _VECTOR_CONTROL = Path("/usr/share/postgresql/18/extension/vector.control")
 _PORT = 55432
 _PG_ENV_KEYS = {
-    "CC_SEARCH_DATABASE_DSN",
     "DATABASE_URL",
     "PGHOST",
     "PGPORT",

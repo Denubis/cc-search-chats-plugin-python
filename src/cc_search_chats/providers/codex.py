@@ -1101,6 +1101,20 @@ def parse_codex_session(
         raise TypeError("prior_state must be CodexParserState or None")
     state = prior_state if prior_state is not None else CodexParserState()
     records, decode_diagnostics = _decode_records(tuple(envelopes))
+    if context.cwd is None:
+        cwd = None
+        for record in records:
+            payload = record.payload.get("payload")
+            if _is_json_object(payload):
+                candidate = payload.get("cwd")
+                if isinstance(candidate, str):
+                    cwd = candidate
+                    break
+        context = CodexSessionContext(
+            source_session_id=context.source_session_id,
+            repository=context.repository,
+            cwd=cwd,
+        )
     session_kind, kind_diagnostics = _continued_session_kind(
         records, state.session_kind
     )

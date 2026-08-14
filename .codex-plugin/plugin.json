@@ -1,6 +1,6 @@
 {
   "name": "cc-search-chats",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Search and recover Claude Code and Codex chat history",
   "author": {"name": "Denubis"},
   "homepage": "https://github.com/Denubis/cc-search-chats-plugin-python",
