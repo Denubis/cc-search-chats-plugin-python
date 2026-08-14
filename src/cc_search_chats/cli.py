@@ -15,6 +15,7 @@ from time import monotonic
 
 import psycopg
 
+from cc_search_chats import __version__
 from cc_search_chats.core.discovery import (
     decode_project_path,
     encode_project_path,
@@ -719,6 +720,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cc-search-chats",
         description="Search and extract Claude Code chat history",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "--json",

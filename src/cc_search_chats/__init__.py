@@ -1,3 +1,5 @@
 """Search and extract Claude Code chat history."""
 
-__version__ = "2.0.0a1"
+from importlib.metadata import version
+
+__version__ = version("cc-search-chats")

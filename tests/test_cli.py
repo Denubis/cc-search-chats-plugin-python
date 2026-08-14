@@ -24,6 +24,7 @@ from typing import Literal
 
 import pytest
 
+from cc_search_chats import __version__
 from cc_search_chats.cli import _contain_semantic_index, build_parser, main
 from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
@@ -47,6 +48,13 @@ _COMPRESSED_SESSION = _FIXTURES_DIR / "compressed_session.jsonl"
 SAMPLE_SESSION_ID = "11111111-1111-1111-1111-111111111111"
 COMPRESSED_SESSION_ID = "22222222-2222-2222-2222-222222222222"
 FAKE_PROJECT_PATH = "/home/testuser/myproject"
+
+
+def test_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit, match="0"):
+        build_parser().parse_args(["--version"])
+
+    assert capsys.readouterr().out == f"cc-search-chats {__version__}\n"
 
 
 # ============================================================
