@@ -8,36 +8,64 @@ Claude Code compresses conversation context when sessions grow large. Earlier co
 
 ## Installation
 
-### As a Claude Code Plugin (Recommended)
+The agent plugin and the Python CLI are separate artifacts. The plugin provides
+the search workflow, but it invokes the independently installed
+`cc-search-chats` executable. Install and verify the CLI first.
 
-Add the marketplace and install:
+### 1. Install the CLI
 
-```bash
-# Add the plugin marketplace (once)
+Install [uv](https://docs.astral.sh/uv/) and ensure Python 3.14 or newer is
+available. The shipped search skill uses hybrid search by default, so the
+semantic installation is recommended:
+
+```console
+uv tool install \
+  'cc-search-chats[semantic] @ git+https://github.com/Denubis/cc-search-chats-plugin-python@main'
+```
+
+For literal search without the local model runtime:
+
+```console
+uv tool install \
+  'cc-search-chats @ git+https://github.com/Denubis/cc-search-chats-plugin-python@main'
+```
+
+Use `--force` with the same command to replace an existing installation.
+Replace `main` with a commit hash when the machine must use an exactly pinned
+build.
+
+Verify the executable and its package version before installing the plugin:
+
+```console
+cc-search-chats --version
+cc-search-chats 2.0.0a6
+```
+
+### 2. Install an agent plugin
+
+The Codex plugin bundle has its own release number (`2.0.1`); the version shown
+by `cc-search-chats --version` is the Python CLI version. Both shipped skills
+expect JSON `schema_version` 1.
+
+#### Claude Code
+
+Run these commands inside Claude Code:
+
+```text
 /plugin marketplace add Denubis/cc-search-chats-plugin-python
-
-# Install the plugin
-claude plugin install cc-search-chats@cc-search-chats-marketplace
+/plugin install cc-search-chats@cc-search-chats-marketplace
 ```
 
 Or from inside Claude Code, use `/plugin` and navigate to **Discover** to browse and install.
 
-### Standalone CLI
+#### Codex
 
-```bash
-# Install from git (requires Python 3.14+)
-uv tool install git+https://github.com/Denubis/cc-search-chats-plugin-python
-
-# Then use directly
-cc-search-chats
+```console
+codex plugin marketplace add Denubis/cc-search-chats-plugin-python --ref main
+codex plugin add cc-search-chats@cc-search-chats-marketplace
 ```
 
-For semantic search, install the optional model runtime:
-
-```bash
-uv tool install \
-  'cc-search-chats[semantic] @ git+https://github.com/Denubis/cc-search-chats-plugin-python'
-```
+Start a new Claude Code or Codex session after installing the plugin.
 
 ## PostgreSQL Setup
 
