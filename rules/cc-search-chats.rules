@@ -1,0 +1,15 @@
+# cc-search-chats depends on host PostgreSQL and, for semantic search, the host
+# GPU and model cache. A sandbox result is evidence about that process only.
+# Prompting routes the command to the configured approval system; the approver
+# remains responsible for deciding whether host execution is allowed.
+prefix_rule(
+    pattern=["cc-search-chats"],
+    decision="prompt",
+    justification="Route chat-history access through the configured approver and host runtime.",
+    match=[
+        "cc-search-chats search PABAI --json",
+        "cc-search-chats extract 019example --json",
+        "cc-search-chats list --days 7 --json",
+        "cc-search-chats index --status --json",
+    ],
+)

@@ -25,7 +25,7 @@ wheels = [
 
 [[package]]
 name = "cc-search-chats"
-version = "2.0.0a6"
+version = "2.0.0a7"
 source = { editable = "." }
 dependencies = [
     { name = "psycopg", extra = ["c"] },
@@ -41,6 +41,7 @@ semantic = [
 dev = [
     { name = "hypothesis" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "ruff" },
     { name = "ty" },
 ]
@@ -57,6 +58,7 @@ provides-extras = ["semantic"]
 dev = [
     { name = "hypothesis", specifier = ">=6.80" },
     { name = "pytest", specifier = ">=8.0" },
+    { name = "pyyaml", specifier = ">=6,<7" },
     { name = "ruff", specifier = ">=0.2" },
     { name = "ty", specifier = ">=0.0.15" },
 ]

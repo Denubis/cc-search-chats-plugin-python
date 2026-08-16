@@ -1,5 +1,23 @@
 # Changelog
 
+## cc-search-chats 2.0.0a7
+
+Routes Codex chat-history commands through the configured host approval boundary
+and packages the shared search skill for deliberate Codex discovery.
+
+**New:**
+- The repository ships Codex marketplace metadata, search-skill discovery
+  metadata, a prompt-level host-routing rule, and an idempotent rule installer.
+- Packaging tests verify the Codex marketplace, skill metadata, approval rule,
+  and safe rule installation behavior.
+
+**Changed:**
+- Codex search instructions request the configured host approval route on the
+  first attempt instead of treating a sandbox's PostgreSQL, D-Bus, GPU, or model
+  cache visibility as a host fact.
+- A CUDA-unavailable error now identifies its evidence as process-scoped and
+  gives sandboxed callers the host-approval remedy before literal fallback.
+
 ## cc-search-chats 2.0.0a5
 
 Fixes indexing, which never finished on large corpora, and surfaces each

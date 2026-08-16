@@ -38,7 +38,7 @@ Verify the executable and its package version before installing the plugin:
 
 ```console
 cc-search-chats --version
-cc-search-chats 2.0.0a6
+cc-search-chats 2.0.0a7
 ```
 
 ### 2. Install an agent plugin

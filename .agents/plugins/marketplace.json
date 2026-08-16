@@ -1,0 +1,17 @@
+{
+  "name": "cc-search-chats-marketplace",
+  "interface": {
+    "displayName": "CC Search Chats"
+  },
+  "plugins": [
+    {
+      "name": "cc-search-chats",
+      "source": {"source": "local", "path": "."},
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

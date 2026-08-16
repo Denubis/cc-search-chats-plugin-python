@@ -1,0 +1,7 @@
+interface:
+  display_name: "Search Chats"
+  short_description: "Recover context from Claude Code and Codex history"
+  default_prompt: "Use $search-chat to recover the prior conversation relevant to this task."
+
+policy:
+  allow_implicit_invocation: true
