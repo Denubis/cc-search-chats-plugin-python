@@ -231,10 +231,7 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
                         )
                         last_embedding_report = completed
                         return
-                    if (
-                        completed == total
-                        or completed - last_embedding_report >= 100
-                    ):
+                    if completed == total or completed - last_embedding_report >= 100:
                         embedded = completed - embedding_baseline
                         elapsed = monotonic() - embedding_started
                         rate = embedded / elapsed if elapsed > 0 else 0

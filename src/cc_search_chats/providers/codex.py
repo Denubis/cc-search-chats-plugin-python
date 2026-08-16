@@ -174,9 +174,7 @@ class CodexParserState:
             for digest in self.seen_compaction_digests
         ):
             raise ValueError("seen_compaction_digests must contain SHA-256 hex strings")
-        if len(set(self.seen_compaction_digests)) != len(
-            self.seen_compaction_digests
-        ):
+        if len(set(self.seen_compaction_digests)) != len(self.seen_compaction_digests):
             raise ValueError("seen_compaction_digests must be unique")
         candidate = self.trailing_candidate
         if candidate is None:
@@ -948,9 +946,7 @@ def _metadata_outer_shape(record: _DecodedRecord) -> bool:
 
 def _is_string_list(value: object) -> bool:
     """Narrow one audited metadata field to a list of strings."""
-    return isinstance(value, list) and all(
-        isinstance(item, str) for item in value
-    )
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _turn_context_shape(record: _DecodedRecord) -> bool:
@@ -980,8 +976,7 @@ def _turn_context_shape(record: _DecodedRecord) -> bool:
     ):
         return False
     return all(
-        _is_string_list(payload[field])
-        for field in fields & _TURN_CONTEXT_LIST_FIELDS
+        _is_string_list(payload[field]) for field in fields & _TURN_CONTEXT_LIST_FIELDS
     )
 
 
@@ -1074,11 +1069,7 @@ def _next_trailing_candidate(
     if len(canonical_message.identity.physical_aliases) != 1:
         return None
     diagnostic = next(
-        (
-            value
-            for value in canonical.diagnostics
-            if alias in value.physical_aliases
-        ),
+        (value for value in canonical.diagnostics if alias in value.physical_aliases),
         None,
     )
     if (

@@ -21,9 +21,7 @@ from cc_search_chats.core.identity import (
     format_locator,
 )
 
-type _CompatibilityKey = tuple[
-    str, Path, SessionKind, int, str, ContentClass, str
-]
+type _CompatibilityKey = tuple[str, Path, SessionKind, int, str, ContentClass, str]
 type _VisibilityBoundary = tuple[str, Path, int]
 
 

@@ -68,7 +68,9 @@ def test_semantic_index_reexecs_inside_bounded_systemd_scope(
     args = build_parser().parse_args(["index", "--semantic-only"])
     monkeypatch.setattr(sys, "argv", ["cc-search-chats", "index", "--semantic-only"])
     launched = []
-    monkeypatch.setattr("os.execvp", lambda executable, command: launched.append(command))
+    monkeypatch.setattr(
+        "os.execvp", lambda executable, command: launched.append(command)
+    )
 
     _contain_semantic_index(args)
 

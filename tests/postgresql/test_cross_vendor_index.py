@@ -241,5 +241,7 @@ def test_semantic_index_skips_blank_prose_and_resumes_failures(
         resumed.extend(texts)
         return [vector for _ in texts]
 
-    assert index_embeddings(postgres_connection, embed_remaining, batch_size=1) == eligible
+    assert (
+        index_embeddings(postgres_connection, embed_remaining, batch_size=1) == eligible
+    )
     assert len(resumed) == eligible - 1
