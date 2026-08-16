@@ -54,7 +54,11 @@ def _runtime():
             "semantic dependencies are unavailable; use search --literal"
         ) from error
     if not torch.cuda.is_available():
-        raise ModelUnavailable("CUDA is unavailable; use search --literal")
+        raise ModelUnavailable(
+            "CUDA is unavailable to this process; if this command is running in an "
+            "agent sandbox, rerun it through the configured host approval route; "
+            "otherwise use search --literal"
+        )
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         path, local_files_only=True, trust_remote_code=False

@@ -9,6 +9,19 @@ allowed-tools: ["Bash(cc-search-chats:*)"]
 Use the PostgreSQL-backed CLI with `--json`. Check `schema_version` is `1`
 before interpreting output.
 
+## Execution boundary
+
+In Codex, run every `cc-search-chats` command through the harness's host
+approval or escalation mechanism on the first attempt. Do not run it in the
+sandbox first. The host PostgreSQL service, D-Bus user session, GPU, and model
+cache may be deliberately absent from a sandbox, so a failure there describes
+only that process. The configured approver decides whether host execution is
+allowed; do not bypass it or invent environment variables to reach the host.
+
+Claude Code's allowed Bash invocation runs in its ordinary host environment.
+For either provider, report an environmental failure as process-scoped unless
+a host probe established the corresponding host fact.
+
 ## Route the request
 
 ```bash

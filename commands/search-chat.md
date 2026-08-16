@@ -8,6 +8,9 @@ allowed-tools: ["Bash(cc-search-chats:*)"]
 **Request:** $ARGUMENTS
 
 Use `cc-search-chats` with `--json` and require `schema_version: 1`.
+When the caller is sandboxed, request the configured host approval route on the
+first attempt; do not infer host PostgreSQL, D-Bus, or CUDA state from a
+sandboxed failure, and do not invent connection or cache environment variables.
 
 - Topic: `cc-search-chats search "QUERY" --json`
 - Exact/filter search: `cc-search-chats search "QUERY" --literal --json`
