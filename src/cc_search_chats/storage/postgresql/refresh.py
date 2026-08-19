@@ -25,6 +25,7 @@ from cc_search_chats.providers.source_discovery import (
     discover_codex_sources,
     read_bounded_jsonl,
 )
+from cc_search_chats.storage.postgresql.guardrails import queued_index_operation
 from cc_search_chats.storage.postgresql.index import migrate, replace_messages
 
 type ProgressCallback = Callable[[str, int, int], None]
@@ -120,6 +121,7 @@ def iter_native_messages(
             progress("codex", completed, total)
 
 
+@queued_index_operation
 def refresh_native_sources(
     connection: psycopg.Connection,
     *,

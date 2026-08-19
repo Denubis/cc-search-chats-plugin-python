@@ -3,6 +3,7 @@
 import json
 import shutil
 import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,9 @@ def test_postgresql_cli_journey(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+    )
     claude_root, codex_root = tmp_path / "claude", tmp_path / "codex"
     claude_root.mkdir()
     codex_day = codex_root / "2026" / "08" / "11"
@@ -70,6 +74,22 @@ def test_postgresql_cli_journey(
     assert code == 0
     assert result["provider"] == "codex"
     locator = result["locator"]
+
+    missing_locator = f"{locator[:-1]}{'0' if locator[-1] != '0' else '1'}"
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        StringIO(f"{locator}\n{missing_locator}\n{locator}\n"),
+    )
+    code, resolved_many = _run(monkeypatch, capsys, "resolve", "--stdin", "--json")
+    assert code == 3
+    resolutions = json.loads(resolved_many.out)["resolutions"]
+    assert [value["locator"] for value in resolutions] == [
+        locator,
+        missing_locator,
+        locator,
+    ]
+    assert [value["message_count"] for value in resolutions] == [1, 0, 1]
 
     code, searched = _run(
         monkeypatch,

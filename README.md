@@ -38,14 +38,13 @@ Verify the executable and its package version before installing the plugin:
 
 ```console
 cc-search-chats --version
-cc-search-chats 2.0.0a7
+cc-search-chats 2.0.2
 ```
 
 ### 2. Install an agent plugin
 
-The Codex plugin bundle has its own release number (`2.0.1`); the version shown
-by `cc-search-chats --version` is the Python CLI version. Both shipped skills
-expect JSON `schema_version` 1.
+The Python CLI, Claude plugin, and Codex plugin are released together as
+`2.0.2`. Both shipped skills expect JSON `schema_version` 1.
 
 #### Claude Code
 
@@ -152,8 +151,8 @@ Codex JSONL under `~/.codex/sessions/`.
 uses PostgreSQL full-text search and pgvector, and atomically selects complete
 revisions. Indexing commits small batches, resumes missing vectors, reuses
 unchanged vectors after refresh, and prevents concurrent workers with a
-PostgreSQL advisory lock. Semantic indexing automatically runs in a polite,
-memory- and task-bounded systemd user scope.
+PostgreSQL advisory lock. Every index mode automatically runs in a low-CPU,
+idle-I/O, memory- and task-bounded systemd user scope.
 
 ### Refresh behavior
 
@@ -175,6 +174,20 @@ An explicit `index` does not suppress real changes behind a threshold: any new
 eligible prose is indexed. Use `index --status --json` for a read-only durable
 checkpoint. Search itself does not silently start a refresh.
 
+PostgreSQL CLI work first makes one blocking request for a local single-flight
+file lock before opening a connection. Read operations then make one blocking
+request for a transaction-scoped PostgreSQL advisory lock, and complete index
+operations hold a separate session-scoped advisory lock. Contenders sleep until
+admitted rather than rerunning database work. A killed client releases both
+locks without a lease-recovery worker or writable queue table.
+
+For integrity checks, resolve newline-delimited locators in one process, one
+connection, and one ordered database operation:
+
+```bash
+rg -o 'ccchat:v1:[^[:space:]]+' docs | cc-search-chats resolve --stdin --json
+```
+
 ### Cross-Project Search
 
 PostgreSQL searches the whole indexed corpus by default. Use `--project PATH`
@@ -188,29 +201,19 @@ cc-search-chats index
 ```
 
 This walks both native roots. Re-runs create a fresh corpus receipt, reuse
-unchanged vectors, and resume any interrupted semantic work. To keep the index
-fresh, add a cron entry or a systemd user timer:
+unchanged vectors, and resume any interrupted semantic work. The distribution
+ships `cc_search_chats/systemd/cc-search-chats-index.service` and
+`cc-search-chats-index.timer`; copy those templates into
+`~/.config/systemd/user/`, then enable the persistent nightly schedule:
 
 ```bash
-# crontab -e  (hourly)
-0 * * * * ~/.local/bin/cc-search-chats index >/dev/null 2>&1
+systemctl --user daemon-reload
+systemctl --user enable --now cc-search-chats-index.timer
 ```
 
-```ini
-# ~/.config/systemd/user/cc-search-index.service
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/cc-search-chats index
-
-# ~/.config/systemd/user/cc-search-index.timer
-# enable with: systemctl --user enable --now cc-search-index.timer
-[Timer]
-OnCalendar=hourly
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
+The timer starts at 03:00 with up to 30 minutes of randomized delay. The
+oneshot service and the CLI both apply low CPU and idle I/O priority. No
+long-running cc-search-chats daemon is required.
 
 ### Searching Thinking and Tool Calls
 

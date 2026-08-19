@@ -37,6 +37,7 @@ from cc_search_chats.output import (
     json_search_results,
     json_session_list,
 )
+from cc_search_chats.queueing import client_admission
 from cc_search_chats.semantic import ModelUnavailable, embed_passages, embed_query
 from cc_search_chats.storage.index import (
     ProjectRebuildError,
@@ -74,6 +75,10 @@ from cc_search_chats.storage.postgresql import (
 from cc_search_chats.storage.postgresql import (
     resolve_message as pg_resolve_message,
 )
+from cc_search_chats.storage.postgresql import (
+    resolve_messages as pg_resolve_messages,
+)
+from cc_search_chats.storage.postgresql.guardrails import acquire_index_session
 from cc_search_chats.storage.postgresql.semantic import hybrid_search
 
 _DEFAULT_POSTGRES_DSN = "service=cc_search_chats"
@@ -86,11 +91,11 @@ def _eta(seconds: float) -> str:
 
 
 def _contain_semantic_index(args: argparse.Namespace) -> None:
-    """Re-enter semantic indexing in a host-safe systemd scope."""
+    """Re-enter indexing in a host-safe, low-priority systemd scope."""
     if (
         args.command != "index"
-        or args.literal_only
         or args.status
+        or os.environ.get("CC_SEARCH_CONTAINED") == "1"
         or "/run-r" in Path("/proc/self/cgroup").read_text(encoding="utf-8")
     ):
         return
@@ -99,12 +104,14 @@ def _contain_semantic_index(args: argparse.Namespace) -> None:
         "--user",
         "--scope",
         "--quiet",
+        "--nice=10",
         "--property=MemoryHigh=24G",
         "--property=MemoryMax=32G",
         "--property=MemorySwapMax=4G",
         "--property=TasksMax=256",
         "--property=CPUWeight=25",
         "--property=IOWeight=25",
+        "--property=IOSchedulingClass=idle",
         "--",
         *sys.argv,
     ]
@@ -112,8 +119,7 @@ def _contain_semantic_index(args: argparse.Namespace) -> None:
         os.execvp(command[0], command)
     except OSError as error:
         raise RuntimeError(
-            "semantic indexing requires a working systemd user session for resource "
-            "containment"
+            "indexing requires a working systemd user session for resource containment"
         ) from error
 
 
@@ -174,6 +180,8 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
                 else:
                     print(f"Semantic index: {completed}/{total} passages")
                 return 0
+
+            acquire_index_session(connection)
 
             def progress(provider: str, completed: int, total: int) -> None:
                 if completed == total or completed % 100 == 0:
@@ -320,6 +328,42 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
             return 0
 
         if args.command in {"context", "resolve"}:
+            if args.command == "resolve" and args.stdin:
+                if args.uuid is not None:
+                    print(
+                        "resolve accepts a locator or --stdin, not both",
+                        file=sys.stderr,
+                    )
+                    return 2
+                locators = tuple(line.strip() for line in sys.stdin if line.strip())
+                if not locators:
+                    print(
+                        "resolve --stdin requires at least one locator", file=sys.stderr
+                    )
+                    return 2
+                if any(
+                    not isinstance(parse_locator(locator), NativeLocator)
+                    for locator in locators
+                ):
+                    print("Malformed ccchat locator", file=sys.stderr)
+                    return 2
+                resolutions = pg_resolve_messages(connection, locators)
+                values = [
+                    {
+                        "locator": resolution.locator,
+                        "message_count": len(resolution.messages),
+                        "messages": [
+                            asdict(message) for message in resolution.messages
+                        ],
+                    }
+                    for resolution in resolutions
+                ]
+                if args.json:
+                    print(json.dumps({"schema_version": 1, "resolutions": values}))
+                else:
+                    for value in values:
+                        print(f"{value['message_count']}\t{value['locator']}")
+                return 0 if all(value["message_count"] == 1 for value in values) else 3
             if args.command == "resolve" and not isinstance(
                 parse_locator(args.uuid), NativeLocator
             ):
@@ -923,7 +967,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="resolve an exact ccchat locator",
         parents=[common_parser],
     )
-    resolve_parser.add_argument("uuid", type=str, help="exact ccchat locator")
+    resolve_parser.add_argument("uuid", nargs="?", help="exact ccchat locator")
+    resolve_parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="resolve newline-delimited locators in one database operation",
+    )
     resolve_parser.set_defaults(func=None)
 
     return parser
@@ -949,11 +998,23 @@ def main() -> None:
     if postgres:
         try:
             _contain_semantic_index(args)
-            sys.exit(
-                _handle_postgres(
+            admission_name = (
+                None
+                if args.command == "index" and args.status
+                else "index"
+                if args.command == "index"
+                else "read"
+            )
+            if admission_name is None:
+                exit_code = _handle_postgres(
                     args, "" if standard_connection else _DEFAULT_POSTGRES_DSN
                 )
-            )
+            else:
+                with client_admission(admission_name):
+                    exit_code = _handle_postgres(
+                        args, "" if standard_connection else _DEFAULT_POSTGRES_DSN
+                    )
+            sys.exit(exit_code)
         except ModelUnavailable as exc:
             print(str(exc), file=sys.stderr)
             sys.exit(8)

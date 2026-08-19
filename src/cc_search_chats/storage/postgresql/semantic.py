@@ -5,6 +5,10 @@ from dataclasses import dataclass
 
 import psycopg
 
+from cc_search_chats.storage.postgresql.guardrails import (
+    INDEX_QUEUE_LOCK,
+    queued_read_operation,
+)
 from cc_search_chats.storage.postgresql.index import SearchHit, search_messages
 
 _DIMENSIONS = 1024
@@ -91,11 +95,11 @@ def index_embeddings(
     locked = next(
         connection.execute(
             "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
-            ("cc_search_chats.semantic_index",),
+            (INDEX_QUEUE_LOCK,),
         )
     )[0]
     if not locked:
-        raise RuntimeError("semantic indexing is already running")
+        raise RuntimeError("indexing is already running")
     try:
         return _index_embeddings(
             connection, embed, batch_size=batch_size, progress=progress
@@ -103,7 +107,7 @@ def index_embeddings(
     finally:
         connection.execute(
             "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
-            ("cc_search_chats.semantic_index",),
+            (INDEX_QUEUE_LOCK,),
         )
 
 
@@ -282,6 +286,7 @@ def _index_embeddings(
     return completed
 
 
+@queued_read_operation
 def semantic_search(
     connection: psycopg.Connection,
     embedding: Sequence[float],
@@ -350,6 +355,7 @@ def semantic_search(
     return tuple(SearchHit(*row) for row in rows)
 
 
+@queued_read_operation
 def hybrid_search(
     connection: psycopg.Connection,
     query: str,

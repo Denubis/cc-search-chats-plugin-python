@@ -1,5 +1,29 @@
 # Changelog
 
+## cc-search-chats 2.0.2
+
+Prevents exact-locator integrity checks and concurrent indexing from creating
+an I/O stampede on large PostgreSQL corpora.
+
+**New:**
+- `resolve --stdin` resolves ordered newline-delimited locators through one
+  process, connection, and database operation with independent result counts.
+- Packaged systemd user units provide a persistent, dephased nightly refresh.
+
+**Changed:**
+- PostgreSQL CLI work uses blocking single-flight admission instead of retry
+  loops; killed clients release both local and database advisory locks.
+- Every indexing mode runs at low CPU and idle I/O priority with bounded memory
+  and task counts.
+
+**Fixed:**
+- Exact canonical and physical-alias lookups use revision-scoped indexes and
+  deduplicate narrow identities before fetching message bodies. The executed
+  PostgreSQL 18 regression plan writes no temporary blocks and does not scan
+  either large relation.
+- One database advisory owner now spans literal refresh and semantic embedding,
+  preventing overlapping rebuild phases.
+
 ## cc-search-chats 2.0.0a7
 
 Routes Codex chat-history commands through the configured host approval boundary

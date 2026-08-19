@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CODEX_MARKETPLACE = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 CODEX_RULE = REPO_ROOT / "rules" / "cc-search-chats.rules"
 CODEX_RULE_INSTALLER = REPO_ROOT / "scripts" / "install_codex_rule.py"
-EXPECTED_CLI_VERSION = "2.0.0a7"
+EXPECTED_CLI_VERSION = "2.0.2"
 
 
 def test_cli_release_version_is_synchronized() -> None:

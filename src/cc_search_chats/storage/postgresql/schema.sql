@@ -57,6 +57,9 @@ END $$;
 CREATE INDEX IF NOT EXISTS message_search_vector_idx
 ON cc_search_chats.message USING gin (search_vector);
 
+CREATE INDEX IF NOT EXISTS message_revision_canonical_locator_idx
+ON cc_search_chats.message (revision_id, canonical_locator);
+
 CREATE TABLE IF NOT EXISTS cc_search_chats.physical_alias (
     revision_id bigint NOT NULL,
     provider text NOT NULL,
@@ -96,6 +99,9 @@ BEGIN
           );
     END IF;
 END $$;
+
+CREATE INDEX IF NOT EXISTS physical_alias_revision_locator_idx
+ON cc_search_chats.physical_alias (revision_id, locator);
 
 CREATE TABLE IF NOT EXISTS cc_search_chats.semantic_revision (
     semantic_revision_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

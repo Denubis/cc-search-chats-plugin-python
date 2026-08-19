@@ -12,14 +12,17 @@ Environment isolation uses:
 """
 
 import errno
+import fcntl
 import io
 import json
 import shutil
 import sqlite3
 import sys
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from threading import Event
 from typing import Literal
 
 import pytest
@@ -28,6 +31,7 @@ from cc_search_chats import __version__
 from cc_search_chats.cli import _contain_semantic_index, build_parser, main
 from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
+from cc_search_chats.queueing import client_admission
 from cc_search_chats.storage.index import (
     ProjectRebuildError,
     close_db,
@@ -62,11 +66,13 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
 # ============================================================
 
 
-def test_semantic_index_reexecs_inside_bounded_systemd_scope(
+@pytest.mark.parametrize("mode", [(), ("--literal-only",), ("--semantic-only",)])
+def test_index_reexecs_inside_bounded_systemd_scope(
     monkeypatch: pytest.MonkeyPatch,
+    mode: tuple[str, ...],
 ) -> None:
-    args = build_parser().parse_args(["index", "--semantic-only"])
-    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "index", "--semantic-only"])
+    args = build_parser().parse_args(["index", *mode])
+    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "index", *mode])
     launched = []
     monkeypatch.setattr(
         "os.execvp", lambda executable, command: launched.append(command)
@@ -76,9 +82,66 @@ def test_semantic_index_reexecs_inside_bounded_systemd_scope(
 
     command = launched[0]
     assert command[:3] == ["systemd-run", "--user", "--scope"]
+    assert "--nice=10" in command
+    assert "--property=CPUWeight=25" in command
+    assert "--property=IOWeight=25" in command
+    assert "--property=IOSchedulingClass=idle" in command
     assert "--property=MemoryMax=32G" in command
     assert "--property=TasksMax=256" in command
-    assert command[-3:] == ["cc-search-chats", "index", "--semantic-only"]
+    assert command[-(2 + len(mode)) :] == ["cc-search-chats", "index", *mode]
+
+
+def test_index_does_not_nest_scope_inside_packaged_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = build_parser().parse_args(["index"])
+    monkeypatch.setenv("CC_SEARCH_CONTAINED", "1")
+    monkeypatch.setattr(
+        "os.execvp",
+        lambda executable, command: pytest.fail("attempted a nested systemd scope"),
+    )
+
+    _contain_semantic_index(args)
+
+
+def test_client_admission_blocks_once_until_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / "postgres-read.lock"
+    monkeypatch.setenv("CC_SEARCH_RUNTIME_DIR", str(runtime_dir))
+    original_flock = fcntl.flock
+    calls: list[int] = []
+    attempted = Event()
+    entered = Event()
+
+    def observed_flock(file_descriptor, operation: int) -> None:
+        calls.append(operation)
+        attempted.set()
+        original_flock(file_descriptor, operation)
+
+    def contend() -> None:
+        with client_admission("read"):
+            entered.set()
+
+    with (
+        lock_path.open("a+") as held,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        original_flock(held, fcntl.LOCK_EX)
+        monkeypatch.setattr("cc_search_chats.queueing.fcntl.flock", observed_flock)
+        pending = executor.submit(contend)
+        assert attempted.wait(timeout=1)
+        try:
+            assert calls == [fcntl.LOCK_EX]
+            assert not entered.is_set()
+        finally:
+            original_flock(held, fcntl.LOCK_UN)
+        pending.result(timeout=1)
+
+    assert calls == [fcntl.LOCK_EX, fcntl.LOCK_UN]
 
 
 def _setup_project_dir(tmp_path: Path) -> Path:

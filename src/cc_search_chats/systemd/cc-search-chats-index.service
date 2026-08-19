@@ -1,0 +1,15 @@
+[Unit]
+Description=Refresh the cc-search-chats index
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cc-search-chats index
+Environment=CC_SEARCH_CONTAINED=1
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=25
+IOWeight=25
+MemoryHigh=24G
+MemoryMax=32G
+MemorySwapMax=4G
+TasksMax=256

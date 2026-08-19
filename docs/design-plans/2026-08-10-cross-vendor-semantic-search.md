@@ -466,6 +466,26 @@ Hybrid search requires the selected semantic revision's
 mismatch is an explicit semantic-staleness error, not permission to mix
 revisions.
 
+Before a PostgreSQL CLI command opens a connection, it makes one blocking
+`flock` request for its work-class single-flight gate. The file is only an
+OS-owned admission primitive: contenders sleep until release, process death
+releases ownership, and it is neither durable status nor a lease. Database
+reads then make one blocking request for a transaction-scoped advisory lock
+with local `lock_timeout`, `statement_timeout`, and temporary-file limits; the
+transaction releases that lock on every exit path. This two-layer admission
+prevents local process fan-out while still protecting the database from callers
+on another host. A PostgreSQL queue table is deliberately excluded: without a
+resident worker it would turn reads into writes and require lease expiry,
+claiming, stale-row recovery, and another scheduler.
+
+Exact locator resolution accepts an ordered locator array. Canonical and
+physical-alias branches use revision-scoped indexes, union only narrow logical
+identity keys, and fetch message bodies after deduplication. Misses and duplicate
+inputs retain their input positions and independent result counts. It never
+combines a wide-row `SELECT DISTINCT` with a `LEFT JOIN ... OR`, and integrity
+checks use one process, connection, and batched database operation rather than a
+subprocess per locator.
+
 ### External PostgreSQL storage
 
 Production configuration points `CC_SEARCH_DATA_ROOT` at
@@ -545,13 +565,20 @@ target the selected current FTS revision for the corpus. A mismatch is explicit
 semantic staleness, never an invitation to serve the previous semantic revision
 silently.
 
-The opt-in overnight unit invokes `index --all --semantic`. That composed
+The opt-in overnight unit invokes `index`. That composed
 operation refreshes FTS, provenance observations, and semantic state in order.
 It reports success only when the selected semantic revision targets the newly
 selected FTS revision under the requested profile; maintenance dry-run follows
 only that success. Semantic failure leaves the newly committed FTS revision
 literal-searchable, returns a nonzero partial terminal state, and does not let the
 timer or status claim a fresh hybrid baseline.
+
+The packaged user service is a low-priority oneshot rather than a resident
+application service. Its persistent timer runs nightly at 03:00 with randomized
+delay. Both the unit and CLI containment apply `Nice=10`, idle I/O scheduling,
+low CPU/I/O weights, and memory/task bounds. The composed command holds one
+session-scoped advisory lock across literal refresh and embedding, so separate
+phase locks cannot admit an overlapping rebuild.
 
 ### Semantic chunks and vectors
 

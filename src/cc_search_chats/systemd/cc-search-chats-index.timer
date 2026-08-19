@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the cc-search-chats index nightly
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=cc-search-chats-index.service
+
+[Install]
+WantedBy=timers.target

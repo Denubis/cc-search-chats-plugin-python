@@ -1,6 +1,7 @@
 """PostgreSQL-backed cross-vendor chat index."""
 
 from cc_search_chats.storage.postgresql.index import (
+    MessageResolution,
     SearchHit,
     StoredMessage,
     StoredSession,
@@ -10,6 +11,7 @@ from cc_search_chats.storage.postgresql.index import (
     migrate,
     replace_messages,
     resolve_message,
+    resolve_messages,
     search_messages,
 )
 from cc_search_chats.storage.postgresql.refresh import (
@@ -26,6 +28,7 @@ from cc_search_chats.storage.postgresql.semantic import (
 
 __all__ = [
     "SearchHit",
+    "MessageResolution",
     "RefreshResult",
     "HybridHit",
     "StoredMessage",
@@ -40,6 +43,7 @@ __all__ = [
     "replace_embeddings",
     "replace_messages",
     "resolve_message",
+    "resolve_messages",
     "search_messages",
     "semantic_search",
 ]

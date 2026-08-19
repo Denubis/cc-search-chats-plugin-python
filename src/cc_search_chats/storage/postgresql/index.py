@@ -7,6 +7,7 @@ from importlib.resources import files
 import psycopg
 
 from cc_search_chats.core.identity import NativeMessage, format_locator
+from cc_search_chats.storage.postgresql.guardrails import queued_read_operation
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +48,12 @@ class StoredSession:
     message_count: int
     repository: str | None
     cwd: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MessageResolution:
+    locator: str
+    messages: tuple[StoredMessage, ...]
 
 
 def migrate(connection: psycopg.Connection) -> None:
@@ -184,6 +191,7 @@ def replace_messages(
     return revision_id
 
 
+@queued_read_operation
 def search_messages(
     connection: psycopg.Connection,
     query: str,
@@ -236,6 +244,7 @@ _MESSAGE_COLUMNS = """
 """
 
 
+@queued_read_operation
 def list_sessions(
     connection: psycopg.Connection,
     *,
@@ -264,6 +273,7 @@ def list_sessions(
     return tuple(StoredSession(*row) for row in rows)
 
 
+@queued_read_operation
 def extract_session(
     connection: psycopg.Connection,
     source_session_id: str,
@@ -292,26 +302,67 @@ def resolve_message(
     connection: psycopg.Connection, locator: str
 ) -> tuple[StoredMessage, ...]:
     """Resolve an exact physical or canonical locator in the selected revision."""
+    return resolve_messages(connection, (locator,))[0].messages
+
+
+@queued_read_operation
+def resolve_messages(
+    connection: psycopg.Connection, locators: Iterable[str]
+) -> tuple[MessageResolution, ...]:
+    """Resolve ordered physical or canonical locators in one database operation."""
+    requested = tuple(locators)
+    if not requested:
+        return ()
     rows = connection.execute(
         f"""
-        SELECT DISTINCT {_MESSAGE_COLUMNS}
-        FROM cc_search_chats.message AS m
-        JOIN cc_search_chats.corpus_state AS s
-          ON s.current_revision_id = m.revision_id
-        LEFT JOIN cc_search_chats.physical_alias AS a
-          ON (a.revision_id, a.provider, a.source_session_id,
-              a.logical_message_id, a.content_class) =
-             (m.revision_id, m.provider, m.source_session_id,
-              m.logical_message_id, m.content_class)
-        WHERE m.canonical_locator = %s OR a.locator = %s
-        ORDER BY m.provider, m.source_session_id, m.logical_message_id,
-                 m.content_class
+        WITH requested(locator, input_order) AS (
+            SELECT locator, input_order
+            FROM unnest(%s::text[]) WITH ORDINALITY
+              AS values(locator, input_order)
+        ), matched_identity AS (
+            SELECT r.input_order, r.locator, m.revision_id, m.provider,
+                   m.source_session_id, m.logical_message_id, m.content_class
+            FROM requested AS r
+            JOIN cc_search_chats.corpus_state AS s ON s.singleton
+            JOIN cc_search_chats.message AS m
+              ON m.revision_id = s.current_revision_id
+             AND m.canonical_locator = r.locator
+            UNION
+            SELECT r.input_order, r.locator, a.revision_id, a.provider,
+                   a.source_session_id, a.logical_message_id, a.content_class
+            FROM requested AS r
+            JOIN cc_search_chats.corpus_state AS s ON s.singleton
+            JOIN cc_search_chats.physical_alias AS a
+              ON a.revision_id = s.current_revision_id
+             AND a.locator = r.locator
+        )
+        SELECT r.input_order, r.locator, {_MESSAGE_COLUMNS}
+        FROM requested AS r
+        LEFT JOIN matched_identity AS matched
+          ON (matched.input_order, matched.locator) =
+             (r.input_order, r.locator)
+        LEFT JOIN cc_search_chats.message AS m
+          ON (m.revision_id, m.provider, m.source_session_id,
+              m.logical_message_id, m.content_class) =
+             (matched.revision_id, matched.provider, matched.source_session_id,
+              matched.logical_message_id, matched.content_class)
+        ORDER BY r.input_order, m.provider, m.source_session_id,
+                 m.logical_message_id, m.content_class
         """.encode(),
-        (locator, locator),
+        (list(requested),),
     )
-    return tuple(StoredMessage(*row) for row in rows)
+    resolved: list[list[StoredMessage]] = [[] for _ in requested]
+    for row in rows:
+        input_order = row[0]
+        if row[2] is not None:
+            resolved[input_order - 1].append(StoredMessage(*row[2:]))
+    return tuple(
+        MessageResolution(locator, tuple(messages))
+        for locator, messages in zip(requested, resolved, strict=True)
+    )
 
 
+@queued_read_operation
 def context_messages(
     connection: psycopg.Connection, locator: str, *, depth: int = 5
 ) -> tuple[StoredMessage, ...]:
