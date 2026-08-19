@@ -14,6 +14,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CODEX_MARKETPLACE = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
+ANTIGRAVITY_MANIFEST = REPO_ROOT / "plugin.json"
 CODEX_RULE = REPO_ROOT / "rules" / "cc-search-chats.rules"
 CODEX_RULE_INSTALLER = REPO_ROOT / "scripts" / "install_codex_rule.py"
 EXPECTED_CLI_VERSION = "2.0.2"
@@ -60,6 +61,15 @@ def test_codex_marketplace_resolves_the_shared_plugin_source() -> None:
         "authentication": "ON_INSTALL",
     }
     assert entry["category"] == "Productivity"
+
+
+def test_antigravity_adapter_mirrors_the_canonical_plugin_name() -> None:
+    claude_plugin = json.loads(
+        (REPO_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    antigravity_plugin = json.loads(ANTIGRAVITY_MANIFEST.read_text(encoding="utf-8"))
+
+    assert antigravity_plugin == {"name": claude_plugin["name"]}
 
 
 def test_search_skill_has_intentional_codex_discovery_metadata() -> None:
