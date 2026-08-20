@@ -38,13 +38,13 @@ Verify the executable and its package version before installing the plugin:
 
 ```console
 cc-search-chats --version
-cc-search-chats 2.0.2
+cc-search-chats 2.0.3
 ```
 
 ### 2. Install an agent plugin
 
 The Python CLI, Claude plugin, and Codex plugin are released together as
-`2.0.2`. Both shipped skills expect JSON `schema_version` 1.
+`2.0.3`. Both shipped skills expect JSON `schema_version` 1.
 
 #### Claude Code
 
@@ -74,11 +74,17 @@ As a PostgreSQL administrator, provision them once:
 
 ```sql
 CREATE ROLE cc_search_chats_owner LOGIN;
+GRANT SET ON PARAMETER temp_file_limit TO cc_search_chats_owner;
 \password cc_search_chats_owner
 CREATE DATABASE cc_search_chats OWNER cc_search_chats_owner;
 \connect cc_search_chats
 CREATE EXTENSION vector;
 ```
+
+Existing installations created from earlier setup instructions must also run
+the `GRANT` line once. Queued reads use this privilege to apply a
+transaction-local 64 MB temporary-file limit; it does not make
+`cc_search_chats_owner` a superuser.
 
 Configure the standard libpq service once in `~/.pg_service.conf`:
 

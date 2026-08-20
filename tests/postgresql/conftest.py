@@ -13,6 +13,7 @@ import pytest
 _BIN = Path("/usr/lib/postgresql/18/bin")
 _VECTOR_CONTROL = Path("/usr/share/postgresql/18/extension/vector.control")
 _PORT = 55432
+_RUNTIME_ROLE = "cc_search_chats_test_owner"
 _PG_ENV_KEYS = {
     "DATABASE_URL",
     "PGHOST",
@@ -32,6 +33,7 @@ class PostgresCluster:
     data: Path
     socket: Path
     dsn: str
+    runtime_dsn: str
 
 
 def _row(cursor: psycopg.Cursor[Any]) -> tuple[Any, ...]:
@@ -91,7 +93,14 @@ def postgres_cluster(
         env=env,
     )
     dsn = f"host={socket} port={_PORT} dbname=postgres user={os.environ.get('USER', 'postgres')}"
-    cluster = PostgresCluster(root=root, data=data.resolve(), socket=socket, dsn=dsn)
+    runtime_dsn = f"host={socket} port={_PORT} dbname=postgres user={_RUNTIME_ROLE}"
+    cluster = PostgresCluster(
+        root=root,
+        data=data.resolve(),
+        socket=socket,
+        dsn=dsn,
+        runtime_dsn=runtime_dsn,
+    )
     try:
         with psycopg.connect(dsn, autocommit=True) as connection:
             observed = Path(
@@ -99,6 +108,10 @@ def postgres_cluster(
             ).resolve()
             assert observed == cluster.data and observed.is_relative_to(root.resolve())
             connection.execute("CREATE EXTENSION vector")
+            connection.execute("CREATE ROLE cc_search_chats_test_owner LOGIN")
+            connection.execute(
+                "GRANT SET ON PARAMETER temp_file_limit TO cc_search_chats_test_owner"
+            )
         yield cluster
     finally:
         if data.exists():

@@ -17,22 +17,33 @@ CODEX_MARKETPLACE = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 ANTIGRAVITY_MANIFEST = REPO_ROOT / "plugin.json"
 CODEX_RULE = REPO_ROOT / "rules" / "cc-search-chats.rules"
 CODEX_RULE_INSTALLER = REPO_ROOT / "scripts" / "install_codex_rule.py"
-EXPECTED_CLI_VERSION = "2.0.2"
+EXPECTED_CLI_VERSION = "2.0.3"
 
 
 def test_cli_release_version_is_synchronized() -> None:
     project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    lockfile = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
     claude_plugin = json.loads(
         (REPO_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
     )
     claude_marketplace = json.loads(
         (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
     )
+    codex_plugin = json.loads(
+        (REPO_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    locked_project = next(
+        package
+        for package in lockfile["package"]
+        if package["name"] == "cc-search-chats"
+    )
 
     versions = {
         "pyproject": project["project"]["version"],
+        "uv lockfile": locked_project["version"],
         "Claude plugin": claude_plugin["version"],
         "Claude marketplace": claude_marketplace["plugins"][0]["version"],
+        "Codex plugin": codex_plugin["version"],
     }
     assert versions == dict.fromkeys(versions, EXPECTED_CLI_VERSION)
 

@@ -11,10 +11,32 @@ import pytest
 
 from cc_search_chats.cli import _handle_postgres, build_parser
 from cc_search_chats.storage.postgresql import migrate, resolve_message
+from cc_search_chats.storage.postgresql.guardrails import queued_read
 
 pytestmark = pytest.mark.postgresql
 _READ_QUEUE_LOCK = "cc_search_chats.read_queue"
 _INDEX_QUEUE_LOCK = "cc_search_chats.index_queue"
+
+
+def test_documented_non_superuser_role_can_apply_read_guardrails(
+    postgres_cluster,
+) -> None:
+    """The documented runtime role can apply and release the temp-file bound."""
+    with psycopg.connect(
+        postgres_cluster.runtime_dsn,
+        autocommit=True,
+    ) as connection:
+        role, is_superuser = next(
+            connection.execute(
+                "SELECT current_user, rolsuper FROM pg_roles WHERE rolname = current_user"
+            )
+        )
+
+        assert role == "cc_search_chats_test_owner"
+        assert is_superuser is False
+        with queued_read(connection):
+            assert next(connection.execute("SHOW temp_file_limit"))[0] == "64MB"
+        assert next(connection.execute("SHOW temp_file_limit"))[0] == "-1"
 
 
 def _plan_nodes(node):

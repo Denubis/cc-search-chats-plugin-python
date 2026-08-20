@@ -1,5 +1,17 @@
 # Changelog
 
+## cc-search-chats 2.0.3
+
+Restores PostgreSQL-backed chat search for the documented non-superuser runtime
+role while preserving the transaction-local temporary-file guardrail.
+
+**Fixed:**
+- PostgreSQL setup grants the runtime role permission to apply the
+  transaction-local temporary-file limit used by every queued read.
+- The PostgreSQL regression fixture exercises that guardrail through a
+  non-superuser role and verifies that the limit is released with the
+  transaction.
+
 ## cc-search-chats 2.0.2
 
 Prevents exact-locator integrity checks and concurrent indexing from creating
