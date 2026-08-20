@@ -1,5 +1,17 @@
 # Changelog
 
+## cc-search-chats 2.0.4
+
+Repairs ad-hoc index containment on systemd scope units while preserving idle
+I/O scheduling.
+
+**Fixed:**
+- `index` no longer passes the service-only `IOSchedulingClass` property to a
+  transient scope, which systemd 255 rejects before indexing starts.
+- Scoped index commands apply idle I/O scheduling through `ionice` and carry an
+  explicit containment marker, preventing recursive scope creation when
+  systemd assigns a unit name outside the former `run-r` heuristic.
+
 ## cc-search-chats 2.0.3
 
 Restores PostgreSQL-backed chat search for the documented non-superuser runtime

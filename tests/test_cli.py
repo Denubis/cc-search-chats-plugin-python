@@ -82,13 +82,16 @@ def test_index_reexecs_inside_bounded_systemd_scope(
 
     command = launched[0]
     assert command[:3] == ["systemd-run", "--user", "--scope"]
+    assert "--setenv=CC_SEARCH_CONTAINED=1" in command
     assert "--nice=10" in command
     assert "--property=CPUWeight=25" in command
     assert "--property=IOWeight=25" in command
-    assert "--property=IOSchedulingClass=idle" in command
     assert "--property=MemoryMax=32G" in command
     assert "--property=TasksMax=256" in command
-    assert command[-(2 + len(mode)) :] == ["cc-search-chats", "index", *mode]
+    separator = command.index("--")
+    assert command[separator + 1 : separator + 3] == ["ionice", "--class=idle"]
+    assert command[separator + 3 :] == ["cc-search-chats", "index", *mode]
+    assert "--property=IOSchedulingClass=idle" not in command
 
 
 def test_index_does_not_nest_scope_inside_packaged_service(

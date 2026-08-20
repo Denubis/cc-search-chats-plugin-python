@@ -104,6 +104,7 @@ def _contain_semantic_index(args: argparse.Namespace) -> None:
         "--user",
         "--scope",
         "--quiet",
+        "--setenv=CC_SEARCH_CONTAINED=1",
         "--nice=10",
         "--property=MemoryHigh=24G",
         "--property=MemoryMax=32G",
@@ -111,8 +112,9 @@ def _contain_semantic_index(args: argparse.Namespace) -> None:
         "--property=TasksMax=256",
         "--property=CPUWeight=25",
         "--property=IOWeight=25",
-        "--property=IOSchedulingClass=idle",
         "--",
+        "ionice",
+        "--class=idle",
         *sys.argv,
     ]
     try:

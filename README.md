@@ -38,13 +38,13 @@ Verify the executable and its package version before installing the plugin:
 
 ```console
 cc-search-chats --version
-cc-search-chats 2.0.3
+cc-search-chats 2.0.4
 ```
 
 ### 2. Install an agent plugin
 
 The Python CLI, Claude plugin, and Codex plugin are released together as
-`2.0.3`. Both shipped skills expect JSON `schema_version` 1.
+`2.0.4`. Both shipped skills expect JSON `schema_version` 1.
 
 #### Claude Code
 
