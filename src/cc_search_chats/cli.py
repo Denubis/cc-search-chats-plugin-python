@@ -135,26 +135,22 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
                         """
                         SELECT cs.current_revision_id, sr.semantic_revision_id,
                                COALESCE(sr.completed, 0),
-                               (SELECT count(*) FROM cc_search_chats.message AS m
-                                WHERE m.revision_id = cs.current_revision_id
-                                  AND m.content_class = 'prose'
+                               (SELECT count(*)
+                                FROM cc_search_chats.message_current AS m
+                                WHERE m.content_class = 'prose'
                                   AND m.prose_content ~ '[^[:space:]]'),
                                COALESCE(sr.selected, false)
                         FROM cc_search_chats.corpus_state AS cs
                         LEFT JOIN LATERAL (
                             SELECT r.semantic_revision_id,
-                                   count(e.semantic_revision_id) AS completed,
+                                   r.embedded_count AS completed,
                                    ss.current_semantic_revision_id =
                                        r.semantic_revision_id AS selected
                             FROM cc_search_chats.semantic_revision AS r
-                            LEFT JOIN cc_search_chats.message_embedding AS e
-                              ON e.semantic_revision_id = r.semantic_revision_id
                             LEFT JOIN cc_search_chats.semantic_state AS ss
                               ON ss.singleton
                             WHERE r.corpus_revision_id = cs.current_revision_id
-                            GROUP BY r.semantic_revision_id,
-                                     ss.current_semantic_revision_id
-                            ORDER BY completed DESC
+                            ORDER BY r.semantic_revision_id DESC
                             LIMIT 1
                         ) AS sr ON true
                         WHERE cs.singleton
@@ -198,8 +194,7 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
                         """
                         SELECT s.current_revision_id, 0, count(*)
                         FROM cc_search_chats.corpus_state AS s
-                        JOIN cc_search_chats.message AS m
-                          ON m.revision_id = s.current_revision_id
+                        CROSS JOIN cc_search_chats.message_current AS m
                         WHERE s.singleton
                         GROUP BY s.current_revision_id
                         """

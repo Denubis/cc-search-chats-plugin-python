@@ -14,6 +14,7 @@ from cc_search_chats.providers.source_discovery import (
     BoundedReadStopReason,
     DiscoveryResult,
     SourceDiagnosticCode,
+    configured_source_roots,
     discover_claude_sources,
     discover_codex_sources,
     probe_git_repository,
@@ -613,6 +614,75 @@ class TestProviderDiscovery:
 
         assert result.sources == ()
         assert diagnostic_codes(result) == {SourceDiagnosticCode.UNREADABLE_ROOT}
+
+
+class TestConfiguredSourceRoots:
+    def test_defaults_include_present_standard_and_ponytail_session_roots_only(
+        self, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        expected = (
+            (Provider.CLAUDE, home / ".claude" / "projects"),
+            (Provider.CLAUDE, home / ".claude-ponytail" / "projects"),
+            (Provider.CODEX, home / ".codex" / "sessions"),
+            (Provider.CODEX, home / ".codex-ponytail" / "sessions"),
+        )
+        for _, path in expected:
+            path.mkdir(parents=True)
+        (home / ".claude-ponytail" / "credentials.json").write_text("secret")
+        (home / ".codex-ponytail" / "config.toml").write_text("secret")
+
+        roots = configured_source_roots(environ={}, home=home)
+
+        assert tuple((root.provider, root.path) for root in roots) == tuple(
+            (provider, path.resolve()) for provider, path in expected
+        )
+        assert len({root.source_root_id for root in roots}) == 4
+        assert all(len(root.source_root_id) == 64 for root in roots)
+        assert all(root.path.name in {"projects", "sessions"} for root in roots)
+
+    def test_plural_roots_override_singular_values_and_deduplicate(
+        self, tmp_path: Path
+    ) -> None:
+        claude_one = (tmp_path / "claude-one").resolve()
+        claude_two = (tmp_path / "claude-two").resolve()
+        codex = (tmp_path / "codex").resolve()
+        for path in (claude_one, claude_two, codex):
+            path.mkdir()
+        environment = {
+            "CC_SEARCH_CLAUDE_ROOTS": os.pathsep.join(
+                (str(claude_one), str(claude_two), str(claude_one))
+            ),
+            "CC_SEARCH_CODEX_ROOTS": str(codex),
+            "CC_SEARCH_CLAUDE_ROOT": str(tmp_path / "singular-claude-poison"),
+            "CC_SEARCH_CODEX_ROOT": str(tmp_path / "singular-codex-poison"),
+        }
+
+        roots = configured_source_roots(environ=environment, home=tmp_path)
+
+        assert tuple((root.provider, root.path) for root in roots) == (
+            (Provider.CLAUDE, claude_one),
+            (Provider.CLAUDE, claude_two),
+            (Provider.CODEX, codex),
+        )
+
+    def test_singular_variables_remain_exclusive_migration_compatibility(
+        self, tmp_path: Path
+    ) -> None:
+        claude = (tmp_path / "legacy-claude").resolve()
+        codex = (tmp_path / "legacy-codex").resolve()
+        roots = configured_source_roots(
+            environ={
+                "CC_SEARCH_CLAUDE_ROOT": str(claude),
+                "CC_SEARCH_CODEX_ROOT": str(codex),
+            },
+            home=tmp_path,
+        )
+
+        assert tuple((root.provider, root.path) for root in roots) == (
+            (Provider.CLAUDE, claude),
+            (Provider.CODEX, codex),
+        )
 
 
 def test_git_probe_ignores_ambient_git_routing_variables(

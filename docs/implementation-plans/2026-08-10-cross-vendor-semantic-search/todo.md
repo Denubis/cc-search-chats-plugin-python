@@ -1,20 +1,10 @@
 # Cross-vendor semantic search todo
 
-All items are pending. Check an item only after its named evidence passes; an
-empty search result is not completion evidence.
-
-## Outcome 1: normalized storage
-
-- [ ] Write failing snapshot-multiplication and no-op cardinality tests.
-- [ ] Write failing migration-ledger, candidate validation, and rollback tests.
-- [ ] Implement normalized current corpus, aliases, generations, staging, and
-      reusable embedding storage.
-- [ ] Implement and test a non-dropping prune dry-run.
-- [ ] Prove all PostgreSQL consumers use normalized relations.
+Only unresolved work remains here. Completed work and its exact evidence live in
+`worklog.md`; an empty search result is not completion evidence.
 
 ## Outcome 2: incremental multi-root refresh
 
-- [ ] Write failing plural-root and standard/Ponytail discovery tests.
 - [ ] Write failing root-isolation and cross-root collision tests.
 - [ ] Write failing no-op/append/partial/truncate/replace/advance/crash tests with
       byte-range observations.

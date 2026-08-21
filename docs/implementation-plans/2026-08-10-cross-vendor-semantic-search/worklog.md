@@ -35,3 +35,50 @@
   followed by implementation in the current `main` working tree.
 - No installation, production migration, production prune, push, or publication
   was authorized.
+
+## 2026-08-22 — Outcome 1 normalized storage complete
+
+- Replaced revision-owned active copies with canonical `message_current` and
+  `physical_alias_current` relations. Unchanged corpus and alias rows retain
+  their PostgreSQL row versions; an unchanged index creates no generation.
+- Added small corpus/semantic generation metadata and digest-keyed reusable
+  `embedding_value` rows with current message mappings. An appended corpus
+  preserves unchanged mapping row versions and embeds only missing text
+  digests.
+- Added an ordered SHA-256 migration ledger. Reapplication is idempotent,
+  changed applied bytes are rejected, and a missing later migration rolls back
+  without advancing the ledger.
+- Captured selected deployed snapshot IDs without treating snapshot content as
+  parser state. The explicit legacy-vector import joins each selected vector to
+  text from its own corpus revision, is idempotent, and seeds only the reusable
+  pool; it never publishes stale semantic state.
+- Added a read-only legacy prune plan reporting exact selected counts and total
+  relation allocation. The drop path is statically allowlisted and refuses to
+  run without a matching fresh fingerprint plus an accepted current cutover
+  validation containing four-corpus positive UAT and a complete semantic join.
+- Retired every ordinary PostgreSQL read/write dependency on the legacy
+  `message`, `physical_alias`, and `message_embedding` tables. The only remaining
+  production references are the explicitly named quarantine inventory/import/
+  prune paths.
+- Made every PostgreSQL test schema-isolated; this removed a prior semantic test
+  dependency on execution order.
+- Red evidence included generation `2 != 1` on an unchanged corpus, changed
+  `xmin` for an unchanged appended row, and changed `xmin` for a reused semantic
+  mapping. Each owning regression passed after the normalized implementation.
+- Fresh evidence: `uv run --frozen pytest tests/postgresql -q` reported 21
+  passed; `uv run --frozen pytest --ignore=tests/postgresql -q` reported 570
+  passed; Ruff lint/format and ty passed. One aggregate `pytest` invocation ran
+  the tests but wedged while `pg_ctl` waited during session teardown, so it was
+  interrupted and the two test partitions were rerun successfully.
+
+## 2026-08-22 — Outcome 2 root collection begun
+
+- Added stable provider/path-derived root IDs, plural environment variables,
+  singular-variable migration compatibility, deterministic deduplication, and
+  present standard/Ponytail defaults. Only `projects` or `sessions` roots are
+  selected; adjacent isolated configuration files are not.
+- Three focused configuration tests pass.
+- Blocked before checkpoint implementation by a design contradiction: proving
+  an already-committed prefix unchanged requires reading prefix bytes, while the
+  accepted append criterion permits reading only bytes after the old complete
+  record watermark. Unchanged files can still be guaranteed as metadata-only.

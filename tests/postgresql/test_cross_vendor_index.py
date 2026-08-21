@@ -180,7 +180,7 @@ def test_semantic_index_skips_blank_prose_and_resumes_failures(
         return [vector for _ in texts]
 
     assert index_embeddings(postgres_connection, embed_batch) == eligible
-    assert batch_sizes == []
+    assert sum(batch_sizes) == eligible
     selected = next(
         postgres_connection.execute(
             "SELECT current_semantic_revision_id "

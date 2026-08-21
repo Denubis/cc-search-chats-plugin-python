@@ -129,8 +129,26 @@ def postgres_cluster(
 
 
 @pytest.fixture
+def clean_postgres_schema(
+    postgres_cluster: PostgresCluster,
+) -> Iterator[None]:
+    """Isolate each test inside the fixture-owned disposable database."""
+    with psycopg.connect(postgres_cluster.dsn, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA IF EXISTS cc_search_chats CASCADE")
+    yield
+    with psycopg.connect(postgres_cluster.dsn, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA IF EXISTS cc_search_chats CASCADE")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_postgresql_test(clean_postgres_schema: None) -> None:
+    """Require the disposable schema boundary for every PostgreSQL test."""
+
+
+@pytest.fixture
 def postgres_connection(
     postgres_cluster: PostgresCluster,
+    clean_postgres_schema: None,
 ) -> Iterator[psycopg.Connection]:
     """Return a clean autocommit connection to the disposable server."""
     with psycopg.connect(postgres_cluster.dsn, autocommit=True) as connection:

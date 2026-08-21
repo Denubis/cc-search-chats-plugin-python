@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -109,6 +110,15 @@ class DiscoveredSource:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfiguredSourceRoot:
+    """One provider session root with a stable internal identity."""
+
+    provider: Provider
+    path: Path
+    source_root_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryResult:
     """Deterministic source candidates plus explicit coverage diagnostics."""
 
@@ -124,6 +134,75 @@ class GitProbeResult:
 
     repository_root: Path | None
     diagnostics: tuple[SourceDiagnostic, ...]
+
+
+def _source_root_id(provider: Provider, path: Path) -> str:
+    payload = f"cc-search-chats-source-root-v1\0{provider.value}\0{path}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def configured_source_roots(
+    *,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> tuple[ConfiguredSourceRoot, ...]:
+    """Resolve plural roots, singular compatibility, or present local defaults."""
+    values = os.environ if environ is None else environ
+    resolved_home = (Path.home() if home is None else home).resolve()
+    provider_config = (
+        (
+            Provider.CLAUDE,
+            "CC_SEARCH_CLAUDE_ROOTS",
+            "CC_SEARCH_CLAUDE_ROOT",
+            resolved_home / ".claude" / "projects",
+            resolved_home / ".claude-ponytail" / "projects",
+        ),
+        (
+            Provider.CODEX,
+            "CC_SEARCH_CODEX_ROOTS",
+            "CC_SEARCH_CODEX_ROOT",
+            resolved_home / ".codex" / "sessions",
+            resolved_home / ".codex-ponytail" / "sessions",
+        ),
+    )
+    roots: list[ConfiguredSourceRoot] = []
+    for provider, plural_key, singular_key, standard, ponytail in provider_config:
+        raw_values: tuple[str, ...]
+        if plural_key in values:
+            raw = values[plural_key]
+            raw_values = tuple(raw.split(os.pathsep))
+            if not raw_values or any(not value.strip() for value in raw_values):
+                raise ValueError(f"{plural_key} must contain nonempty paths")
+        elif singular_key in values:
+            raw_values = (values[singular_key],)
+            if not raw_values[0].strip():
+                raise ValueError(f"{singular_key} must contain a nonempty path")
+        else:
+            raw_values = (
+                str(standard),
+                *((str(ponytail),) if ponytail.is_dir() else ()),
+            )
+
+        seen: set[Path] = set()
+        for raw_value in raw_values:
+            if raw_value == "~":
+                path = resolved_home
+            elif raw_value.startswith(f"~{os.sep}"):
+                path = resolved_home / raw_value[2:]
+            else:
+                path = Path(raw_value)
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            roots.append(
+                ConfiguredSourceRoot(
+                    provider=provider,
+                    path=resolved,
+                    source_root_id=_source_root_id(provider, resolved),
+                )
+            )
+    return tuple(roots)
 
 
 def _diagnostic(

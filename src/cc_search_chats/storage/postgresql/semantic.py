@@ -1,4 +1,4 @@
-"""Exact pgvector retrieval and reciprocal-rank fusion."""
+"""Exact pgvector retrieval, reusable embeddings, and rank fusion."""
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -12,6 +12,7 @@ from cc_search_chats.storage.postgresql.guardrails import (
 from cc_search_chats.storage.postgresql.index import SearchHit, search_messages
 
 _DIMENSIONS = 1024
+_PROFILE_ID = "nemotron-3-embed-8b-bf16:v1"
 _EMBEDDABLE_PROSE = "content_class = 'prose' AND prose_content ~ '[^[:space:]]'"
 
 
@@ -29,57 +30,140 @@ def _vector(value: Sequence[float]) -> str:
     return "[" + ",".join(str(float(component)) for component in value) + "]"
 
 
+def _current_revision(connection: psycopg.Connection) -> int:
+    revision = next(
+        connection.execute(
+            "SELECT current_revision_id FROM cc_search_chats.corpus_state "
+            "WHERE singleton"
+        )
+    )[0]
+    if revision is None:
+        raise ValueError("no selected corpus revision")
+    return revision
+
+
+def _eligible_count(connection: psycopg.Connection) -> int:
+    return next(
+        connection.execute(
+            "SELECT count(*) FROM cc_search_chats.message_current "
+            f"WHERE {_EMBEDDABLE_PROSE}"
+        )
+    )[0]
+
+
+def _mapped_count(connection: psycopg.Connection) -> int:
+    return next(
+        connection.execute(
+            """
+            SELECT count(*)
+            FROM cc_search_chats.message_embedding_current AS embedding
+            JOIN cc_search_chats.message_current AS message
+              USING (provider, source_session_id, logical_message_id, content_class)
+            WHERE embedding.profile_id = %s
+              AND embedding.input_digest = message.embedding_input_digest
+              AND message.content_class = 'prose'
+              AND message.prose_content ~ '[^[:space:]]'
+            """,
+            (_PROFILE_ID,),
+        )
+    )[0]
+
+
+def _publish_semantic_revision(
+    connection: psycopg.Connection,
+    *,
+    semantic_revision: int,
+    corpus_revision: int,
+    embedded_count: int,
+) -> None:
+    current = _current_revision(connection)
+    if current != corpus_revision:
+        raise ValueError("corpus changed while embeddings were being built")
+    connection.execute(
+        """
+        UPDATE cc_search_chats.semantic_revision
+        SET status = 'complete', completed_at = now(),
+            embedded_count = %s, failure = NULL
+        WHERE semantic_revision_id = %s
+        """,
+        (embedded_count, semantic_revision),
+    )
+    connection.execute(
+        "UPDATE cc_search_chats.semantic_state "
+        "SET current_semantic_revision_id = %s WHERE singleton",
+        (semantic_revision,),
+    )
+
+
 def replace_embeddings(
     connection: psycopg.Connection,
     embeddings: Mapping[str, Sequence[float]],
 ) -> int:
-    """Replace vectors for canonical prose locators in the selected revision."""
+    """Publish complete vectors for canonical prose locators."""
     with connection.transaction():
-        revision = next(
-            connection.execute(
-                "SELECT current_revision_id FROM cc_search_chats.corpus_state "
-                "WHERE singleton"
-            )
-        )[0]
-        if revision is None:
-            raise ValueError("no selected corpus revision")
+        corpus_revision = _current_revision(connection)
         semantic_revision = next(
             connection.execute(
-                "INSERT INTO cc_search_chats.semantic_revision (corpus_revision_id) "
-                "VALUES (%s) RETURNING semantic_revision_id",
-                (revision,),
-            )
-        )[0]
-        inserted = 0
-        for locator, embedding in embeddings.items():
-            inserted += connection.execute(
                 """
-                INSERT INTO cc_search_chats.message_embedding (
-                    semantic_revision_id, revision_id, provider, source_session_id,
-                    logical_message_id, content_class, embedding
-                )
-                SELECT %s, revision_id, provider, source_session_id,
-                       logical_message_id, content_class, %s::vector
-                FROM cc_search_chats.message
-                WHERE revision_id = %s AND canonical_locator = %s
-                  AND content_class = 'prose'
-                  AND prose_content ~ '[^[:space:]]'
+                INSERT INTO cc_search_chats.semantic_revision (
+                    corpus_revision_id, profile_id, status
+                ) VALUES (%s, %s, 'building')
+                RETURNING semantic_revision_id
                 """,
-                (semantic_revision, _vector(embedding), revision, locator),
-            ).rowcount
-        expected = next(
-            connection.execute(
-                "SELECT count(*) FROM cc_search_chats.message "
-                f"WHERE revision_id = %s AND {_EMBEDDABLE_PROSE}",
-                (revision,),
+                (corpus_revision, _PROFILE_ID),
             )
         )[0]
+        for locator, embedding in embeddings.items():
+            message = next(
+                connection.execute(
+                    """
+                    SELECT provider, source_session_id, logical_message_id,
+                           content_class, embedding_input_digest
+                    FROM cc_search_chats.message_current
+                    WHERE canonical_locator = %s
+                      AND content_class = 'prose'
+                      AND prose_content ~ '[^[:space:]]'
+                    """,
+                    (locator,),
+                ),
+                None,
+            )
+            if message is None:
+                continue
+            *key, input_digest = message
+            connection.execute(
+                """
+                INSERT INTO cc_search_chats.embedding_value (
+                    profile_id, input_digest, embedding
+                ) VALUES (%s, %s, %s::vector)
+                ON CONFLICT (profile_id, input_digest) DO NOTHING
+                """,
+                (_PROFILE_ID, input_digest, _vector(embedding)),
+            )
+            connection.execute(
+                """
+                INSERT INTO cc_search_chats.message_embedding_current (
+                    provider, source_session_id, logical_message_id,
+                    content_class, profile_id, input_digest
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (
+                    provider, source_session_id, logical_message_id,
+                    content_class, profile_id
+                ) DO UPDATE SET input_digest = EXCLUDED.input_digest
+                WHERE message_embedding_current.input_digest
+                      IS DISTINCT FROM EXCLUDED.input_digest
+                """,
+                (*key, _PROFILE_ID, input_digest),
+            )
+        expected = _eligible_count(connection)
+        inserted = _mapped_count(connection)
         if inserted != expected:
             raise ValueError(f"semantic revision is incomplete: {inserted}/{expected}")
-        connection.execute(
-            "UPDATE cc_search_chats.semantic_state "
-            "SET current_semantic_revision_id = %s WHERE singleton",
-            (semantic_revision,),
+        _publish_semantic_revision(
+            connection,
+            semantic_revision=semantic_revision,
+            corpus_revision=corpus_revision,
+            embedded_count=inserted,
         )
     return inserted
 
@@ -118,127 +202,130 @@ def _index_embeddings(
     batch_size: int = 4,
     progress: Callable[[int, int], None] | None = None,
 ) -> int:
-    """Build and atomically select a complete semantic revision in batches."""
-    if batch_size <= 0:
+    """Fill only missing reusable vectors, then publish one semantic generation."""
+    if (
+        isinstance(batch_size, bool)
+        or not isinstance(batch_size, int)
+        or batch_size <= 0
+    ):
         raise ValueError("batch_size must be positive")
-    revision = next(
-        connection.execute(
-            "SELECT current_revision_id FROM cc_search_chats.corpus_state WHERE singleton"
-        )
-    )[0]
-    if revision is None:
-        raise ValueError("no selected corpus revision")
-    total = next(
-        connection.execute(
-            "SELECT count(*) FROM cc_search_chats.message "
-            f"WHERE revision_id = %s AND {_EMBEDDABLE_PROSE}",
-            (revision,),
-        )
-    )[0]
+    corpus_revision = _current_revision(connection)
+    total = _eligible_count(connection)
     selected = next(
         connection.execute(
             """
-            SELECT sr.semantic_revision_id
-            FROM cc_search_chats.semantic_state AS ss
-            JOIN cc_search_chats.semantic_revision AS sr
-              ON sr.semantic_revision_id = ss.current_semantic_revision_id
-            WHERE ss.singleton AND sr.corpus_revision_id = %s
+            SELECT revision.semantic_revision_id
+            FROM cc_search_chats.semantic_state AS state
+            JOIN cc_search_chats.semantic_revision AS revision
+              ON revision.semantic_revision_id = state.current_semantic_revision_id
+            WHERE state.singleton
+              AND revision.corpus_revision_id = %s
+              AND revision.profile_id = %s
+              AND revision.status = 'complete'
             """,
-            (revision,),
+            (corpus_revision, _PROFILE_ID),
         ),
         None,
     )
     if selected is not None:
+        mapped = _mapped_count(connection)
+        if mapped != total:
+            raise ValueError(
+                f"selected semantic mapping is incomplete: {mapped}/{total}"
+            )
         return total
+
     partial = next(
         connection.execute(
             """
-            SELECT sr.semantic_revision_id, count(e.semantic_revision_id)
-            FROM cc_search_chats.semantic_revision AS sr
-            LEFT JOIN cc_search_chats.message_embedding AS e
-              ON e.semantic_revision_id = sr.semantic_revision_id
-            LEFT JOIN cc_search_chats.semantic_state AS ss
-              ON ss.current_semantic_revision_id = sr.semantic_revision_id
-            WHERE sr.corpus_revision_id = %s
-              AND ss.current_semantic_revision_id IS NULL
-            GROUP BY sr.semantic_revision_id
-            ORDER BY count(e.semantic_revision_id) DESC, sr.semantic_revision_id DESC
+            SELECT semantic_revision_id
+            FROM cc_search_chats.semantic_revision
+            WHERE corpus_revision_id = %s
+              AND profile_id = %s
+              AND status IN ('building', 'failed')
+            ORDER BY semantic_revision_id DESC
             LIMIT 1
             """,
-            (revision,),
+            (corpus_revision, _PROFILE_ID),
         ),
         None,
     )
     if partial is None:
         semantic_revision = next(
             connection.execute(
-                "INSERT INTO cc_search_chats.semantic_revision (corpus_revision_id) "
-                "VALUES (%s) RETURNING semantic_revision_id",
-                (revision,),
-            )
-        )[0]
-        connection.execute(
-            """
-            INSERT INTO cc_search_chats.message_embedding (
-                semantic_revision_id, revision_id, provider, source_session_id,
-                logical_message_id, content_class, embedding
-            )
-            SELECT %s, %s, m.provider, m.source_session_id,
-                   m.logical_message_id, m.content_class, old.embedding
-            FROM cc_search_chats.message AS m
-            JOIN cc_search_chats.semantic_state AS ss ON ss.singleton
-            JOIN cc_search_chats.message_embedding AS old
-              ON old.semantic_revision_id = ss.current_semantic_revision_id
-             AND old.provider = m.provider
-             AND old.source_session_id = m.source_session_id
-             AND old.logical_message_id = m.logical_message_id
-             AND old.content_class = m.content_class
-            JOIN cc_search_chats.message AS previous
-              ON previous.revision_id = old.revision_id
-             AND previous.provider = old.provider
-             AND previous.source_session_id = old.source_session_id
-             AND previous.logical_message_id = old.logical_message_id
-             AND previous.content_class = old.content_class
-             AND previous.prose_content = m.prose_content
-            WHERE m.revision_id = %s AND m.content_class = 'prose'
-              AND m.prose_content ~ '[^[:space:]]'
-            """,
-            (semantic_revision, revision, revision),
-        )
-        completed = next(
-            connection.execute(
-                "SELECT count(*) FROM cc_search_chats.message_embedding "
-                "WHERE semantic_revision_id = %s",
-                (semantic_revision,),
+                """
+                INSERT INTO cc_search_chats.semantic_revision (
+                    corpus_revision_id, profile_id, status
+                ) VALUES (%s, %s, 'building')
+                RETURNING semantic_revision_id
+                """,
+                (corpus_revision, _PROFILE_ID),
             )
         )[0]
     else:
-        semantic_revision, completed = partial
+        semantic_revision = partial[0]
+        connection.execute(
+            """
+            UPDATE cc_search_chats.semantic_revision
+            SET status = 'building', failure = NULL
+            WHERE semantic_revision_id = %s
+            """,
+            (semantic_revision,),
+        )
+
+    connection.execute(
+        """
+        INSERT INTO cc_search_chats.message_embedding_current (
+            provider, source_session_id, logical_message_id, content_class,
+            profile_id, input_digest
+        )
+        SELECT message.provider, message.source_session_id,
+               message.logical_message_id, message.content_class,
+               value.profile_id, value.input_digest
+        FROM cc_search_chats.message_current AS message
+        JOIN cc_search_chats.embedding_value AS value
+          ON value.profile_id = %s
+         AND value.input_digest = message.embedding_input_digest
+        WHERE message.content_class = 'prose'
+          AND message.prose_content ~ '[^[:space:]]'
+        ON CONFLICT (
+            provider, source_session_id, logical_message_id, content_class,
+            profile_id
+        ) DO UPDATE SET input_digest = EXCLUDED.input_digest
+        WHERE message_embedding_current.input_digest
+              IS DISTINCT FROM EXCLUDED.input_digest
+        """,
+        (_PROFILE_ID,),
+    )
+    completed = _mapped_count(connection)
     if progress is not None:
         progress(completed, total)
+
     while completed < total:
         rows = tuple(
             connection.execute(
                 """
-                SELECT provider, source_session_id, logical_message_id,
-                       content_class, prose_content
-                FROM cc_search_chats.message AS m
-                WHERE revision_id = %s
-                  AND content_class = 'prose'
-                  AND prose_content ~ '[^[:space:]]'
+                SELECT message.provider, message.source_session_id,
+                       message.logical_message_id, message.content_class,
+                       message.prose_content, message.embedding_input_digest
+                FROM cc_search_chats.message_current AS message
+                WHERE message.content_class = 'prose'
+                  AND message.prose_content ~ '[^[:space:]]'
                   AND NOT EXISTS (
-                      SELECT 1 FROM cc_search_chats.message_embedding AS e
-                      WHERE e.semantic_revision_id = %s
-                        AND e.revision_id = m.revision_id
-                        AND e.provider = m.provider
-                        AND e.source_session_id = m.source_session_id
-                        AND e.logical_message_id = m.logical_message_id
-                        AND e.content_class = m.content_class
+                      SELECT 1
+                      FROM cc_search_chats.message_embedding_current AS embedding
+                      WHERE embedding.provider = message.provider
+                        AND embedding.source_session_id = message.source_session_id
+                        AND embedding.logical_message_id = message.logical_message_id
+                        AND embedding.content_class = message.content_class
+                        AND embedding.profile_id = %s
+                        AND embedding.input_digest = message.embedding_input_digest
                   )
-                ORDER BY provider, source_session_id, logical_message_id, content_class
+                ORDER BY message.provider, message.source_session_id,
+                         message.logical_message_id, message.content_class
                 LIMIT %s
                 """,
-                (revision, semantic_revision, batch_size),
+                (_PROFILE_ID, batch_size),
             )
         )
         if not rows:
@@ -246,6 +333,27 @@ def _index_embeddings(
         try:
             vectors = embed([row[4] for row in rows])
         except Exception as error:
+            connection.execute(
+                """
+                UPDATE cc_search_chats.semantic_revision
+                SET status = 'failed',
+                    failure = jsonb_build_object(
+                        'completed', %s::bigint, 'total', %s::bigint,
+                        'provider', %s::text, 'session_id', %s::text,
+                        'logical_message_id', %s::text, 'error', %s::text
+                    )
+                WHERE semantic_revision_id = %s
+                """,
+                (
+                    completed,
+                    total,
+                    rows[0][0],
+                    rows[0][1],
+                    rows[0][2],
+                    str(error),
+                    semantic_revision,
+                ),
+            )
             raise RuntimeError(
                 f"semantic embedding failed after {completed}/{total} passages "
                 f"at {rows[0][0]}:{rows[0][1]}:{rows[0][2]}"
@@ -255,33 +363,41 @@ def _index_embeddings(
         with connection.transaction():
             connection.cursor().executemany(
                 """
-                    INSERT INTO cc_search_chats.message_embedding (
-                        semantic_revision_id, revision_id, provider,
-                        source_session_id, logical_message_id, content_class,
-                        embedding
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-                    """,
+                INSERT INTO cc_search_chats.embedding_value (
+                    profile_id, input_digest, embedding
+                ) VALUES (%s, %s, %s::vector)
+                ON CONFLICT (profile_id, input_digest) DO NOTHING
+                """,
                 [
-                    (semantic_revision, revision, *row[:4], _vector(vector))
+                    (_PROFILE_ID, row[5], _vector(vector))
                     for row, vector in zip(rows, vectors, strict=True)
                 ],
             )
-        completed += len(rows)
+            connection.cursor().executemany(
+                """
+                INSERT INTO cc_search_chats.message_embedding_current (
+                    provider, source_session_id, logical_message_id,
+                    content_class, profile_id, input_digest
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (
+                    provider, source_session_id, logical_message_id,
+                    content_class, profile_id
+                ) DO UPDATE SET input_digest = EXCLUDED.input_digest
+                WHERE message_embedding_current.input_digest
+                      IS DISTINCT FROM EXCLUDED.input_digest
+                """,
+                [(*row[:4], _PROFILE_ID, row[5]) for row in rows],
+            )
+        completed = _mapped_count(connection)
         if progress is not None:
             progress(completed, total)
+
     with connection.transaction():
-        current = next(
-            connection.execute(
-                "SELECT current_revision_id FROM cc_search_chats.corpus_state "
-                "WHERE singleton"
-            )
-        )[0]
-        if current != revision:
-            raise ValueError("corpus changed while embeddings were being built")
-        connection.execute(
-            "UPDATE cc_search_chats.semantic_state "
-            "SET current_semantic_revision_id = %s WHERE singleton",
-            (semantic_revision,),
+        _publish_semantic_revision(
+            connection,
+            semantic_revision=semantic_revision,
+            corpus_revision=corpus_revision,
+            embedded_count=completed,
         )
     return completed
 
@@ -298,33 +414,36 @@ def semantic_search(
     since: str | None = None,
     epoch: int | None = None,
 ) -> tuple[SearchHit, ...]:
-    """Return exact cosine-ranked messages from the selected revision."""
-    if limit <= 0:
+    """Return exact cosine-ranked messages from the current semantic state."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("limit must be positive")
     vector = _vector(embedding)
     state = next(
         connection.execute(
             """
-            SELECT sr.corpus_revision_id = cs.current_revision_id
-            FROM cc_search_chats.semantic_state AS ss
-            JOIN cc_search_chats.semantic_revision AS sr
-              ON sr.semantic_revision_id = ss.current_semantic_revision_id
-            CROSS JOIN cc_search_chats.corpus_state AS cs
-            WHERE ss.singleton AND cs.singleton
-            """
+            SELECT revision.corpus_revision_id = corpus.current_revision_id
+                   AND revision.status = 'complete'
+                   AND revision.profile_id = %s
+            FROM cc_search_chats.semantic_state AS state
+            JOIN cc_search_chats.semantic_revision AS revision
+              ON revision.semantic_revision_id = state.current_semantic_revision_id
+            CROSS JOIN cc_search_chats.corpus_state AS corpus
+            WHERE state.singleton AND corpus.singleton
+            """,
+            (_PROFILE_ID,),
         ),
         None,
     )
     if state is None or state[0] is not True:
         raise ValueError("semantic revision is unavailable or stale")
     filters = []
-    params: list[object] = [vector]
+    params: list[object] = [vector, _PROFILE_ID]
     for value, clause in (
-        (provider, "m.provider = %s"),
-        (role, "m.role = %s"),
-        (project, "COALESCE(m.repository, m.cwd) = %s"),
-        (since, "m.timestamp_text >= %s"),
-        (epoch, "m.conversation_epoch = %s"),
+        (provider, "message.provider = %s"),
+        (role, "message.role = %s"),
+        (project, "COALESCE(message.repository, message.cwd) = %s"),
+        (since, "message.timestamp_text >= %s"),
+        (epoch, "message.conversation_epoch = %s"),
     ):
         if value is not None:
             filters.append(clause)
@@ -333,21 +452,21 @@ def semantic_search(
     where = f" AND {' AND '.join(filters)}" if filters else ""
     rows = connection.execute(
         f"""
-        SELECT m.provider, m.source_session_id, m.logical_message_id,
-               m.canonical_locator, m.timestamp_text, m.role, m.session_kind,
-               m.prose_content, m.repository, m.cwd,
-               1 - (e.embedding <=> %s::vector) AS score
-        FROM cc_search_chats.message_embedding AS e
-        JOIN cc_search_chats.message AS m
-          USING (revision_id, provider, source_session_id,
-                 logical_message_id, content_class)
-        JOIN cc_search_chats.corpus_state AS s
-          ON s.current_revision_id = e.revision_id
-        JOIN cc_search_chats.semantic_state AS ss
-          ON ss.current_semantic_revision_id = e.semantic_revision_id
-        WHERE TRUE {where}
-        ORDER BY e.embedding <=> %s::vector,
-                 m.provider, m.source_session_id, m.logical_message_id
+        SELECT message.provider, message.source_session_id,
+               message.logical_message_id, message.canonical_locator,
+               message.timestamp_text, message.role, message.session_kind,
+               message.prose_content, message.repository, message.cwd,
+               1 - (value.embedding <=> %s::vector) AS score
+        FROM cc_search_chats.message_embedding_current AS mapping
+        JOIN cc_search_chats.embedding_value AS value
+          ON (value.profile_id, value.input_digest) =
+             (mapping.profile_id, mapping.input_digest)
+        JOIN cc_search_chats.message_current AS message
+          USING (provider, source_session_id, logical_message_id, content_class)
+        WHERE mapping.profile_id = %s {where}
+        ORDER BY value.embedding <=> %s::vector,
+                 message.provider, message.source_session_id,
+                 message.logical_message_id
         LIMIT %s
         """.encode(),
         params,

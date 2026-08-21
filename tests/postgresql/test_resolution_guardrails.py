@@ -55,50 +55,50 @@ def _seed_representative_revision(connection: psycopg.Connection) -> tuple[str, 
     )[0]
     connection.execute(
         """
-        INSERT INTO cc_search_chats.message (
-            revision_id, provider, source_session_id, logical_message_id,
+        INSERT INTO cc_search_chats.message_current (
+            provider, source_session_id, logical_message_id,
             canonical_locator, timestamp_text, role, session_kind,
-            conversation_epoch, content_class, prose_content, submitted_by
+            conversation_epoch, content_class, prose_content, submitted_by,
+            embedding_input_digest
         )
-        SELECT %s, 'codex', 'plan-session', 'message-' || ordinal,
+        SELECT 'codex', 'plan-session', 'message-' || ordinal,
                'canonical-' || ordinal, '2026-08-19T00:00:00Z', 'assistant',
-               'primary', 0, 'prose', repeat('representative text ', 8), 'unknown'
+               'primary', 0, 'prose', repeat('representative text ', 8),
+               'unknown', repeat('b', 64)
         FROM generate_series(1, 20000) AS ordinal
-        """,
-        (revision_id,),
+        """
     )
     connection.execute(
         """
-        INSERT INTO cc_search_chats.physical_alias (
-            revision_id, provider, source_session_id, logical_message_id,
-            content_class, locator, source_file_relative, record_ordinal,
+        INSERT INTO cc_search_chats.physical_alias_current (
+            provider, source_session_id, logical_message_id, content_class,
+            source_root_id, locator, source_file_relative, record_ordinal,
             source_line, source_byte_offset, raw_byte_length, source_digest
         )
-        SELECT %s, 'codex', 'plan-session', 'message-' || ordinal, 'prose',
-               'alias-' || ordinal, 'rollout.jsonl', ordinal, ordinal + 1,
-               ordinal * 100, 100, repeat('a', 64)
+        SELECT 'codex', 'plan-session', 'message-' || ordinal, 'prose',
+               'test-root', 'alias-' || ordinal, 'rollout.jsonl', ordinal,
+               ordinal + 1, ordinal * 100, 100, repeat('a', 64)
         FROM generate_series(1, 20000) AS ordinal
-        """,
-        (revision_id,),
+        """
     )
     connection.execute(
         "UPDATE cc_search_chats.corpus_state SET current_revision_id = %s "
         "WHERE singleton",
         (revision_id,),
     )
-    connection.execute("ANALYZE cc_search_chats.message")
-    connection.execute("ANALYZE cc_search_chats.physical_alias")
+    connection.execute("ANALYZE cc_search_chats.message_current")
+    connection.execute("ANALYZE cc_search_chats.physical_alias_current")
     return "canonical-19999", "alias-19999"
 
 
 @pytest.mark.parametrize(
     ("target_kind", "expected_index"),
     (
-        ("canonical", "message_revision_canonical_locator_idx"),
-        ("alias", "physical_alias_revision_locator_idx"),
+        ("canonical", "message_current_canonical_locator_idx"),
+        ("alias", "physical_alias_current_locator_idx"),
     ),
 )
-def test_exact_resolution_uses_revision_scoped_locator_indexes(
+def test_exact_resolution_uses_current_locator_indexes(
     postgres_connection: psycopg.Connection,
     target_kind: str,
     expected_index: str,
@@ -146,7 +146,7 @@ def test_exact_resolution_uses_revision_scoped_locator_indexes(
     assert any(node.get("Index Name") == expected_index for node in nodes), summary
     assert not any(
         node.get("Node Type") == "Seq Scan"
-        and node.get("Relation Name") in {"message", "physical_alias"}
+        and node.get("Relation Name") in {"message_current", "physical_alias_current"}
         for node in nodes
     )
     assert sum(node.get("Temp Written Blocks", 0) for node in nodes) == 0
@@ -240,17 +240,16 @@ def test_duplicate_physical_aliases_resolve_one_logical_message(
     _, alias = _seed_representative_revision(postgres_connection)
     postgres_connection.execute(
         """
-        INSERT INTO cc_search_chats.physical_alias (
-            revision_id, provider, source_session_id, logical_message_id,
-            content_class, locator, source_file_relative, record_ordinal,
+        INSERT INTO cc_search_chats.physical_alias_current (
+            provider, source_session_id, logical_message_id, content_class,
+            source_root_id, locator, source_file_relative, record_ordinal,
             source_line, source_byte_offset, raw_byte_length, source_digest
         )
-        SELECT revision_id, provider, source_session_id, logical_message_id,
-               content_class, locator, 'duplicate-rollout.jsonl', record_ordinal,
-               source_line, source_byte_offset, raw_byte_length, source_digest
-        FROM cc_search_chats.physical_alias AS alias
-        JOIN cc_search_chats.corpus_state AS state
-          ON state.current_revision_id = alias.revision_id
+        SELECT provider, source_session_id, logical_message_id, content_class,
+               'duplicate-root', locator, 'duplicate-rollout.jsonl',
+               record_ordinal, source_line, source_byte_offset,
+               raw_byte_length, source_digest
+        FROM cc_search_chats.physical_alias_current AS alias
         WHERE alias.locator = %s
         """,
         (alias,),
