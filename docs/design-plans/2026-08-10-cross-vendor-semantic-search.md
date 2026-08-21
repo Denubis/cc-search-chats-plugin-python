@@ -1,19 +1,32 @@
 # Cross-Vendor Semantic Search Design
 
+**Status:** Current design
+
 **GitHub Issue:** None
+
+## Authority Sources
+
+| Decision or instruction | Exact source | Resolver | Resolution condition |
+|---|---|---|---|
+| Index the isolated Claude and Codex Ponytail session corpora while keeping message attribution out of this delivery. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a0227b-a5d7-70f0-9eac-ecfdfe195d77` | `sed -n '812p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` states both boundaries. |
+| Retain crash/generation records but do not retain unused message, alias, or embedding copies. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a0229d-4034-7ec2-b5b0-7923a3b8afe9` | `sed -n '916p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` accepts generation metadata and rejects unused copies. |
+| Proceed with the reconciled storage, freshness, Ponytail, UAT, and documentation work. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a022a9-3b5a-70d1-ab14-b7b2a363589c` | `sed -n '927p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` says `do it`. |
+| Accept this reconciled design as matching the intended outcome. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a02398-fc3a-7670-8f76-e267cfe92208` | `sed -n '1338p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` accepts the rendered design. |
 
 ## Summary
 
 Extend `cc-search-chats` from Claude-only full-text search into a local,
 cross-vendor search and exact-resolution tool for native Claude and Codex chat
 logs. A dedicated PostgreSQL 18 database is the derived search authority for
-normalized metadata, provenance, PostgreSQL full-text search, and pgvector
+normalized metadata, PostgreSQL full-text search, and pgvector
 embeddings. Large search relations and indexes live in a dedicated tablespace
 on configured external storage; PostgreSQL data and WAL remain operator-managed.
 Search refreshes appended native records before retrieval, exposes live progress
 and freshness watermarks, and never locks the vendor logs that supervisors are
 writing. If semantic refresh or the GPU is unavailable, hybrid search fails
-explicitly while the last committed literal revision remains usable.
+explicitly while the last committed literal generation remains usable.
+Corpus and semantic generations are small publication and recovery records;
+they never own full copies of messages, physical aliases, or embeddings.
 
 ## Definition of Done
 
@@ -24,9 +37,9 @@ explicitly while the last committed literal revision remains usable.
 - Every indexed record has a provider-qualified stable locator. Exact resolution is independent of search ranking and distinguishes unique, missing, ambiguous, stale, unavailable, malformed, and unsupported-schema outcomes.
 - Search, context, extract, list, and reference-only output share one additive JSON identity shape. Results report provider roots, projects or repositories, files searched, skipped or unreadable sources, unrecognised conversation-shaped records, and index freshness.
 - Large indexes and local model data live under a configured external-storage root rather than inside the repository. The tool does not render transcript archives, summarise chats, or write notes, ADRs, plans, or constraints.
-- Vendor `role=user` metadata does not prove human authorship. Each record separately reports `submitted_by` as `human`, `identified_harness`, or `unknown`; `unknown` is the default until positive provenance is available.
-- Native Claude and Codex chats remain the content authority. Producer-owned PostgreSQL submission receipts are optional provenance evidence only. Exact digest, time, session, repository, and mutual-uniqueness checks may upgrade `submitted_by`; absent, fuzzy, or ambiguous correlation must not do so.
-- Receipt DDL and producer writes remain owned by the transport project. This repository receives read-only access to the reviewed PostgreSQL contract and stores only rebuildable provenance observations. No receipt authority is currently deployed, so PostgreSQL starts clean rather than migrating nonexistent SQLite rows.
+- Native Claude and Codex chats remain the content authority. Message
+  attribution, receipt correlation, and authorship classification are deferred
+  comms-plumbing work and are not changed or accepted by this delivery.
 
 ## Acceptance Criteria
 
@@ -81,6 +94,9 @@ explicitly while the last committed literal revision remains usable.
 - **Failure:** Truncation, rotation, replacement, prefix changes, partial final
   JSONL records, and unsupported schema changes cannot be mistaken for a clean
   append. The affected source is reparsed or skipped with an explicit reason.
+- **Success:** An unchanged second refresh reads source metadata but no JSONL
+  content bytes; a valid append reads only the suffix after the last complete
+  record watermark.
 
 ### cross-vendor-semantic-search.AC5: Observable work and semantic failure
 
@@ -91,7 +107,7 @@ explicitly while the last committed literal revision remains usable.
   and continue emitting a heartbeat during a long phase, so a roughly
   30-second refresh does not appear hung.
 - **Failure:** If semantic refresh fails, staged semantic rows do not become
-  current, the last valid semantic revision remains intact, current FTS state
+  current, the last valid semantic generation remains intact, current FTS state
   is retained, and hybrid/semantic search exits nonzero rather than serving
   stale vectors.
 - **Failure:** Model-load, query-embedding, or VRAM failure reports the failed
@@ -101,8 +117,8 @@ explicitly while the last committed literal revision remains usable.
 
 ### cross-vendor-semantic-search.AC6: Stable identity and exact resolution
 
-- **Success:** Search, context, extract, list, provenance evidence, and
-  reference-only output use the same provider-qualified identity object and
+- **Success:** Search, context, extract, list, and reference-only output use the
+  same provider-qualified identity object and
   canonical locator string.
 - **Success:** Exact resolution uses provider/session/record identity and source
   verification, not FTS or semantic ranking. Physical duplicate records resolve
@@ -129,11 +145,10 @@ explicitly while the last committed literal revision remains usable.
 
 - **Success:** The dedicated database stores all large search tables and indexes,
   including staged and current vectors, in a PostgreSQL tablespace below a
-  configured external data root. Its producer-owned `submission_receipts`
-  schema is authoritative and separately owned; search migrations, refresh, and
-  maintenance are confined to rebuildable search/provenance-observation
-  relations. Refresh leases, status, and revision pointers are transactional
-  PostgreSQL state rather than ad hoc lock/status files.
+  configured external data root. Search migrations, refresh, and maintenance
+  are confined to rebuildable search relations. Refresh ownership, status, and
+  generation state are transactional PostgreSQL state rather than ad hoc
+  lock/status files.
 - **Success:** Before refresh, the application verifies the tablespace location,
   configured mount identity, writability, and sufficient peak rebuild space. A
   missing/read-only/replaced external mount fails without creating a fallback
@@ -143,9 +158,26 @@ explicitly while the last committed literal revision remains usable.
   network dependency after installation, not daemonless operation.
 - **Failure:** The feature does not modify native chats, render transcript
   archives, summarize conversations, author notes/ADRs/plans/constraints, or
-  make the search index the authority for producer receipts.
+  mutate any deferred comms-plumbing schema.
 
-### cross-vendor-semantic-search.AC9: Authorship classification
+### cross-vendor-semantic-search.AC8a: No retained snapshot copies
+
+- **Success:** A canonical message has one current stored content row, each
+  genuine native occurrence has one physical-alias row, and a semantic vector
+  is stored once per embedding profile and normalized input digest.
+- **Success:** Generation records retain status, watermarks, counts, timing, and
+  failure diagnostics without owning copies of corpus or vector rows.
+- **Success:** Staging contains only changed sources and is reclaimed after a
+  successful publication or an explicitly diagnosed abandoned run.
+- **Failure:** Re-running an unchanged index does not increase corpus-generation,
+  message, alias, semantic-generation, or embedding row counts. Appending one
+  record does not copy unchanged rows. Diagnostic run records have an explicit
+  bounded retention policy.
+- **Failure:** Migration never prunes the deployed snapshot tables until the
+  normalized current data, constraints, positive searches, and semantic joins
+  have all passed independent checks.
+
+### Deferred: Authorship classification
 
 - **Success:** Every message retains vendor conversational `role` separately
   from `submitted_by`, whose closed values are `human`,
@@ -160,7 +192,10 @@ explicitly while the last committed literal revision remains usable.
   zero or multiple receipts, or a receipt compatible with zero or multiple native
   records cannot establish human or harness authorship.
 
-### cross-vendor-semantic-search.AC10: Independent provenance evidence
+This remains a future design boundary, not an acceptance criterion or
+implementation phase for the current delivery.
+
+### Deferred: Independent provenance evidence
 
 - **Success:** The producer-owned versioned PostgreSQL contract-metadata and
   evidence views are read in one read-only transaction snapshot and correlated by provider, session when
@@ -177,16 +212,19 @@ explicitly while the last committed literal revision remains usable.
   producer receipts, never migrates or maintains their schema, and never claims
   historical uncertainty was resolved.
 
+This remains a future design boundary, not an acceptance criterion or
+implementation phase for the current delivery.
+
 ## Glossary
 
 - **Content class** — A closed parser classification such as visible prose,
   tool input/output, or excluded private/instruction material.
-- **Corpus revision** — A monotonically increasing search-index revision bound
-  to exact per-source watermarks.
+- **Corpus generation** — A monotonically increasing publication/recovery record
+  bound to exact per-source watermarks. It does not own message or alias copies.
 - **Exact resolver** — Lookup by provider-qualified source identity, independent
   of ranked search.
-- **FTS revision** — The corpus revision selected by the current PostgreSQL
-  literal-search pointer.
+- **FTS generation** — The committed corpus generation visible to a search
+  transaction.
 - **Logical message** — One conversational message after provider-specific
   physical duplicates have been canonicalized.
 - **Physical alias** — A native record that refers to the same logical message
@@ -194,9 +232,9 @@ explicitly while the last committed literal revision remains usable.
 - **Primary session** — A session positively identified as a top-level human-
   facing Claude or Codex conversation; it does not imply human authorship for
   each `role=user` message.
-- **Semantic revision** — A validated set of pgvector rows and chunk metadata
-  produced by one model/chunker configuration for one corpus revision and made
-  visible by an atomic revision-pointer update.
+- **Semantic generation** — Validation metadata binding one model/chunker
+  profile to one corpus generation. Vectors are reusable rows keyed by profile
+  and normalized input digest, not copied into each generation.
 - **Source watermark** — The identity, size, and complete-record byte boundary
   through which one native file was read.
 - **`submitted_by`** — Provenance classification independent of conversational
@@ -217,13 +255,24 @@ These are a dated planning snapshot, not an execution oracle. Storage preflight,
 semantic row counts, and the backend benchmark remeasure the current corpus and
 record their commands and inputs before authorizing production behavior.
 
+The 2026-08-21 production audit found a provisional snapshot implementation,
+not this normalized design. The selected corpus contains exactly 1,651,678
+message rows and 1,682,012 physical aliases, while PostgreSQL statistics
+estimate 19,550,042 and 19,967,284 rows respectively across retained snapshots.
+The selected semantic generation contains 270,012 embeddings while exact
+per-generation counts total 2,413,617 retained rows. Those three relations
+occupy 82 GiB including
+indexes. Search reads only singleton-selected snapshots; no implemented history
+or rollback consumer uses the superseded rows. This is the migration input and
+must not be normalized into an accepted retention policy.
+
 That scale does not justify an approximate nearest-neighbour index before an
 exact-scan benchmark demonstrates a problem. The first backend is PostgreSQL 18
 with pgvector: PostgreSQL owns normalized metadata and full-text search, and
 pgvector stores normalized 1024-dimensional float32 vectors. Retrieval performs
 an exact filtered scan initially. HNSW remains an internal optimization only if
 real cold/warm measurements demonstrate a need; it does not change identities,
-revision semantics, or the JSON contract.
+generation semantics, or the JSON contract.
 
 ### Data flow and ownership
 
@@ -231,8 +280,6 @@ revision semantics, or the JSON contract.
 flowchart LR
     C["Claude native JSONL"]
     X["Codex native JSONL"]
-    P["Opaque transport producer"]
-    R[("PostgreSQL submission_receipts authority")]
     PA["Provider adapters"]
     I["Single refresh owner"]
     S[("PostgreSQL rebuildable search schema")]
@@ -241,20 +288,16 @@ flowchart LR
 
     C -->|read-only snapshot| PA
     X -->|read-only snapshot| PA
-    P -->|commit attempt, then terminal outcome| R
-    R -->|read-only transaction snapshot| I
     PA --> I
     I --> S
     S --> V
     V --> Q
 ```
 
-Native files remain content authority. The producer-owned receipt schema is the
-authority for opaque-transport submission evidence. Search relations and
-vectors are derived state that may be discarded and rebuilt, but the shared
-database as a whole is not disposable because receipt authority is present.
-Supervisors write only through the producer receipt contract, do not write the
-search schema, and refreshes do not lock native logs.
+Native files remain content authority. Search relations and vectors are derived
+state that may be discarded and rebuilt. Refreshes do not lock or write native
+logs. Receipt and attribution plumbing is outside this delivery and cannot
+become a dependency of indexing, freshness, migration, or acceptance.
 
 ### Provider adapters and fail-closed parsing
 
@@ -307,6 +350,37 @@ by non-prose metadata, and 11,505 had unequal timestamps spanning
 0.001–20.609 seconds. The observed upper value is evidence against an equality
 rule, not a timeout to encode.
 
+### Configured source roots and isolation
+
+The imperative shell accepts an ordered collection of roots per provider. Each
+root receives an internal stable source ID derived from its provider and
+resolved configured path. The source ID participates in checkpoint and physical
+alias identity so identical relative filenames in different roots cannot
+collide; it is not part of the public canonical message locator. Moving a root
+may require a safe full reparse but does not invalidate public references.
+
+On this host the default collection includes, when present:
+
+```text
+claude  ~/.claude/projects
+claude  ~/.claude-ponytail/projects
+codex   ~/.codex/sessions
+codex   ~/.codex-ponytail/sessions
+```
+
+Plural `CC_SEARCH_CLAUDE_ROOTS` and `CC_SEARCH_CODEX_ROOTS` configuration uses
+the platform path separator and replaces the corresponding default collection;
+the singular variables remain compatible one-root overrides during migration.
+Explicitly configured roots are required and fail loudly when unavailable.
+Optional default Ponytail roots are included only when their session directory
+exists.
+
+Only the listed native session directories are traversed. Search never reads or
+shares the isolated homes' configuration, credentials, plugins, skills, caches,
+locks, or XDG state. It never writes any provider root. Identical observations
+across roots become distinct physical aliases of one canonical message;
+conflicting content under one canonical identity aborts publication.
+
 ### Provider-qualified locators
 
 Canonical locator version 1 has provider-specific record keys:
@@ -333,7 +407,7 @@ stale_index, malformed_locator, unsupported_provider_schema
 ```
 
 `resolve LOCATOR` exposes this exact operation; `resolve --reference-only`
-returns the verified identity, aliases, provenance, and source coordinates
+returns the verified identity, aliases, and source coordinates
 without message text. `context` accepts the same canonical locator rather than
 an unqualified Claude UUID. `extract` retains convenient session-ID input but
 accepts `--provider` and returns `multiple_matches` when an unqualified session
@@ -351,49 +425,37 @@ provider roots are never public identity. Version 2 then evolves additively.
 
 ### PostgreSQL schema and cutover
 
-The dedicated `cc_search_chats` database on the local PostgreSQL 18 cluster has
-two ownership domains. `cc_search_chats_owner` owns the rebuildable application
-schema and relations. `cc_submission_receipts_owner` owns the authoritative
-`submission_receipts` schema; its DDL and migration ledger belong to the
-producer/transport project. `cc_submission_receipts_writer` may invoke only the
-producer's reviewed attempt/outcome write interface and cannot mutate search
-relations. The least-privilege `cc_search_chats_app` role receives its required
-application DML plus schema `USAGE` and `SELECT` only on the producer-published
-versioned contract-metadata and evidence views; it has no privilege on physical receipt relations and
-cannot mutate receipt authority.
-Provisioning creates roles, the database, `vector`, and the application schema;
-producer deployment creates its own schema. Each migration runner is restricted
-to its owned schema, and normal commands cannot create databases, roles,
-extensions, tablespaces, schemas, or relations.
+The dedicated `cc_search_chats` database on the local PostgreSQL 18 cluster is
+owned by `cc_search_chats_owner`; the runtime role receives only the DML and
+read privileges required by the rebuildable application schema. Migration DDL
+is owner-only and recorded in an ordered ledger. Normal search and refresh
+commands cannot create databases, roles, extensions, tablespaces, or unrelated
+schemas. Receipt-authority ownership remains a deferred comms-plumbing concern
+and is not touched by this migration.
 
 Principal relations are normalized around stable provider identity:
 
-- small natural-key vocabulary tables define provider, session kind, content
-  class, submission classification, run state, and terminal outcome values;
-- `source_root`, `source_file`, and `source_observation` record configured roots,
-  schema observations, file identity, scan outcomes, and exact watermarks;
+- `source_root` and `source_file` record configured roots, provider, relative
+  path, device/inode when meaningful, size, nanosecond mtime, complete-record
+  byte/line/ordinal watermarks, validation fingerprints, adapter schema version,
+  and serialized parser continuation state;
 - `chat_session` records provider session identity, repository/cwd, session kind,
   parent linkage, and activity; `session_epoch` records recognized provider
   compaction boundaries and their non-searchable metadata;
-- `logical_message`, `message_version`, and `message_locator` represent canonical
-  messages, revision visibility including conversation epoch, and every physical
-  alias;
-- `prose_content` and `tool_content` each have a stored `tsvector` generated with
-  the PostgreSQL `simple` configuration and a GIN index; prose and tools remain
-  separately selectable;
-- `provenance_evidence` records read-only correlations without becoming receipt
-  authority; immutable `provenance_revision`/`provenance_assessment` rows and a
-  singleton `provenance_state` pointer select one atomic effective-classification
-  snapshot for one target FTS revision with authority observation and match
-  cardinality;
-- `index_run`, `corpus_revision`, `corpus_revision_source`, and `index_state`
-  record attempted work, exact source membership, and current literal/semantic
-  revision pointers;
-- `semantic_profile` and `semantic_revision` bind one immutable model/tokenizer/
-  chunker contract to one corpus revision; reusable `semantic_embedding` rows
-  store validated `vector(1024)` values by complete profile and prefixed-input
-  digest; `semantic_chunk` records revision membership, message/chunk identity,
-  bounds, and the selected reusable embedding.
+- `message` stores one current row per provider, native session, logical message,
+  and content class. It owns current visible metadata, exact content, content
+  digest, and its generated `simple`-configuration search vector;
+- `physical_alias` stores each genuine native occurrence once and includes its
+  internal source-root ID, relative path, record coordinates, locator, and
+  digest. It references `message` without a generation key;
+- `index_generation` records requested targets, status, counts, timestamps,
+  coverage, and terminal diagnostics. Run-owned staging relations contain only
+  changed-source deltas and are never visible to search;
+- `semantic_profile` identifies the complete model/input contract.
+  `semantic_embedding` stores one validated `vector(1024)` per profile and
+  normalized prefixed-input digest. Current messages or chunks join to it by
+  digest; semantic generations contain validation and publication metadata, not
+  vector memberships or copies.
 
 Required scalar fields are `NOT NULL`; nullable columns represent genuinely
 unknown or inapplicable information. Foreign keys, uniqueness constraints, and
@@ -401,70 +463,66 @@ closed vocabulary relations enforce provider-qualified identities and state
 transitions in the database. SQL migrations are ordered, transactional where
 PostgreSQL permits, and recorded in a migration ledger. The implementation also
 creates or updates `docs/architecture/database.md` with table ownership,
-cardinality, keys, invariants, and revision visibility.
+cardinality, keys, invariants, and generation visibility.
 
-The producer-owned schema publishes one versioned, single-row read-only contract
-metadata view and one versioned read-only evidence view with one normalized row
-per receipt. Their reviewed identifiers, columns/types, normalization, contract
-version/checksum, grants, and migration rules are a
-blocking Phase 3 input; search does not infer them from the provisional SQLite
-layout or from the producer's internal tables. The view must expose the stable
-receipt UUID, exact payload SHA-256 and lengths, sender/transport, target
-provider/session/repository/cwd, attempted/completed times, and terminal outcome
-needed for correlation. The producer's current physical direction is an
-immutable attempt plus at most one immutable terminal outcome, but that layout is
-hidden behind the views.
+The deployed snapshots do not contain parser continuation state and therefore
+cannot seed safe append checkpoints. Migration performs one full bounded parse
+of every configured native root into normalized candidate relations, including
+standard and Ponytail sources. It compares overlapping standard-source
+identities and content against the singleton-selected snapshot and classifies
+every difference; the native sources remain authoritative. The candidate is
+checked for exact counts, canonical conflicts, alias coverage, constraints, and
+positive literal queries before atomic cutover. Snapshot tables remain
+quarantined and read-only through acceptance. Only a separate verified prune
+step drops them; it never addresses the existing message-attribution quarantine
+schema or native logs.
 
-Producers commit an attempt before sending; failure to commit means no send.
-Terminal recording is idempotent for an identical outcome and rejects a
-conflicting one. Failure after input may have been submitted remains an unretried
-`indeterminate` attempt. An attempt without a terminal outcome remains a valid
-diagnostic row and cannot upgrade attribution. Search codifies and validates only
-the published view contracts without owning producer DDL or importing producer code.
+Production currently selects corpus generation 14 while its selected semantic
+generation 9 targets corpus generation 13; incomplete semantic generation 10
+targets 14 and contains no vectors. Migration therefore joins the selected old
+vectors to their generation-13 text, validates the pairing, and imports them
+only into the reusable profile/input-digest pool. It does not declare semantic
+state current until every eligible message in the normalized current corpus
+resolves to a validated vector and the missing current inputs have been embedded.
 
-Logical-direction approval does not freeze this interface. It authorizes the
-producer to generate an uncommitted candidate bundle and executable disposable-
-PostgreSQL evidence. Phase 3 receipt implementation remains blocked until that
-exact bundle, its security/restore behavior, the shared path-identity convention,
-and the causal-window basis receive independent review and a second human freeze.
-Search never treats approval of prose as approval of unreviewed SQL or checksums.
-
-The existing SQLite index is not row-migrated. PostgreSQL is rebuilt from native
-Claude and Codex logs, then compared with the legacy index for covered Claude
-content before commands cut over. The old database and code path remain available
-until the PostgreSQL literal index passes schema, count, identity, search, and
-coverage checks; only a later phase removes the superseded path. Native data is
-never modified.
-
-### Transactions, revisions, and refresh ownership
+### Transactions, generations, and refresh ownership
 
 Parsing, model loading, and embedding occur outside database transactions.
 Changed rows are loaded in bounded batches with Psycopg `COPY`, associated with
-an `index_run`, and invisible to current-revision queries while incomplete. A
-short final transaction validates row counts, source watermarks, and referential
-integrity; retires replaced versions; records revision membership; and advances
-the current FTS pointer. A semantic refresh similarly validates every expected
-chunk before atomically advancing the semantic pointer. Interrupted or invalid
-staging rows are diagnosable and reclaimable but are never current.
+an `index_generation`, and invisible to search while incomplete. A short final
+transaction validates row counts, source watermarks, canonical conflicts, and
+referential integrity; replaces aliases only for successfully reparsed sources;
+merges appended messages and aliases; garbage-collects messages with no physical
+aliases; advances checkpoints; and commits generation metadata. PostgreSQL MVCC
+makes readers see either the old or new canonical rows. No full-corpus
+membership or row copy is needed. Interrupted or invalid staging rows are
+diagnosable and reclaimable but never current.
+
+A semantic refresh writes only missing reusable vectors. Its short publication
+transaction verifies that the corpus generation is unchanged and that every
+eligible current message or chunk resolves to exactly one vector under the
+selected profile, then records the selected semantic generation. Failed work
+may leave validated reusable vectors but cannot make an incomplete generation
+current; unreachable vectors are reclaimed after a later successful publication.
 
 A session-level PostgreSQL advisory lock admits one refresh owner. The owner
 publishes heartbeat, phase, progress, and requested/committed freshness in
-`index_run`; it does not hold a write transaction while scanning, parsing,
+`index_generation`; it does not hold a write transaction while scanning, parsing,
 loading a model, or embedding. Search/index callers that requested freshness wait
 without a transaction while reporting `waiting_for_index`; they do not silently
-satisfy that request from an older committed revision. Read-only status and an
+satisfy that request from an older committed generation. Read-only status and an
 exact native resolution whose locator already names its source may inspect
 committed state without requesting refresh. Advisory-lock ownership is released
 automatically if the database session dies, so stale PID-file recovery is
 unnecessary.
 
-Search opens a read-only `REPEATABLE READ` transaction, reads the selected FTS
-and semantic revision pointers once, and performs metadata, lexical, and vector
-queries in that snapshot. Literal search requires only the current FTS pointer.
-Hybrid search requires the selected semantic revision's
-`target_fts_revision_id` to equal the selected current FTS revision ID; a
-mismatch is an explicit semantic-staleness error, not permission to mix
-revisions.
+After on-demand refresh, search opens a read-only `REPEATABLE READ` transaction,
+reads the committed corpus and semantic generation metadata once, and performs
+metadata, lexical, and vector queries in that snapshot. Literal search requires
+only a committed corpus generation. Hybrid search requires the selected
+semantic generation's target corpus generation to equal the committed corpus
+generation; mismatch is explicit semantic staleness, not permission to serve
+old vectors.
 
 Before a PostgreSQL CLI command opens a connection, it makes one blocking
 `flock` request for its work-class single-flight gate. The file is only an
@@ -479,12 +537,29 @@ resident worker it would turn reads into writes and require lease expiry,
 claiming, stale-row recovery, and another scheduler.
 
 Exact locator resolution accepts an ordered locator array. Canonical and
-physical-alias branches use revision-scoped indexes, union only narrow logical
+physical-alias branches use identity indexes, union only narrow logical
 identity keys, and fetch message bodies after deduplication. Misses and duplicate
 inputs retain their input positions and independent result counts. It never
 combines a wide-row `SELECT DISTINCT` with a `LEFT JOIN ... OR`, and integrity
 checks use one process, connection, and batched database operation rather than a
 subprocess per locator.
+
+### Failure and recovery
+
+A failed candidate migration leaves the deployed snapshot schema selected and
+searchable. A failed changed-source refresh leaves canonical rows and checkpoints
+unchanged. A failed semantic refresh leaves literal search current and does not
+select incomplete semantic metadata. Every failure records the owning
+generation, phase, and diagnostic without manufacturing a successful watermark.
+
+Cutover and prune are distinct operations. Cutover atomically selects the
+normalized relations while retaining schema-qualified snapshot tables. Prune
+first repeats current counts, foreign-key checks, positive search controls, and
+semantic completeness; its transaction addresses only the named snapshot
+relations. PostgreSQL transaction rollback protects an interrupted drop before
+commit. After commit, native logs remain sufficient to rebuild the derived
+schema, but rollback to snapshot code is no longer available and therefore
+requires accepted UAT before pruning.
 
 ### External PostgreSQL storage
 
@@ -542,7 +617,7 @@ with that exact state. Replacement, shrinkage, prefix change, or incompatible
 schema triggers a full source reparse from epoch 0 or explicit skip. A canonical
 event/response pair must inhabit the same epoch and cannot cross a recognized
 compaction boundary.
-If a previously represented source is temporarily unreadable, the next revision
+If a previously represented source is temporarily unreadable, the next generation
 retains its last committed observation and content, records the failed current
 attempt separately, and reports partial coverage; absence of a successful read
 never authorizes silent deletion.
@@ -556,20 +631,20 @@ that an actively changing corpus was frozen.
 One refresh owner holds the session-level advisory lock described above. Its
 short heartbeat updates name the database session and run, while PostgreSQL
 itself releases ownership if that session ends. A second refresh caller emits
-`waiting_for_index` and waits for or reuses the committed revision rather than
+`waiting_for_index` and waits for or reuses the committed generation rather than
 starting duplicate parsing or model work.
 
-The FTS revision commits independently so current literal search survives a
-semantic failure. Semantic search requires the current semantic revision to
-target the selected current FTS revision for the corpus. A mismatch is explicit
-semantic staleness, never an invitation to serve the previous semantic revision
+The FTS generation commits independently so current literal search survives a
+semantic failure. Semantic search requires the current semantic generation to
+target the selected current FTS generation for the corpus. A mismatch is explicit
+semantic staleness, never an invitation to serve the previous semantic generation
 silently.
 
 The opt-in overnight unit invokes `index`. That composed
-operation refreshes FTS, provenance observations, and semantic state in order.
-It reports success only when the selected semantic revision targets the newly
-selected FTS revision under the requested profile; maintenance dry-run follows
-only that success. Semantic failure leaves the newly committed FTS revision
+operation refreshes FTS and semantic state in order. It reports success only
+when the selected semantic generation targets the newly selected FTS generation
+under the requested profile; maintenance dry-run follows only that success.
+Semantic failure leaves the newly committed FTS generation
 literal-searchable, returns a nonzero partial terminal state, and does not let the
 timer or status claim a fresh hybrid baseline.
 
@@ -589,7 +664,8 @@ special tokens, and 96-token content overlap. Short messages remain one chunk.
 Each chunk records message identity, ordinal, token and character bounds,
 `chunker_id`, `model_id`, vector dimension, and source-text digest. Changing any
 model, prefix, dimension, tokenizer, or chunker parameter requires a complete
-semantic revision without invalidating FTS.
+semantic validation generation without invalidating FTS or copying unchanged
+message rows.
 
 Passages use the model-card `passage: ` prefix; queries use `query: `. Prefixing
 is explicit and applied exactly once. The model's mean-pooled 4096-dimensional
@@ -599,8 +675,9 @@ Chunk hits are collapsed to a logical message by the best semantic chunk before
 hybrid fusion, preventing overlap from producing duplicate results.
 
 The first vector backend stores normalized rows in pgvector `vector(1024)`
-columns. A single SQL query joins the selected semantic revision to current
-message/session metadata, applies agent/provider/project/date filters before
+columns. A single SQL query joins the selected semantic generation metadata and
+reusable embeddings to current message/session metadata, applies
+agent/provider/project/date filters before
 `ORDER BY` and `LIMIT`, and uses inner-product distance over normalized vectors
 for exact cosine ordering. Excluded rows therefore cannot starve eligible
 results. A real-corpus cold/warm benchmark records exact pgvector scan latency,
@@ -638,15 +715,15 @@ availability and best-effort total/free/estimated-required VRAM. Allocation is
 still attempted defensively because preflight cannot predict fragmentation or a
 racing external allocation.
 
-Embedding writes a complete staged semantic revision and advances its pointer
-only after every expected chunk and text/vector invariant validates. OOM,
-interruption, incompatibility, or validation failure leaves the previous
-semantic pointer unchanged. Query embedding failure follows the same loud
-literal-search boundary even when the stored semantic revision itself is
+Embedding writes only missing reusable vectors and advances semantic generation
+metadata only after every expected chunk and text/vector invariant validates.
+OOM, interruption, incompatibility, or validation failure leaves the previous
+semantic generation selected. Query embedding failure follows the same loud
+literal-search boundary even when the stored semantic generation itself is
 current. Because model loading and query embedding occur outside a database
-transaction, retrieval rechecks the selected FTS revision, semantic revision,
-and complete embedding profile in its read-only repeatable-read snapshot and
-retries or fails if they changed during embedding.
+transaction, retrieval rechecks the selected FTS generation, semantic
+generation, and complete embedding profile in its read-only repeatable-read
+snapshot and retries or fails if they changed during embedding.
 
 ### Search modes and ranking
 
@@ -682,7 +759,7 @@ and exhaustive enumeration never use hybrid ranking.
 The exhaustive unit is one persisted searchable content row: one prose row per
 logical message or one tool-name/input/result row. Exhaustive output orders by
 canonical locator, fixed content-class order, ordinal, and digest, and reports
-every such row exactly once through the selected revision's watermarks. Ranked
+every such row exactly once through the selected generation's watermarks. Ranked
 literal and hybrid modes instead collapse winning occurrences/chunks to one
 logical message before their component limits.
 
@@ -798,8 +875,8 @@ success whose diagnostics still report semantic state.
 ## Existing Patterns Preserved and Changed
 
 - Preserve argparse, functional-core/imperative-shell separation, read-only
-  native sources, integrity checks, current local-first/project scoping, additive
-  JSON evolution, and conservative exact receipt correlation.
+  native sources, integrity checks, current local-first/project scoping, and
+  additive JSON evolution.
 - Replace Claude-only discovery/parsing with provider adapters and provider-
   qualified compound identity.
 - Replace the application-owned SQLite/FTS5 index with a dedicated PostgreSQL 18
@@ -862,51 +939,64 @@ weight footprint on the shared 4090 and interfere with other work. Rejected for
 the initial design. Per-command loading exposes progress and releases VRAM on
 exit.
 
+### Retained full snapshots — rejected
+
+Full snapshots make staging simple, but every successful refresh permanently
+copies the corpus, aliases, and vectors even though search reads only one
+selected generation. Keeping one prior full copy would still duplicate nearly
+the entire data set and is unnecessary for crash safety: PostgreSQL MVCC plus
+changed-source staging keeps the old committed rows visible until the short
+publication transaction commits. Generation metadata and quarantined migration
+tables provide the temporary recovery evidence without becoming a retention
+policy.
+
 ## Implementation Phases
 
-1. **Provider identity foundation.** Add failing fixtures for Claude and Codex
-   discovery, session kind, content allowlists, duplicate canonicalization,
-   provider-qualified locators, malformed/unsupported records, and ambient
-   `GIT_DIR`; implement pure adapters and resolver models.
-2. **PostgreSQL foundation and literal index.** Prove Python 3.14/Psycopg/
-   PostgreSQL 18/pgvector compatibility; add a temporary real-cluster test
-   harness, provisioning and ownership runbook, external tablespace checks,
-   normalized schema and database architecture document, separate prose/tool
-   FTS, source watermarks, append/rewrite detection, coverage state, advisory
-   refresh ownership, atomic FTS revision promotion, and separate search/receipt
-   role boundaries. Preserve the current SQLite search index until verification
-   passes.
-3. **Identity consumers, provenance, and cutover.** Move search/context/extract/
-   list and reference-only output to the PostgreSQL-backed common identity
-   shape; add exact resolver states and read-only correlation with native
-   evidence and the producer-owned PostgreSQL receipt schema. Block on the
-   reviewed producer view/writer/grant deployment and its clean-authority write
-   gate, and compare covered Claude data and literal queries with the legacy
-   search index before removing its runtime path.
-4. **Semantic compatibility and pgvector storage.** Prove Python 3.14/CUDA/model
-   compatibility, then implement the versioned tokenizer chunker,
-   `vector(1024)` storage, exact filtered retrieval, semantic revision staging
-   and atomic pointer advancement, model advisory lock, offline mode, and
-   transactional failure tests with a fake embedder before GPU integration tests.
-   Benchmark cold and warm exact filtered scans against the current corpus as a
-   blocking input to Phase 5; do not make hybrid retrieval the default first.
-5. **Hybrid and exhaustive search.** Add query modes, safe natural-language FTS
-   candidates, filter-before-top-k vector retrieval, message-level collapse,
-   reciprocal-rank fusion, literal/tool exhaustive enumeration, and deterministic
-   component diagnostics.
-6. **Operations and acceptance.** Add progress/heartbeat/terminal JSON,
-   scheduled bulk/maintenance documentation, PostgreSQL backup/restore and
-   database-unavailable behaviour, role/ACL reconstruction for both ownership
-   domains, tablespace/mount/space checks, current-corpus benchmark monitoring,
-   offline-network verification, and UAT queries covering cross-vendor
-   retrieval, agents, tools, exact locators, provenance unknowns, active native
-   writers, and forced VRAM failure.
+1. **Normalized storage and reversible migration.** Add disposable-PostgreSQL
+   tests that expose snapshot multiplication, then implement the migration
+   ledger, generation metadata, canonical current message/alias relations,
+   reusable embedding storage, and candidate-copy validation. Leave deployed
+   snapshot tables quarantined until later acceptance; provide a separate prune
+   operation whose dry-run names exact relations, selected counts, and expected
+   reclaimed allocation.
+2. **Incremental multi-root refresh.** Add failing unchanged, append,
+   partial-tail, truncation, replacement, conflict, unreadable-source, and
+   cross-root collision fixtures. Implement configured source collections,
+   standard and Ponytail defaults, per-file checkpoints, parser-state
+   serialization, suffix reads, changed-source staging, and atomic merge. This
+   phase leaves `index` idempotent without copying unchanged rows.
+3. **Search freshness and semantic reuse.** Make search run the lightweight
+   discovery/refresh boundary before retrieval. Add failure and concurrency
+   tests for one refresh owner, waiters, active writers, literal availability
+   after semantic failure, missing-vector resume, semantic generation matching,
+   and unreachable-vector cleanup. This phase leaves a newly appended known
+   message searchable without a separate manual index command.
+4. **Cross-vendor consumer contract.** Complete the shared identity and JSON-v2
+   shapes for search, resolve, context, extract, list, and reference-only output;
+   enforce primary/prose defaults; add `--agents`, `--tools`, and literal
+   `--exhaustive`; reject `--everything`; verify exact resolution against native
+   sources; and emit coverage, progress, freshness, and named failure outcomes.
+   This phase owns AC1, AC2, AC5, AC6, and AC7 wherever the current provisional
+   CLI remains incomplete.
+5. **Operator and project truth.** Rewrite `CLAUDE.md` against the implemented
+   PostgreSQL, cross-vendor, semantic, multi-root architecture; update README,
+   service configuration, database architecture, migration/prune runbook, and
+   structured status output. Authorship remains explicitly deferred.
+6. **Production cutover and acceptance.** Run all mechanical gates and the
+   disposable migration suite, then follow the project release gate: accepted
+   commit, exact clean `main`, exact non-editable global installation, production
+   candidate migration, count/integrity checks, and positive standard/Ponytail
+   Claude/Codex literal and semantic UAT. Only after those checks and human UAT
+   accept the new behavior may the prune operation drop superseded snapshot
+   tables. Recheck row counts, relation sizes, freshness, and positive searches
+   after pruning.
 
 Every phase follows red-green-refactor against provider fixtures and disposable
 PostgreSQL 18 clusters initialized in test temporary directories with the
 packaged `vector` extension. Tests never use the operator's live cluster and do
 not require Docker. GPU/model tests are separately marked so the deterministic
-unit suite never requires a downloaded model.
+unit suite never requires a downloaded model. Production pruning is an
+acceptance-gated operation, not a unit-test side effect.
 
 ## Additional Considerations
 
@@ -918,9 +1008,9 @@ unit suite never requires a downloaded model.
   current relations and indexes, staged replacement rows, index construction,
   PostgreSQL temporary spill, and safety margin. Cluster-root monitoring must
   separately account for PostgreSQL WAL retained during bulk loading.
-- Database backup/restore must include authoritative receipt rows and replay the
-  reviewed owner/writer/search-reader grant manifest; rebuilding the search
-  schema is never permission to drop or omit `submission_receipts`.
+- Search-schema migration, rollback, and pruning are schema-qualified and cannot
+  address the message-attribution quarantine or any deferred comms-plumbing
+  schema.
 - Exact pgvector performance is a measured assumption, not a permanent
   constraint. A later HNSW index is permitted only after the benchmark identifies
   a real need and filtered recall/latency tests establish safe settings. The
