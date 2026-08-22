@@ -22,6 +22,7 @@ class Migration:
 _MIGRATIONS = (
     Migration(1, "schema.sql"),
     Migration(2, "refresh_schema.sql"),
+    Migration(3, "freshness_schema.sql"),
 )
 
 

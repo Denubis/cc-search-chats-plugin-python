@@ -3,6 +3,7 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import wraps
+from threading import Event, Thread
 from typing import Concatenate
 
 import psycopg
@@ -10,9 +11,74 @@ from psycopg.pq import TransactionStatus
 
 READ_QUEUE_LOCK = "cc_search_chats.read_queue"
 INDEX_QUEUE_LOCK = "cc_search_chats.index_queue"
+INDEX_NOTIFY_CHANNEL = "cc_search_chats_index_queue"
 _LOCK_TIMEOUT = "30s"
 _STATEMENT_TIMEOUT = "60s"
 _TEMP_FILE_LIMIT = "64MB"
+
+
+class DatabaseHeartbeat:
+    """Periodically execute one bounded run-heartbeat update on its own connection."""
+
+    def __init__(
+        self,
+        dsn: str,
+        statement: str,
+        params: tuple[object, ...],
+        *,
+        interval_seconds: float,
+        label: str,
+    ) -> None:
+        self._dsn = dsn
+        self._statement = statement.encode()
+        self._params = params
+        self._interval_seconds = interval_seconds
+        self._label = label
+        self._stop = Event()
+        self._ready = Event()
+        self._thread: Thread | None = None
+        self._failure: OSError | psycopg.Error | None = None
+
+    def start(self) -> None:
+        self._thread = Thread(
+            target=self._run,
+            name=self._label,
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._ready.wait(timeout=2):
+            raise RuntimeError(f"{self._label} connection did not become ready")
+        self.raise_if_failed()
+
+    def _run(self) -> None:
+        try:
+            with psycopg.connect(
+                self._dsn,
+                autocommit=True,
+                connect_timeout=2,
+            ) as heartbeat_connection:
+                self._ready.set()
+                while not self._stop.wait(self._interval_seconds):
+                    updated = heartbeat_connection.execute(
+                        self._statement,
+                        self._params,
+                    ).rowcount
+                    if updated == 0:
+                        break
+        except (OSError, psycopg.Error) as error:
+            self._failure = error
+            self._ready.set()
+
+    def raise_if_failed(self) -> None:
+        if self._failure is not None:
+            raise RuntimeError(
+                f"{self._label} failed: {self._failure}"
+            ) from self._failure
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
 
 
 @contextmanager

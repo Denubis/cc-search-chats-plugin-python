@@ -1,7 +1,10 @@
 """One end-to-end PostgreSQL corpus behavior for both native providers."""
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 
 import psycopg
 import pytest
@@ -9,6 +12,7 @@ import pytest
 from cc_search_chats.providers.claude import ClaudeSessionContext, parse_claude_session
 from cc_search_chats.providers.codex import CodexSessionContext, parse_codex_session
 from cc_search_chats.providers.source_discovery import read_bounded_jsonl
+from cc_search_chats.semantic import ModelUnavailable
 from cc_search_chats.storage.postgresql import (
     context_messages,
     extract_session,
@@ -234,6 +238,9 @@ def test_semantic_index_skips_blank_prose_and_resumes_failures(
         )[0]
         == revision_count + 1
     )
+    assert search_messages(postgres_connection, "changed")
+    with pytest.raises(ValueError, match="semantic revision is unavailable or stale"):
+        semantic_search(postgres_connection, vector)
 
     resumed = []
 
@@ -245,3 +252,176 @@ def test_semantic_index_skips_blank_prose_and_resumes_failures(
         index_embeddings(postgres_connection, embed_remaining, batch_size=1) == eligible
     )
     assert len(resumed) == eligible - 1
+
+
+def test_semantic_worker_preserves_named_model_failure_and_records_its_phase(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    read = _read("claude_primary.jsonl")
+    parsed = parse_claude_session(
+        read.envelopes,
+        context=ClaudeSessionContext(source_session_id="claude-session-primary"),
+    )
+    migrate(postgres_connection)
+    replace_messages(postgres_connection, parsed.messages)
+    failure = ModelUnavailable(
+        "fixture model is unavailable",
+        code="model_load_failed",
+        phase="model_load",
+    )
+
+    with pytest.raises(ModelUnavailable) as raised:
+        index_embeddings(
+            postgres_connection,
+            lambda texts: (_ for _ in ()).throw(failure),
+        )
+
+    assert raised.value is failure
+    recorded = next(
+        postgres_connection.execute(
+            """
+            SELECT failure
+            FROM cc_search_chats.semantic_revision
+            ORDER BY semantic_revision_id DESC
+            LIMIT 1
+            """
+        )
+    )[0]
+    assert recorded["code"] == "model_load_failed"
+    assert recorded["phase"] == "model_load"
+
+
+def test_semantic_generation_heartbeats_during_a_long_embedding_phase(
+    postgres_cluster,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "cc_search_chats.storage.postgresql.semantic._RUN_HEARTBEAT_SECONDS",
+        0.02,
+        raising=False,
+    )
+    entered = Event()
+    release = Event()
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def paused_embed(texts):
+        entered.set()
+        if not release.wait(timeout=2):
+            raise AssertionError("semantic heartbeat test did not release model call")
+        return [vector for _ in texts]
+
+    with (
+        psycopg.connect(
+            postgres_cluster.dsn,
+            autocommit=True,
+            application_name="semantic-heartbeat-owner",
+        ) as owner,
+        psycopg.connect(postgres_cluster.dsn, autocommit=True) as observer,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        read = _read("claude_primary.jsonl")
+        parsed = parse_claude_session(
+            read.envelopes,
+            context=ClaudeSessionContext(source_session_id="claude-session-primary"),
+        )
+        migrate(owner)
+        replace_messages(owner, parsed.messages)
+        pending = executor.submit(index_embeddings, owner, paused_embed)
+        assert entered.wait(timeout=1)
+        try:
+            building = next(
+                observer.execute(
+                    """
+                    SELECT owner_pid, phase, heartbeat_at,
+                           completed_units, total_units, status
+                    FROM cc_search_chats.semantic_revision
+                    ORDER BY semantic_revision_id DESC
+                    LIMIT 1
+                    """
+                )
+            )
+            deadline = time.monotonic() + 1
+            heartbeat_advanced = False
+            while time.monotonic() < deadline:
+                current = next(
+                    observer.execute(
+                        """
+                        SELECT heartbeat_at
+                        FROM cc_search_chats.semantic_revision
+                        ORDER BY semantic_revision_id DESC
+                        LIMIT 1
+                        """
+                    )
+                )[0]
+                if current > building[2]:
+                    heartbeat_advanced = True
+                    break
+                time.sleep(0.01)
+        finally:
+            release.set()
+        completed = pending.result(timeout=2)
+        assert building[:2] == (owner.info.backend_pid, "semantic_embed")
+        assert building[2] is not None
+        assert building[3:] == (0, completed, "building")
+        assert heartbeat_advanced
+        assert next(
+            observer.execute(
+                """
+                SELECT phase, completed_units, total_units, status
+                FROM cc_search_chats.semantic_revision
+                ORDER BY semantic_revision_id DESC
+                LIMIT 1
+                """
+            )
+        ) == ("done", completed, completed, "complete")
+
+
+def test_invalid_embedding_output_fails_generation_and_remains_retryable(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    read = _read("claude_primary.jsonl")
+    parsed = parse_claude_session(
+        read.envelopes,
+        context=ClaudeSessionContext(source_session_id="claude-session-primary"),
+    )
+    migrate(postgres_connection)
+    replace_messages(postgres_connection, parsed.messages)
+
+    with pytest.raises(ValueError, match="1024 dimensions"):
+        index_embeddings(
+            postgres_connection,
+            lambda texts: [[1.0] for _ in texts],
+        )
+
+    failed = next(
+        postgres_connection.execute(
+            """
+            SELECT semantic_revision_id, status, phase, failure
+            FROM cc_search_chats.semantic_revision
+            ORDER BY semantic_revision_id DESC
+            LIMIT 1
+            """
+        )
+    )
+    assert failed[1:3] == ("failed", "semantic_embed")
+    assert failed[3]["code"] == "semantic_refresh_failed"
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    completed = index_embeddings(
+        postgres_connection,
+        lambda texts: [vector for _ in texts],
+    )
+
+    assert completed > 0
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT semantic_revision_id, status
+            FROM cc_search_chats.semantic_revision
+            ORDER BY semantic_revision_id DESC
+            LIMIT 1
+            """
+        )
+    ) == (failed[0], "complete")

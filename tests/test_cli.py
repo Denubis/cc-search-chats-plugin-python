@@ -20,7 +20,7 @@ import sqlite3
 import sys
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from threading import Event
 from typing import Literal
@@ -32,6 +32,7 @@ from cc_search_chats.cli import _contain_semantic_index, build_parser, main
 from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.queueing import client_admission
+from cc_search_chats.semantic import ModelUnavailable
 from cc_search_chats.storage.index import (
     ProjectRebuildError,
     close_db,
@@ -59,6 +60,39 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
         build_parser().parse_args(["--version"])
 
     assert capsys.readouterr().out == f"cc-search-chats {__version__}\n"
+
+
+def test_semantic_failure_names_phase_and_prints_literal_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("PGSERVICE", "fixture")
+    monkeypatch.delenv("CC_SEARCH_DB_PATH", raising=False)
+    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "search", "needle phrase"])
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+    )
+    monkeypatch.setattr(
+        "cc_search_chats.cli.client_admission", lambda name: nullcontext()
+    )
+
+    def unavailable(args, dsn):
+        raise ModelUnavailable(
+            "fixture model load failed",
+            code="model_load_failed",
+            phase="model_load",
+        )
+
+    monkeypatch.setattr("cc_search_chats.cli._handle_postgres", unavailable)
+
+    with pytest.raises(SystemExit, match="8"):
+        main()
+
+    error = capsys.readouterr().err
+    assert "model_load_failed" in error
+    assert "model_load" in error
+    assert "Literal search is required for complete current results" in error
+    assert "cc-search-chats search 'needle phrase' --literal" in error
 
 
 # ============================================================

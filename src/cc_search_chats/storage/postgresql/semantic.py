@@ -5,8 +5,11 @@ from dataclasses import dataclass
 
 import psycopg
 
+from cc_search_chats.semantic import ModelUnavailable
 from cc_search_chats.storage.postgresql.guardrails import (
+    INDEX_NOTIFY_CHANNEL,
     INDEX_QUEUE_LOCK,
+    DatabaseHeartbeat,
     queued_read_operation,
 )
 from cc_search_chats.storage.postgresql.index import SearchHit, search_messages
@@ -14,6 +17,7 @@ from cc_search_chats.storage.postgresql.index import SearchHit, search_messages
 _DIMENSIONS = 1024
 _PROFILE_ID = "nemotron-3-embed-8b-bf16:v1"
 _EMBEDDABLE_PROSE = "content_class = 'prose' AND prose_content ~ '[^[:space:]]'"
+_RUN_HEARTBEAT_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,19 +83,38 @@ def _publish_semantic_revision(
     current = _current_revision(connection)
     if current != corpus_revision:
         raise ValueError("corpus changed while embeddings were being built")
+    eligible = _eligible_count(connection)
+    mapped = _mapped_count(connection)
+    if eligible != embedded_count or mapped != embedded_count:
+        raise ValueError(
+            "semantic publication is incomplete: "
+            f"mapped={mapped}, eligible={eligible}, expected={embedded_count}"
+        )
     connection.execute(
         """
         UPDATE cc_search_chats.semantic_revision
         SET status = 'complete', completed_at = now(),
-            embedded_count = %s, failure = NULL
+            embedded_count = %s, failure = NULL, phase = 'done',
+            heartbeat_at = now(), completed_units = %s, total_units = %s
         WHERE semantic_revision_id = %s
         """,
-        (embedded_count, semantic_revision),
+        (embedded_count, embedded_count, embedded_count, semantic_revision),
     )
     connection.execute(
         "UPDATE cc_search_chats.semantic_state "
         "SET current_semantic_revision_id = %s WHERE singleton",
         (semantic_revision,),
+    )
+    connection.execute(
+        """
+        DELETE FROM cc_search_chats.embedding_value AS value
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM cc_search_chats.message_embedding_current AS mapping
+            WHERE (mapping.profile_id, mapping.input_digest) =
+                  (value.profile_id, value.input_digest)
+        )
+        """
     )
 
 
@@ -175,24 +198,52 @@ def index_embeddings(
     batch_size: int = 4,
     progress: Callable[[int, int], None] | None = None,
 ) -> int:
-    """Run one resumable semantic worker per database."""
-    locked = next(
-        connection.execute(
-            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
-            (INDEX_QUEUE_LOCK,),
-        )
-    )[0]
-    if not locked:
-        raise RuntimeError("indexing is already running")
+    """Wait for and run one resumable semantic worker per database."""
+    connection.execute(
+        "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
+        (INDEX_QUEUE_LOCK,),
+    )
     try:
         return _index_embeddings(
             connection, embed, batch_size=batch_size, progress=progress
         )
+    except Exception as error:
+        _record_unexpected_semantic_failure(connection, error)
+        raise
     finally:
         connection.execute(
             "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
             (INDEX_QUEUE_LOCK,),
         )
+        connection.execute(
+            "SELECT pg_notify(%s, %s)",
+            (INDEX_NOTIFY_CHANNEL, "released"),
+        )
+
+
+def _record_unexpected_semantic_failure(
+    connection: psycopg.Connection,
+    error: BaseException,
+) -> None:
+    """Fail a still-building owned generation without masking its root error."""
+    try:
+        connection.execute(
+            """
+            UPDATE cc_search_chats.semantic_revision
+            SET status = 'failed', completed_at = now(), heartbeat_at = now(),
+                failure = jsonb_build_object(
+                    'code', 'semantic_refresh_failed',
+                    'phase', phase,
+                    'completed', completed_units,
+                    'total', total_units,
+                    'error', %s::text
+                )
+            WHERE status = 'building' AND owner_pid = pg_backend_pid()
+            """,
+            (str(error),),
+        )
+    except psycopg.Error:
+        return
 
 
 def _index_embeddings(
@@ -255,11 +306,15 @@ def _index_embeddings(
             connection.execute(
                 """
                 INSERT INTO cc_search_chats.semantic_revision (
-                    corpus_revision_id, profile_id, status
-                ) VALUES (%s, %s, 'building')
+                    corpus_revision_id, profile_id, status, owner_pid, phase,
+                    heartbeat_at, completed_units, total_units
+                ) VALUES (
+                    %s, %s, 'building', pg_backend_pid(), 'semantic_embed',
+                    now(), 0, %s
+                )
                 RETURNING semantic_revision_id
                 """,
-                (corpus_revision, _PROFILE_ID),
+                (corpus_revision, _PROFILE_ID, total),
             )
         )[0]
     else:
@@ -267,11 +322,26 @@ def _index_embeddings(
         connection.execute(
             """
             UPDATE cc_search_chats.semantic_revision
-            SET status = 'building', failure = NULL
+            SET status = 'building', failure = NULL,
+                owner_pid = pg_backend_pid(), phase = 'semantic_embed',
+                heartbeat_at = now(), total_units = %s
             WHERE semantic_revision_id = %s
             """,
-            (semantic_revision,),
+            (total, semantic_revision),
         )
+
+    heartbeat = DatabaseHeartbeat(
+        connection.info.dsn,
+        """
+        UPDATE cc_search_chats.semantic_revision
+        SET heartbeat_at = now()
+        WHERE semantic_revision_id = %s AND status = 'building'
+        """,
+        (semantic_revision,),
+        interval_seconds=_RUN_HEARTBEAT_SECONDS,
+        label=f"semantic heartbeat {semantic_revision}",
+    )
+    heartbeat.start()
 
     connection.execute(
         """
@@ -298,6 +368,14 @@ def _index_embeddings(
         (_PROFILE_ID,),
     )
     completed = _mapped_count(connection)
+    connection.execute(
+        """
+        UPDATE cc_search_chats.semantic_revision
+        SET completed_units = %s, heartbeat_at = now()
+        WHERE semantic_revision_id = %s AND status = 'building'
+        """,
+        (completed, semantic_revision),
+    )
     if progress is not None:
         progress(completed, total)
 
@@ -329,36 +407,56 @@ def _index_embeddings(
             )
         )
         if not rows:
+            heartbeat.stop()
             raise ValueError("corpus changed while embeddings were being built")
         try:
             vectors = embed([row[4] for row in rows])
         except Exception as error:
+            code = (
+                error.code
+                if isinstance(error, ModelUnavailable)
+                else "semantic_embedding_failed"
+            )
+            phase = (
+                error.phase if isinstance(error, ModelUnavailable) else "semantic_embed"
+            )
             connection.execute(
                 """
                 UPDATE cc_search_chats.semantic_revision
                 SET status = 'failed',
+                    completed_at = now(), phase = %s, heartbeat_at = now(),
+                    completed_units = %s,
                     failure = jsonb_build_object(
                         'completed', %s::bigint, 'total', %s::bigint,
                         'provider', %s::text, 'session_id', %s::text,
-                        'logical_message_id', %s::text, 'error', %s::text
+                        'logical_message_id', %s::text, 'error', %s::text,
+                        'code', %s::text, 'phase', %s::text
                     )
                 WHERE semantic_revision_id = %s
                 """,
                 (
+                    phase,
+                    completed,
                     completed,
                     total,
                     rows[0][0],
                     rows[0][1],
                     rows[0][2],
                     str(error),
+                    code,
+                    phase,
                     semantic_revision,
                 ),
             )
+            heartbeat.stop()
+            if isinstance(error, ModelUnavailable):
+                raise
             raise RuntimeError(
                 f"semantic embedding failed after {completed}/{total} passages "
                 f"at {rows[0][0]}:{rows[0][1]}:{rows[0][2]}"
             ) from error
         if len(vectors) != len(rows):
+            heartbeat.stop()
             raise ValueError("embedding model returned the wrong batch size")
         with connection.transaction():
             connection.cursor().executemany(
@@ -389,16 +487,36 @@ def _index_embeddings(
                 [(*row[:4], _PROFILE_ID, row[5]) for row in rows],
             )
         completed = _mapped_count(connection)
+        connection.execute(
+            """
+            UPDATE cc_search_chats.semantic_revision
+            SET completed_units = %s, heartbeat_at = now()
+            WHERE semantic_revision_id = %s AND status = 'building'
+            """,
+            (completed, semantic_revision),
+        )
         if progress is not None:
             progress(completed, total)
 
-    with connection.transaction():
-        _publish_semantic_revision(
-            connection,
-            semantic_revision=semantic_revision,
-            corpus_revision=corpus_revision,
-            embedded_count=completed,
-        )
+    heartbeat.raise_if_failed()
+    connection.execute(
+        """
+        UPDATE cc_search_chats.semantic_revision
+        SET phase = 'semantic_commit', heartbeat_at = now()
+        WHERE semantic_revision_id = %s AND status = 'building'
+        """,
+        (semantic_revision,),
+    )
+    try:
+        with connection.transaction():
+            _publish_semantic_revision(
+                connection,
+                semantic_revision=semantic_revision,
+                corpus_revision=corpus_revision,
+                embedded_count=completed,
+            )
+    finally:
+        heartbeat.stop()
     return completed
 
 

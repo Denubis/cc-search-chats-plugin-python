@@ -38,7 +38,7 @@ def test_postgresql_cli_journey(
     claude_root.mkdir()
     codex_day = codex_root / "2026" / "08" / "11"
     codex_day.mkdir(parents=True)
-    shutil.copy(FIXTURES / "claude_primary.jsonl", claude_root)
+    claude_source = Path(shutil.copy(FIXTURES / "claude_primary.jsonl", claude_root))
     shutil.copy(
         FIXTURES / "codex_modern_primary_145.jsonl",
         codex_day / "rollout-modern.jsonl",
@@ -57,6 +57,78 @@ def test_postgresql_cli_journey(
     code, indexed = _run(monkeypatch, capsys, "index", "--literal-only", "--json")
     assert code == 0
     assert json.loads(indexed.out)["status"] == "complete"
+
+    appended = {
+        "type": "assistant",
+        "uuid": "claude-search-refresh-append",
+        "sessionId": "claude-session-primary",
+        "timestamp": "2026-08-11T05:00:00Z",
+        "cwd": "/synthetic/repository",
+        "isSidechain": False,
+        "message": {
+            "role": "assistant",
+            "content": "on-demand refresh sentinel",
+        },
+    }
+    with claude_source.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(appended, separators=(",", ":")) + "\n")
+
+    code, refreshed_search = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "on-demand refresh sentinel",
+        "--literal",
+        "--json",
+    )
+    assert code == 0
+    refreshed_results = json.loads(refreshed_search.out)["results"]
+    assert len(refreshed_results) == 1
+    assert refreshed_results[0]["logical_message_id"] == (
+        "claude-search-refresh-append"
+    )
+
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    embedded_texts: list[str] = []
+
+    def embed_passages(texts):
+        embedded_texts.extend(texts)
+        return [vector for _ in texts]
+
+    monkeypatch.setattr("cc_search_chats.cli.embed_passages", embed_passages)
+    monkeypatch.setattr("cc_search_chats.cli.embed_query", lambda query: vector)
+    code, initial_hybrid = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "modern assistant",
+        "--json",
+    )
+    assert code == 0
+    assert json.loads(initial_hybrid.out)["results"]
+
+    appended["uuid"] = "claude-hybrid-refresh-append"
+    appended["timestamp"] = "2026-08-11T05:01:00Z"
+    appended["message"] = {
+        "role": "assistant",
+        "content": "hybrid refresh sentinel",
+    }
+    with claude_source.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(appended, separators=(",", ":")) + "\n")
+    embedded_texts.clear()
+
+    code, refreshed_hybrid = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "hybrid refresh sentinel",
+        "--json",
+    )
+    assert code == 0
+    hybrid_results = json.loads(refreshed_hybrid.out)["results"]
+    assert hybrid_results[0]["logical_message_id"] == "claude-hybrid-refresh-append"
+    assert embedded_texts == ["hybrid refresh sentinel"]
 
     code, searched = _run(
         monkeypatch,

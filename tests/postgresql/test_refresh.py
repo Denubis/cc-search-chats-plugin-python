@@ -6,6 +6,7 @@ import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import psycopg
 import pytest
@@ -18,9 +19,11 @@ from cc_search_chats.providers.source_discovery import (
     source_root_id,
 )
 from cc_search_chats.storage.postgresql import (
+    RefreshProgress,
     index_embeddings,
     migrate,
     refresh_native_sources,
+    replace_messages,
     search_messages,
 )
 from cc_search_chats.storage.postgresql import refresh as refresh_module
@@ -1009,12 +1012,20 @@ def test_refresh_streams_both_native_roots(
 def test_refresh_waits_in_the_database_index_queue(
     postgres_cluster, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "cc_search_chats.storage.postgresql.guardrails._LOCK_TIMEOUT", "20ms"
-    )
+    monkeypatch.setattr(refresh_module, "_WAIT_HEARTBEAT_SECONDS", 0.02, raising=False)
     claude_root, codex_root = tmp_path / "claude", tmp_path / "codex"
     claude_root.mkdir()
     codex_root.mkdir()
+    waiting = Event()
+    events: list[object] = []
+
+    def progress(*values: object) -> None:
+        events.extend(values)
+        if any(
+            getattr(value, "state", None) == "waiting_for_index" for value in values
+        ):
+            waiting.set()
+
     with (
         psycopg.connect(
             postgres_cluster.dsn,
@@ -1026,7 +1037,6 @@ def test_refresh_waits_in_the_database_index_queue(
             autocommit=True,
             application_name="index-waiter",
         ) as waiter,
-        psycopg.connect(postgres_cluster.dsn, autocommit=True) as observer,
         ThreadPoolExecutor(max_workers=1) as executor,
     ):
         blocker.execute(
@@ -1038,51 +1048,264 @@ def test_refresh_waits_in_the_database_index_queue(
             waiter,
             claude_root=claude_root,
             codex_root=codex_root,
+            progress=progress,
         )
-        deadline = time.monotonic() + 1
-        queued = False
-        while time.monotonic() < deadline and not pending.done():
-            queued = (
-                next(
-                    observer.execute(
-                        """
-                        SELECT count(*)
-                        FROM pg_locks AS locks
-                        JOIN pg_stat_activity AS activity USING (pid)
-                        WHERE activity.application_name = 'index-waiter'
-                          AND locks.locktype = 'advisory' AND NOT locks.granted
-                        """
-                    )
-                )[0]
-                == 1
-            )
-            if queued:
-                break
-            time.sleep(0.01)
-        assert queued
-        time.sleep(0.05)
-        assert not pending.done()
-
+        reported_waiting = waiting.wait(timeout=1)
+        still_pending = not pending.done()
         blocker.execute(
             "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
             (_INDEX_QUEUE_LOCK,),
         )
         assert pending.result(timeout=1).message_count == 0
+        assert reported_waiting
+        assert still_pending
+        assert any(
+            getattr(event, "state", None) == "waiting_for_index" for event in events
+        )
 
 
-def test_direct_semantic_index_respects_the_shared_index_owner(
+def test_refresh_run_exposes_owner_phase_heartbeat_and_terminal_progress(
+    postgres_cluster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(refresh_module, "_RUN_HEARTBEAT_SECONDS", 0.02, raising=False)
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    source.write_bytes(
+        _claude_message_bytes(uuid="heartbeat-source", text="heartbeat sentinel")
+    )
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    entered = Event()
+    release = Event()
+    original = refresh_module._parse_and_stage_source
+
+    def paused_parse(connection, plan):
+        entered.set()
+        if not release.wait(timeout=2):
+            raise AssertionError("heartbeat test did not release paused parse")
+        return original(connection, plan)
+
+    monkeypatch.setattr(refresh_module, "_parse_and_stage_source", paused_parse)
+    with (
+        psycopg.connect(
+            postgres_cluster.dsn,
+            autocommit=True,
+            application_name="heartbeat-owner",
+        ) as owner,
+        psycopg.connect(postgres_cluster.dsn, autocommit=True) as observer,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        pending = executor.submit(
+            refresh_native_sources,
+            owner,
+            source_roots=roots,
+        )
+        assert entered.wait(timeout=1)
+        try:
+            building = next(
+                observer.execute(
+                    """
+                    SELECT owner_pid, phase, heartbeat_at,
+                           completed_units, total_units, status
+                    FROM cc_search_chats.refresh_run
+                    ORDER BY run_id DESC
+                    LIMIT 1
+                    """
+                )
+            )
+            deadline = time.monotonic() + 1
+            heartbeat_advanced = False
+            while time.monotonic() < deadline:
+                current_heartbeat = next(
+                    observer.execute(
+                        """
+                        SELECT heartbeat_at
+                        FROM cc_search_chats.refresh_run
+                        ORDER BY run_id DESC
+                        LIMIT 1
+                        """
+                    )
+                )[0]
+                if current_heartbeat > building[2]:
+                    heartbeat_advanced = True
+                    break
+                time.sleep(0.01)
+        finally:
+            release.set()
+        assert pending.result(timeout=2).message_count == 1
+        assert building[:2] == (owner.info.backend_pid, "parse")
+        assert building[2] is not None
+        assert building[3:] == (0, 1, "building")
+        assert heartbeat_advanced
+        assert next(
+            observer.execute(
+                """
+                SELECT phase, completed_units, total_units, status
+                FROM cc_search_chats.refresh_run
+                ORDER BY run_id DESC
+                LIMIT 1
+                """
+            )
+        ) == ("done", 1, 1, "complete")
+
+
+def test_refresh_waiter_reports_the_active_refresh_run_and_owner(
+    postgres_cluster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(refresh_module, "_WAIT_HEARTBEAT_SECONDS", 0.02, raising=False)
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    (claude_root / "session.jsonl").write_bytes(
+        _claude_message_bytes(uuid="owner-source", text="owner sentinel")
+    )
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    owner_entered = Event()
+    release_owner = Event()
+    waiter_reported = Event()
+    waiting_events: list[RefreshProgress] = []
+    original = refresh_module._parse_and_stage_source
+
+    def paused_owner(connection, plan):
+        owner_entered.set()
+        if not release_owner.wait(timeout=2):
+            raise AssertionError("waiter test did not release active owner")
+        return original(connection, plan)
+
+    def waiter_progress(event: RefreshProgress) -> None:
+        if getattr(event, "state", None) == "waiting_for_index":
+            waiting_events.append(event)
+            waiter_reported.set()
+
+    monkeypatch.setattr(refresh_module, "_parse_and_stage_source", paused_owner)
+    with (
+        psycopg.connect(
+            postgres_cluster.dsn,
+            autocommit=True,
+            application_name="active-refresh-owner",
+        ) as owner,
+        psycopg.connect(
+            postgres_cluster.dsn,
+            autocommit=True,
+            application_name="active-refresh-waiter",
+        ) as waiter,
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        owner_result = executor.submit(
+            refresh_native_sources,
+            owner,
+            source_roots=roots,
+        )
+        assert owner_entered.wait(timeout=1)
+        waiter_result = executor.submit(
+            refresh_native_sources,
+            waiter,
+            source_roots=roots,
+            progress=waiter_progress,
+        )
+        reported = waiter_reported.wait(timeout=1)
+        try:
+            event = waiting_events[0] if waiting_events else None
+        finally:
+            release_owner.set()
+        assert owner_result.result(timeout=2).message_count == 1
+        assert waiter_result.result(timeout=2).message_count == 1
+        assert reported
+        assert event is not None
+        assert event.owner_pid == owner.info.backend_pid
+        assert isinstance(event.run_id, int)
+
+
+def test_next_owner_marks_abandoned_building_refresh_failed(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    migrate(postgres_connection)
+    abandoned_run = next(
+        postgres_connection.execute(
+            """
+            INSERT INTO cc_search_chats.refresh_run (
+                status, source_count, changed_source_count, owner_pid,
+                phase, heartbeat_at, completed_units, total_units
+            ) VALUES ('building', 1, 1, 999999, 'parse', now(), 0, 1)
+            RETURNING run_id
+            """
+        )
+    )[0]
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    (claude_root / "session.jsonl").write_bytes(
+        _claude_message_bytes(uuid="recovery-source", text="recovery sentinel")
+    )
+
+    refresh_native_sources(
+        postgres_connection,
+        source_roots=(_source_root(Provider.CLAUDE, claude_root),),
+    )
+
+    recovered = next(
+        postgres_connection.execute(
+            """
+            SELECT status, phase, completed_units, total_units, diagnostics
+            FROM cc_search_chats.refresh_run
+            WHERE run_id = %s
+            """,
+            (abandoned_run,),
+        )
+    )
+    assert recovered[:4] == ("failed", "done", 1, 1)
+    assert recovered[4][-1]["code"] == "abandoned_refresh"
+
+
+def test_direct_semantic_index_waits_for_the_shared_index_owner(
     postgres_cluster,
 ) -> None:
     with (
         psycopg.connect(postgres_cluster.dsn, autocommit=True) as blocker,
-        psycopg.connect(postgres_cluster.dsn, autocommit=True) as waiter,
+        psycopg.connect(
+            postgres_cluster.dsn,
+            autocommit=True,
+            application_name="semantic-waiter",
+        ) as waiter,
+        psycopg.connect(postgres_cluster.dsn, autocommit=True) as observer,
+        ThreadPoolExecutor(max_workers=1) as executor,
     ):
         migrate(waiter)
-        with blocker.transaction():
-            blocker.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                (_INDEX_QUEUE_LOCK,),
-            )
+        replace_messages(waiter, ())
+        blocker.execute(
+            "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
+            (_INDEX_QUEUE_LOCK,),
+        )
+        pending = executor.submit(index_embeddings, waiter, lambda texts: [])
+        deadline = time.monotonic() + 1
+        queued = False
+        while time.monotonic() < deadline and not pending.done():
+            queued = next(
+                observer.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_locks AS lock
+                        JOIN pg_stat_activity AS activity USING (pid)
+                        WHERE activity.application_name = 'semantic-waiter'
+                          AND lock.locktype = 'advisory'
+                          AND NOT lock.granted
+                    )
+                    """
+                )
+            )[0]
+            if queued:
+                break
+            time.sleep(0.01)
+        still_pending = not pending.done()
+        blocker.execute(
+            "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+            (_INDEX_QUEUE_LOCK,),
+        )
 
-            with pytest.raises(RuntimeError, match="indexing is already running"):
-                index_embeddings(waiter, lambda texts: [])
+        assert queued
+        assert still_pending
+        assert pending.result(timeout=1) == 0

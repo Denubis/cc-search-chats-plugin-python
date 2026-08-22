@@ -53,16 +53,20 @@ from cc_search_chats.providers.source_discovery import (
     read_bounded_jsonl,
     source_root_id,
 )
-from cc_search_chats.storage.postgresql.guardrails import INDEX_QUEUE_LOCK
+from cc_search_chats.storage.postgresql.guardrails import (
+    INDEX_NOTIFY_CHANNEL,
+    INDEX_QUEUE_LOCK,
+    DatabaseHeartbeat,
+)
 from cc_search_chats.storage.postgresql.index import migrate
-
-type ProgressCallback = Callable[[str, int, int], None]
 
 _PARSER_STATE_VERSIONS = {
     Provider.CLAUDE: 1,
     Provider.CODEX: 1,
 }
 _RETAINED_REFRESH_RUNS = 100
+_WAIT_HEARTBEAT_SECONDS = 5.0
+_RUN_HEARTBEAT_SECONDS = 5.0
 _ROOT_FAILURES = {
     SourceDiagnosticCode.MISSING_ROOT,
     SourceDiagnosticCode.UNREADABLE_ROOT,
@@ -106,6 +110,21 @@ class RefreshResult:
     failed_source_count: int = 0
     advanced_source_count: int = 0
     pending_bytes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshProgress:
+    """One observable refresh-owner or source-progress transition."""
+
+    phase: str
+    state: str
+    completed_units: int | None = None
+    total_units: int | None = None
+    run_id: int | None = None
+    owner_pid: int | None = None
+
+
+type ProgressCallback = Callable[[RefreshProgress], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,17 +400,61 @@ def _resolved_roots(
 
 
 @contextmanager
-def _refresh_owner(connection: psycopg.Connection) -> Iterator[None]:
-    connection.execute(
-        "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
-        (INDEX_QUEUE_LOCK,),
-    )
+def _refresh_owner(
+    connection: psycopg.Connection,
+    progress: ProgressCallback | None,
+) -> Iterator[None]:
+    connection.execute(f"LISTEN {INDEX_NOTIFY_CHANNEL}")
+    while not next(
+        connection.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+            (INDEX_QUEUE_LOCK,),
+        )
+    )[0]:
+        if progress is not None:
+            active = next(
+                connection.execute(
+                    """
+                    SELECT run.run_id, run.owner_pid
+                    FROM cc_search_chats.refresh_run AS run
+                    WHERE run.status = 'building'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM pg_locks AS lock
+                          WHERE lock.pid = run.owner_pid
+                            AND lock.locktype = 'advisory'
+                            AND lock.granted
+                      )
+                    ORDER BY run.run_id DESC
+                    LIMIT 1
+                    """
+                ),
+                None,
+            )
+            progress(
+                RefreshProgress(
+                    phase="scan",
+                    state="waiting_for_index",
+                    run_id=active[0] if active is not None else None,
+                    owner_pid=active[1] if active is not None else None,
+                )
+            )
+        for _notification in connection.notifies(
+            timeout=_WAIT_HEARTBEAT_SECONDS,
+            stop_after=1,
+        ):
+            pass
+    connection.execute(f"UNLISTEN {INDEX_NOTIFY_CHANNEL}")
     try:
         yield
     finally:
         connection.execute(
             "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
             (INDEX_QUEUE_LOCK,),
+        )
+        connection.execute(
+            "SELECT pg_notify(%s, %s)",
+            (INDEX_NOTIFY_CHANNEL, "released"),
         )
 
 
@@ -1031,6 +1094,8 @@ def _start_run(
             """
             UPDATE cc_search_chats.refresh_run
             SET status = 'failed', completed_at = now(),
+                phase = 'done', heartbeat_at = now(),
+                completed_units = total_units,
                 diagnostics = diagnostics || %s::jsonb
             WHERE status = 'building'
             """,
@@ -1049,13 +1114,33 @@ def _start_run(
             connection.execute(
                 """
                 INSERT INTO cc_search_chats.refresh_run (
-                    status, source_count, changed_source_count
-                ) VALUES ('building', %s, %s)
+                    status, source_count, changed_source_count,
+                    owner_pid, phase, heartbeat_at, completed_units, total_units
+                ) VALUES (
+                    'building', %s, %s, pg_backend_pid(), 'parse', now(), 0, %s
+                )
                 RETURNING run_id
                 """,
-                (source_count, changed_source_count),
+                (source_count, changed_source_count, changed_source_count),
             )
         )[0]
+
+
+def _update_run_progress(
+    connection: psycopg.Connection,
+    run_id: int,
+    *,
+    phase: str,
+    completed_units: int,
+) -> None:
+    connection.execute(
+        """
+        UPDATE cc_search_chats.refresh_run
+        SET phase = %s, heartbeat_at = now(), completed_units = %s
+        WHERE run_id = %s AND status = 'building'
+        """,
+        (phase, completed_units, run_id),
+    )
 
 
 def _record_run_failure(
@@ -1067,7 +1152,9 @@ def _record_run_failure(
         connection.execute(
             """
             UPDATE cc_search_chats.refresh_run
-            SET status = 'failed', completed_at = now(), diagnostics = %s
+            SET status = 'failed', completed_at = now(), diagnostics = %s,
+                phase = 'done', heartbeat_at = now(),
+                completed_units = total_units
             WHERE run_id = %s AND status = 'building'
             """,
             (Jsonb(list(diagnostics)), run_id),
@@ -1431,7 +1518,8 @@ def _publish_staged_refresh(
             SET status = %s, completed_at = now(), corpus_revision_id = %s,
                 failed_source_count = %s,
                 advanced_source_count = %s,
-                diagnostics = %s
+                diagnostics = %s, phase = 'done', heartbeat_at = now(),
+                completed_units = total_units
             WHERE run_id = %s
             """,
             (
@@ -1512,8 +1600,8 @@ def refresh_native_sources(
         claude_root=claude_root,
         codex_root=codex_root,
     )
-    with _refresh_owner(connection):
-        migrate(connection)
+    migrate(connection)
+    with _refresh_owner(connection, progress):
         checkpoints = _load_checkpoints(connection)
         (
             observed,
@@ -1556,8 +1644,20 @@ def refresh_native_sources(
         advanced_source_count = 0
         pending_bytes = 0
         completed = 0
-        _create_stage_tables(connection)
+        heartbeat = DatabaseHeartbeat(
+            connection.info.dsn,
+            """
+            UPDATE cc_search_chats.refresh_run
+            SET heartbeat_at = now()
+            WHERE run_id = %s AND status = 'building'
+            """,
+            (run_id,),
+            interval_seconds=_RUN_HEARTBEAT_SECONDS,
+            label=f"refresh heartbeat {run_id}",
+        )
         try:
+            heartbeat.start()
+            _create_stage_tables(connection)
             _stage_removed_sources(
                 connection,
                 checkpoints,
@@ -1586,13 +1686,24 @@ def refresh_native_sources(
                     advanced_source_count += int(advanced)
                     pending_bytes += source_pending
                 completed += 1
+                _update_run_progress(
+                    connection,
+                    run_id,
+                    phase="parse",
+                    completed_units=completed,
+                )
                 if progress is not None:
                     progress(
-                        plan.observed.root.provider.value,
-                        completed,
-                        len(discovered_keys),
+                        RefreshProgress(
+                            phase="parse",
+                            state="running",
+                            completed_units=completed,
+                            total_units=len(plans),
+                            run_id=run_id,
+                        )
                     )
 
+            heartbeat.raise_if_failed()
             successful_changes = next(
                 connection.execute(
                     """
@@ -1603,6 +1714,12 @@ def refresh_native_sources(
                 )
             )[0]
             if successful_changes:
+                _update_run_progress(
+                    connection,
+                    run_id,
+                    phase="fts_commit",
+                    completed_units=len(plans) + len(removed_keys),
+                )
                 revision_id = _publish_staged_refresh(
                     connection,
                     run_id=run_id,
@@ -1622,7 +1739,8 @@ def refresh_native_sources(
                     UPDATE cc_search_chats.refresh_run
                     SET status = 'failed', completed_at = now(),
                         corpus_revision_id = %s, failed_source_count = %s,
-                        diagnostics = %s
+                        diagnostics = %s, phase = 'done', heartbeat_at = now(),
+                        completed_units = total_units
                     WHERE run_id = %s
                     """,
                     (
@@ -1657,6 +1775,7 @@ def refresh_native_sources(
             )
             raise
         finally:
+            heartbeat.stop()
             connection.execute("DROP TABLE IF EXISTS pg_temp.refresh_stage_message")
             connection.execute(
                 "DROP TABLE IF EXISTS pg_temp.refresh_stage_message_batch"

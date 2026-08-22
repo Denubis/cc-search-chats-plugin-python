@@ -150,6 +150,7 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
     assert applied == (
         (1, "schema.sql", 64),
         (2, "refresh_schema.sql", 64),
+        (3, "freshness_schema.sql", 64),
     )
     postgres_connection.execute(
         "UPDATE cc_search_chats.schema_migration "
@@ -174,7 +175,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
     monkeypatch.setattr(
         migrations,
         "_MIGRATIONS",
-        (*migrations._MIGRATIONS, migrations.Migration(3, "missing-migration.sql")),
+        (*migrations._MIGRATIONS, migrations.Migration(4, "missing-migration.sql")),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -184,7 +185,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
         postgres_connection.execute(
             "SELECT version FROM cc_search_chats.schema_migration ORDER BY version"
         )
-    ) == ((1,), (2,))
+    ) == ((1,), (2,), (3,))
 
 
 def _seed_legacy_snapshots(connection: psycopg.Connection) -> None:
@@ -439,3 +440,45 @@ def test_semantic_append_reuses_vector_and_mapping_rows(
     assert {
         hashlib.sha256(text.encode("utf-8")).hexdigest() for text in embedded_texts
     } == expected_digests - claude_digests
+
+
+def test_successful_semantic_publication_reclaims_unreachable_vectors(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    migrate(postgres_connection)
+    messages = _claude_messages()
+    replace_messages(postgres_connection, messages)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def embed(texts):
+        return [vector for _ in texts]
+
+    index_embeddings(postgres_connection, embed)
+    eligible = [
+        message
+        for message in messages
+        if message.content_class.value == "prose" and message.text.strip()
+    ]
+    assert len(eligible) > 1
+    retained = eligible[0]
+    replace_messages(postgres_connection, (retained,))
+
+    index_embeddings(postgres_connection, embed)
+
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.embedding_value"
+            )
+        )[0]
+        == 1
+    )
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.message_embedding_current"
+            )
+        )[0]
+        == 1
+    )

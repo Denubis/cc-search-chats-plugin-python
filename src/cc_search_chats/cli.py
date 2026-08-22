@@ -6,6 +6,7 @@ Imperative Shell — parses arguments and orchestrates storage/output layers.
 import argparse
 import json
 import os
+import shlex
 import sqlite3
 import sys
 from dataclasses import asdict
@@ -60,15 +61,16 @@ from cc_search_chats.storage.index import (
     search_full_content,
 )
 from cc_search_chats.storage.postgresql import (
+    RefreshProgress,
+    index_embeddings,
+    refresh_native_sources,
+    search_messages,
+)
+from cc_search_chats.storage.postgresql import (
     context_messages as pg_context_messages,
 )
 from cc_search_chats.storage.postgresql import (
     extract_session as pg_extract_session,
-)
-from cc_search_chats.storage.postgresql import (
-    index_embeddings,
-    refresh_native_sources,
-    search_messages,
 )
 from cc_search_chats.storage.postgresql import (
     list_sessions as pg_list_sessions,
@@ -124,6 +126,29 @@ def _contain_semantic_index(args: argparse.Namespace) -> None:
         raise RuntimeError(
             "indexing requires a working systemd user session for resource containment"
         ) from error
+
+
+def _literal_fallback_command(args: argparse.Namespace) -> str:
+    query = args.query if args.command == "search" else "QUERY"
+    command = ["cc-search-chats", "search", query, "--literal"]
+    if args.command == "search":
+        for enabled, flag in (
+            (args.all, "--all"),
+            (args.json, "--json"),
+        ):
+            if enabled:
+                command.append(flag)
+        for value, flag in (
+            (args.project, "--project"),
+            (args.provider, "--provider"),
+            (args.role, "--role"),
+            (args.epoch, "--epoch"),
+            (args.days, "--days"),
+            (args.limit, "--limit"),
+        ):
+            if value is not None:
+                command.extend((flag, str(value)))
+    return shlex.join(command)
 
 
 def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
@@ -182,10 +207,22 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
 
             acquire_index_session(connection)
 
-            def progress(provider: str, completed: int, total: int) -> None:
-                if completed == total or completed % 100 == 0:
+            def progress(event: RefreshProgress) -> None:
+                if event.state == "waiting_for_index":
                     print(
-                        f"Indexing {provider}: {completed}/{total} sources",
+                        "Indexing: waiting for the active index owner", file=sys.stderr
+                    )
+                elif (
+                    event.completed_units is not None
+                    and event.total_units is not None
+                    and (
+                        event.completed_units == event.total_units
+                        or event.completed_units % 100 == 0
+                    )
+                ):
+                    print(
+                        f"Indexing {event.phase}: "
+                        f"{event.completed_units}/{event.total_units} sources",
                         file=sys.stderr,
                     )
 
@@ -371,6 +408,11 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
                     print(f"[{value.timestamp}] {value.role}:\n{value.text}")
             return 0 if messages else 3
 
+        acquire_index_session(connection)
+        refresh_native_sources(
+            connection,
+            source_roots=configured_source_roots(),
+        )
         project = args.project
         if args.literal or args.everything:
             hits = search_messages(
@@ -384,6 +426,7 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
                 epoch=args.epoch,
             )
         else:
+            index_embeddings(connection, embed_passages)
             hits = tuple(
                 value.message
                 for value in hybrid_search(
@@ -991,7 +1034,7 @@ def main() -> None:
                 None
                 if args.command == "index" and args.status
                 else "index"
-                if args.command == "index"
+                if args.command in {"index", "search"}
                 else "read"
             )
             if admission_name is None:
@@ -1005,7 +1048,13 @@ def main() -> None:
                     )
             sys.exit(exit_code)
         except ModelUnavailable as exc:
-            print(str(exc), file=sys.stderr)
+            print(
+                f"Semantic unavailable [{exc.code}] during {exc.phase}: {exc}\n"
+                "Semantic freshness: unavailable.\n"
+                "Literal search is required for complete current results.\n"
+                f"Run: {_literal_fallback_command(args)}",
+                file=sys.stderr,
+            )
             sys.exit(8)
         except (OSError, psycopg.Error, RuntimeError, ValueError) as exc:
             detail = (

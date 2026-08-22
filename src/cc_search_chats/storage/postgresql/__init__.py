@@ -15,6 +15,7 @@ from cc_search_chats.storage.postgresql.index import (
     search_messages,
 )
 from cc_search_chats.storage.postgresql.refresh import (
+    RefreshProgress,
     RefreshResult,
     refresh_native_sources,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "SearchHit",
     "MessageResolution",
     "RefreshResult",
+    "RefreshProgress",
     "HybridHit",
     "StoredMessage",
     "StoredSession",

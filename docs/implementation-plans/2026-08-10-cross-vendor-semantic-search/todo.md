@@ -3,14 +3,6 @@
 Only unresolved work remains here. Completed work and its exact evidence live in
 `worklog.md`; an empty search result is not completion evidence.
 
-## Outcome 3: freshness and semantic reuse
-
-- [ ] Write the failing append-then-search journey.
-- [ ] Write failing refresh-owner/waiter/heartbeat/recovery tests.
-- [ ] Write failing vector-reuse, missing-only, resume, and cleanup tests.
-- [ ] Write failing named semantic/model/cache/VRAM outcome tests.
-- [ ] Implement search freshness and semantic publication boundaries.
-
 ## Outcome 4: consumer contract
 
 - [ ] Write failing shared identity and JSON-v2 contract tests.

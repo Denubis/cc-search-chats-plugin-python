@@ -124,3 +124,40 @@
 - Fresh evidence: `uv run --frozen pytest tests/postgresql -q` reported 40
   passed; `uv run --frozen pytest --ignore=tests/postgresql -q` reported 570
   passed; Ruff lint, Ruff format check, and ty all passed.
+
+## 2026-08-23 — Outcome 3 freshness and semantic reuse complete
+
+- PostgreSQL search now runs native metadata discovery and incremental refresh
+  before retrieval. Literal search finds a newly appended complete native
+  message without a separate `index` command.
+- Default hybrid search owns the database index session through corpus refresh,
+  missing-vector work, semantic publication, query embedding, and retrieval.
+  A second append journey embeds only the new passage and searches the semantic
+  generation bound to the newly committed corpus revision.
+- Refresh callers wait through the shared advisory owner, emit
+  `waiting_for_index`, identify a live refresh run/backend PID when present,
+  and wake through PostgreSQL notifications with a five-second heartbeat
+  fallback. Direct semantic callers wait on the same owner instead of failing
+  fast.
+- Refresh and semantic generation rows expose owner PID, phase, heartbeat,
+  completed units, and total units. Independent bounded connections advance
+  heartbeats during deliberately paused parse/model calls. The next owner marks
+  an abandoned building refresh failed; semantic failures remain retryable.
+- Semantic publication rechecks the current corpus plus exact eligible/mapped
+  cardinality in its transaction. Failed semantic work leaves current literal
+  search available and stale semantic search fails explicitly. Successful
+  publication reclaims embedding values no longer reachable from current
+  mappings.
+- Missing model snapshots, dependencies, CUDA, model load, passage/query
+  embedding, and terminal VRAM exhaustion retain named phase/code metadata.
+  Measurable VRAM is reported, and CLI semantic failure prints the literal text
+  `Literal search is required for complete current results` plus a shell-safe
+  `search --literal` command preserving the query and filters.
+- Red evidence included an append invisible to search, a silent refresh waiter,
+  absent owner/heartbeat columns, a non-advancing heartbeat, direct semantic
+  fail-fast behavior, three retained unreachable vectors instead of one, stale
+  semantic state during hybrid search, generic model-error wrapping, unnamed
+  runtime/VRAM failures, and invalid vectors leaving a generation `building`.
+- Fresh evidence: `uv run --frozen pytest tests/postgresql -q` reported 47
+  passed; `uv run --frozen pytest --ignore=tests/postgresql -q` reported 573
+  passed; Ruff lint, Ruff format check, and ty all passed.
