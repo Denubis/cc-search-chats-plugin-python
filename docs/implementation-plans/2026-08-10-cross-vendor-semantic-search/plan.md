@@ -99,11 +99,13 @@ plugins, and runtime state remain isolated and unread.
    identical relative paths under distinct roots cannot collide.
 4. Add byte-observation tests for a no-op refresh, a complete append, a partial
    final JSONL record, append during scan, truncation, rotation/replacement,
-   prefix change, unsupported schema, unreadable source, parser-state upgrade,
-   and a staged-generation crash/retry.
-5. Implement metadata-first discovery, complete-record watermarks and
-   fingerprints, parser-state serialization, suffix-only reads, changed-source
-   staging, one short atomic merge, obsolete-row collection, and staging cleanup.
+   same-size modification, unsupported schema, unreadable source, parser-state
+   upgrade, and a staged-generation crash/retry. Same-device/inode growth is
+   append-only by explicit product decision; it does not re-verify the committed
+   prefix.
+5. Implement metadata-first discovery, complete-record watermarks, parser-state
+   serialization, suffix-only reads, changed-source staging, one short atomic
+   merge, obsolete-row collection, and staging cleanup.
 6. Verify that an unchanged second refresh reads no JSONL content bytes and
    creates no generation; a valid append begins exactly after the last complete
    record and publishes only after parsing succeeds.

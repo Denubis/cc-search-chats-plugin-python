@@ -19,7 +19,10 @@ class Migration:
     resource_name: str
 
 
-_MIGRATIONS = (Migration(1, "schema.sql"),)
+_MIGRATIONS = (
+    Migration(1, "schema.sql"),
+    Migration(2, "refresh_schema.sql"),
+)
 
 
 @dataclass(frozen=True, slots=True)

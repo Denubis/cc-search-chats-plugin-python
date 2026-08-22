@@ -82,3 +82,45 @@
   an already-committed prefix unchanged requires reading prefix bytes, while the
   accepted append criterion permits reading only bytes after the old complete
   record watermark. Unchanged files can still be guaranteed as metadata-only.
+
+## 2026-08-22 — append-only boundary resolved
+
+- The human selected the fast append-only rule after the two consequences were
+  stated explicitly. Same-device/inode growth reads only bytes after the last
+  complete-record watermark.
+- Truncation, replacement, same-size modification, and parser-state version
+  changes still trigger a full reparse or explicit failure. An earlier in-place
+  rewrite combined with same-inode growth is outside the detection contract.
+- Authority:
+  `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a026ca-e241-7722-b606-ab5429dc3c86`.
+
+## 2026-08-22 — Outcome 2 incremental multi-root refresh complete
+
+- Wired the ordered standard and present Ponytail Claude/Codex session roots
+  into the PostgreSQL refresh. Provider/path-derived root IDs keep equal
+  relative filenames isolated while identical native identities share one
+  canonical message and retain distinct physical aliases.
+- Added metadata-first discovery and durable per-file checkpoints containing
+  device/inode, size, nanosecond mtime, last complete byte, absolute record/line
+  coordinates, parser-state version, and provider continuation state.
+- An unchanged refresh reads no JSONL content and creates no generation, run,
+  message, alias, root-version, or checkpoint-version changes. Valid same-inode
+  growth reads only the uncommitted suffix and leaves unchanged message rows at
+  their existing PostgreSQL row versions.
+- Partial tails remain pending at the last complete newline. Truncation, inode
+  replacement, same-size modification, and parser-state upgrades reparse from
+  byte zero. A writer advancing during a bounded scan is reported and deferred
+  to the next refresh.
+- Changed sources stage outside the publication transaction and merge in one
+  short transaction. Failed parsing, unsupported conversation records,
+  unreadable stats/reads/probes, and publication crashes preserve committed
+  messages and checkpoints; removed sources delete only their own aliases.
+- Refresh-run diagnostics retain at most 100 terminal records. Run and corpus
+  generations retain metadata but no message, alias, or embedding copies.
+- Red evidence included an unexpected full-root call boundary, root/checkpoint
+  `xmin` changes on a no-op, an unsupported append advancing its revision, a
+  stat failure being treated as deletion, an unreadable artifact probe erasing
+  committed rows, and an unavailable root replacing last-known metadata.
+- Fresh evidence: `uv run --frozen pytest tests/postgresql -q` reported 40
+  passed; `uv run --frozen pytest --ignore=tests/postgresql -q` reported 570
+  passed; Ruff lint, Ruff format check, and ty all passed.

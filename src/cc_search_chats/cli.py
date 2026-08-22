@@ -37,6 +37,7 @@ from cc_search_chats.output import (
     json_search_results,
     json_session_list,
 )
+from cc_search_chats.providers.source_discovery import configured_source_roots
 from cc_search_chats.queueing import client_admission
 from cc_search_chats.semantic import ModelUnavailable, embed_passages, embed_query
 from cc_search_chats.storage.index import (
@@ -203,16 +204,7 @@ def _handle_postgres(args: argparse.Namespace, dsn: str) -> int:
             else:
                 result = refresh_native_sources(
                     connection,
-                    claude_root=Path(
-                        os.environ.get("CC_SEARCH_CLAUDE_ROOT", "~/.claude/projects")
-                    )
-                    .expanduser()
-                    .resolve(),
-                    codex_root=Path(
-                        os.environ.get("CC_SEARCH_CODEX_ROOT", "~/.codex/sessions")
-                    )
-                    .expanduser()
-                    .resolve(),
+                    source_roots=configured_source_roots(),
                     progress=progress,
                 )
                 revision_id = result.revision_id

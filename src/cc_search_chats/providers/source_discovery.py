@@ -136,7 +136,8 @@ class GitProbeResult:
     diagnostics: tuple[SourceDiagnostic, ...]
 
 
-def _source_root_id(provider: Provider, path: Path) -> str:
+def source_root_id(provider: Provider, path: Path) -> str:
+    """Return the stable internal identity for one resolved provider root."""
     payload = f"cc-search-chats-source-root-v1\0{provider.value}\0{path}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -199,7 +200,7 @@ def configured_source_roots(
                 ConfiguredSourceRoot(
                     provider=provider,
                     path=resolved,
-                    source_root_id=_source_root_id(provider, resolved),
+                    source_root_id=source_root_id(provider, resolved),
                 )
             )
     return tuple(roots)
@@ -560,12 +561,14 @@ def _discover(
     candidate_paths: tuple[Path, ...],
     archive_paths: tuple[Path, ...],
     traversal_diagnostics: tuple[SourceDiagnostic, ...],
+    *,
+    inspect_content: bool,
 ) -> DiscoveryResult:
     """Filter provider-shaped paths while rejecting positive artifact signatures."""
     sources: list[DiscoveredSource] = []
     diagnostics = list(traversal_diagnostics)
     for path in candidate_paths:
-        artifact = _positive_non_native_diagnostic(path)
+        artifact = _positive_non_native_diagnostic(path) if inspect_content else None
         if artifact is not None:
             diagnostics.append(artifact)
             continue
@@ -653,7 +656,7 @@ def _is_codex_rollout(path: Path, root: Path) -> bool:
 
 
 def _discover_provider_sources(
-    provider: Provider, resolved_root: Path
+    provider: Provider, resolved_root: Path, *, inspect_content: bool
 ) -> DiscoveryResult:
     """Traverse one explicit provider root and classify candidate paths."""
     failure = _root_failure(provider, resolved_root)
@@ -677,17 +680,31 @@ def _discover_provider_sources(
         candidates,
         archives,
         traversal_diagnostics,
+        inspect_content=inspect_content,
     )
 
 
-def discover_claude_sources(resolved_root: Path) -> DiscoveryResult:
+def discover_claude_sources(
+    resolved_root: Path, *, inspect_content: bool = True
+) -> DiscoveryResult:
     """Discover Claude top-level and nested subagent JSONL candidates."""
-    return _discover_provider_sources(Provider.CLAUDE, resolved_root)
+    return _discover_provider_sources(
+        Provider.CLAUDE, resolved_root, inspect_content=inspect_content
+    )
 
 
-def discover_codex_sources(resolved_root: Path) -> DiscoveryResult:
+def discover_codex_sources(
+    resolved_root: Path, *, inspect_content: bool = True
+) -> DiscoveryResult:
     """Discover Codex ``YYYY/MM/DD/rollout-*.jsonl`` candidates."""
-    return _discover_provider_sources(Provider.CODEX, resolved_root)
+    return _discover_provider_sources(
+        Provider.CODEX, resolved_root, inspect_content=inspect_content
+    )
+
+
+def inspect_non_native_artifact(path: Path) -> SourceDiagnostic | None:
+    """Inspect a changed candidate for an explicit non-native signature."""
+    return _positive_non_native_diagnostic(path)
 
 
 def probe_git_repository(

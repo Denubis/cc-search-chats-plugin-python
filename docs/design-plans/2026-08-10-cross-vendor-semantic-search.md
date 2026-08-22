@@ -12,6 +12,7 @@
 | Retain crash/generation records but do not retain unused message, alias, or embedding copies. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a0229d-4034-7ec2-b5b0-7923a3b8afe9` | `sed -n '916p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` accepts generation metadata and rejects unused copies. |
 | Proceed with the reconciled storage, freshness, Ponytail, UAT, and documentation work. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a022a9-3b5a-70d1-ab14-b7b2a363589c` | `sed -n '927p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` says `do it`. |
 | Accept this reconciled design as matching the intended outcome. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a02398-fc3a-7670-8f76-e267cfe92208` | `sed -n '1338p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` accepts the rendered design. |
+| Treat same-inode growth as append-only so refresh reads only the new suffix. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a026ca-e241-7722-b606-ab5429dc3c86` | `sed -n '2295p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` says `yes` to the immediately preceding explicit fast-append-only question. |
 
 ## Summary
 
@@ -91,12 +92,16 @@ they never own full copies of messages, physical aliases, or embeddings.
 - **Success:** One cross-process refresh owner serializes index writes. Other
   callers continue reading committed snapshots or emit `waiting_for_index`
   progress until the requested freshness is committed.
-- **Failure:** Truncation, rotation, replacement, prefix changes, partial final
-  JSONL records, and unsupported schema changes cannot be mistaken for a clean
-  append. The affected source is reparsed or skipped with an explicit reason.
+- **Failure:** Truncation, rotation, replacement, same-size modification,
+  partial final JSONL records, and unsupported parser-state changes cannot be
+  mistaken for a clean append. The affected source is reparsed or skipped with
+  an explicit reason.
 - **Success:** An unchanged second refresh reads source metadata but no JSONL
   content bytes; a valid append reads only the suffix after the last complete
   record watermark.
+- **Boundary:** Same-device/inode growth is accepted as append-only. Refresh
+  does not re-read the committed prefix and therefore does not claim to detect
+  an earlier in-place rewrite combined with growth.
 
 ### cross-vendor-semantic-search.AC5: Observable work and semantic failure
 
@@ -609,12 +614,15 @@ machine `HF_HOME`, `TORCH_HOME`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, and
 A lightweight discovery pass stats every configured native session file. Each
 checkpoint records provider root, relative path, device/inode where meaningful,
 size, nanosecond mtime, last complete-record byte offset, absolute next record/
-line coordinates, prefix/tail fingerprints, and the adapter's immutable parser
+line coordinates, and the adapter's immutable parser
 continuation state: next conversation epoch, recognized boundary state, and
 duplicate-canonicalization carry. An unchanged checkpoint is skipped. A valid
 append reads only bytes after the prior complete-record boundary and resumes
-with that exact state. Replacement, shrinkage, prefix change, or incompatible
-schema triggers a full source reparse from epoch 0 or explicit skip. A canonical
+with that exact state. Device/inode replacement, shrinkage, same-size mtime
+change, or incompatible parser-state schema triggers a full source reparse from
+epoch 0 or explicit skip. Same-device/inode growth is deliberately trusted as
+append-only: the committed prefix is not read again, so a prefix rewrite
+combined with growth is outside the detection contract. A canonical
 event/response pair must inhabit the same epoch and cannot cross a recognized
 compaction boundary.
 If a previously represented source is temporarily unreadable, the next generation

@@ -3,15 +3,6 @@
 Only unresolved work remains here. Completed work and its exact evidence live in
 `worklog.md`; an empty search result is not completion evidence.
 
-## Outcome 2: incremental multi-root refresh
-
-- [ ] Write failing root-isolation and cross-root collision tests.
-- [ ] Write failing no-op/append/partial/truncate/replace/advance/crash tests with
-      byte-range observations.
-- [ ] Implement checkpoints, parser state, suffix reads, changed-source staging,
-      atomic merge, and cleanup.
-- [ ] Prove the unchanged refresh reads no JSONL content and creates no rows.
-
 ## Outcome 3: freshness and semantic reuse
 
 - [ ] Write the failing append-then-search journey.
