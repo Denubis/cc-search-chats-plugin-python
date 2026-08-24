@@ -13,6 +13,7 @@ from cc_search_chats.providers.claude import (
 )
 from cc_search_chats.providers.codex import CodexSessionContext, parse_codex_session
 from cc_search_chats.providers.source_discovery import read_bounded_jsonl
+from cc_search_chats.semantic import SemanticChunk
 from cc_search_chats.storage.postgresql import (
     index_embeddings,
     migrate,
@@ -22,6 +23,10 @@ from cc_search_chats.storage.postgresql import (
 
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
+
+
+def _single_chunks(texts):
+    return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
 
 
 def _claude_messages():
@@ -152,6 +157,7 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
         (2, "refresh_schema.sql", 64),
         (3, "freshness_schema.sql", 64),
         (4, "coverage_schema.sql", 64),
+        (5, "semantic_chunk_schema.sql", 64),
     )
     postgres_connection.execute(
         "UPDATE cc_search_chats.schema_migration "
@@ -176,7 +182,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
     monkeypatch.setattr(
         migrations,
         "_MIGRATIONS",
-        (*migrations._MIGRATIONS, migrations.Migration(5, "missing-migration.sql")),
+        (*migrations._MIGRATIONS, migrations.Migration(6, "missing-migration.sql")),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -186,7 +192,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
         postgres_connection.execute(
             "SELECT version FROM cc_search_chats.schema_migration ORDER BY version"
         )
-    ) == ((1,), (2,), (3,), (4,))
+    ) == ((1,), (2,), (3,), (4,), (5,))
 
 
 def _seed_legacy_snapshots(connection: psycopg.Connection) -> None:
@@ -317,7 +323,7 @@ def test_legacy_embedding_import_seeds_digest_pool_without_publication(
     assert (
         next(
             postgres_connection.execute(
-                "SELECT count(*) FROM cc_search_chats.message_embedding_current"
+                "SELECT count(*) FROM cc_search_chats.semantic_chunk_current"
             )
         )[0]
         == 0
@@ -342,7 +348,7 @@ def _semantic_cardinality(connection: psycopg.Connection) -> tuple[int, int, int
               (SELECT count(*) FROM cc_search_chats.semantic_revision),
               (SELECT count(*) FROM cc_search_chats.embedding_value),
               (SELECT count(*)
-               FROM cc_search_chats.message_embedding_current)
+               FROM cc_search_chats.semantic_chunk_current)
             """
         )
     )
@@ -360,9 +366,11 @@ def _mapping_row_version(
         connection.execute(
             """
             SELECT xmin::text
-            FROM cc_search_chats.message_embedding_current
+            FROM cc_search_chats.semantic_chunk_current
             WHERE provider = %s AND source_session_id = %s
               AND logical_message_id = %s AND content_class = %s
+              AND profile_id = 'nemotron-3-embed-8b-bf16:chunks-v1'
+              AND chunk_ordinal = 0
             """,
             (provider, source_session_id, logical_message_id, content_class),
         )
@@ -389,7 +397,11 @@ def test_semantic_append_reuses_vector_and_mapping_rows(
         for message in claude
         if message.content_class.value == "prose" and message.text.strip()
     ]
-    assert index_embeddings(postgres_connection, embed) == len(eligible_claude)
+    assert index_embeddings(
+        postgres_connection,
+        embed,
+        chunker=_single_chunks,
+    ) == len(eligible_claude)
     first_cardinality = _semantic_cardinality(postgres_connection)
     target = eligible_claude[0]
     target_locator = target.identity.canonical_locator
@@ -402,7 +414,11 @@ def test_semantic_append_reuses_vector_and_mapping_rows(
     )
 
     embedded_texts.clear()
-    assert index_embeddings(postgres_connection, embed) == len(eligible_claude)
+    assert index_embeddings(
+        postgres_connection,
+        embed,
+        chunker=_single_chunks,
+    ) == len(eligible_claude)
     assert embedded_texts == []
     assert _semantic_cardinality(postgres_connection) == first_cardinality
 
@@ -413,7 +429,11 @@ def test_semantic_append_reuses_vector_and_mapping_rows(
         if message.content_class.value == "prose" and message.text.strip()
     ]
     embedded_texts.clear()
-    assert index_embeddings(postgres_connection, embed) == len(eligible_all)
+    assert index_embeddings(
+        postgres_connection,
+        embed,
+        chunker=_single_chunks,
+    ) == len(eligible_all)
 
     assert (
         _mapping_row_version(
@@ -426,7 +446,7 @@ def test_semantic_append_reuses_vector_and_mapping_rows(
         == mapping_version
     )
     expected_digests = {
-        hashlib.sha256(message.text.encode("utf-8")).hexdigest()
+        hashlib.sha256(f"passage: {message.text}".encode()).hexdigest()
         for message in eligible_all
     }
     assert _semantic_cardinality(postgres_connection) == (
@@ -435,11 +455,12 @@ def test_semantic_append_reuses_vector_and_mapping_rows(
         len(eligible_all),
     )
     claude_digests = {
-        hashlib.sha256(message.text.encode("utf-8")).hexdigest()
+        hashlib.sha256(f"passage: {message.text}".encode()).hexdigest()
         for message in eligible_claude
     }
     assert {
-        hashlib.sha256(text.encode("utf-8")).hexdigest() for text in embedded_texts
+        hashlib.sha256(f"passage: {text}".encode()).hexdigest()
+        for text in embedded_texts
     } == expected_digests - claude_digests
 
 
@@ -455,7 +476,7 @@ def test_successful_semantic_publication_reclaims_unreachable_vectors(
     def embed(texts):
         return [vector for _ in texts]
 
-    index_embeddings(postgres_connection, embed)
+    index_embeddings(postgres_connection, embed, chunker=_single_chunks)
     eligible = [
         message
         for message in messages
@@ -465,7 +486,7 @@ def test_successful_semantic_publication_reclaims_unreachable_vectors(
     retained = eligible[0]
     replace_messages(postgres_connection, (retained,))
 
-    index_embeddings(postgres_connection, embed)
+    index_embeddings(postgres_connection, embed, chunker=_single_chunks)
 
     assert (
         next(
@@ -478,7 +499,7 @@ def test_successful_semantic_publication_reclaims_unreachable_vectors(
     assert (
         next(
             postgres_connection.execute(
-                "SELECT count(*) FROM cc_search_chats.message_embedding_current"
+                "SELECT count(*) FROM cc_search_chats.semantic_chunk_current"
             )
         )[0]
         == 1

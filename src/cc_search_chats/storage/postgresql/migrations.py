@@ -24,6 +24,7 @@ _MIGRATIONS = (
     Migration(2, "refresh_schema.sql"),
     Migration(3, "freshness_schema.sql"),
     Migration(4, "coverage_schema.sql"),
+    Migration(5, "semantic_chunk_schema.sql"),
 )
 
 
@@ -353,7 +354,11 @@ def prune_legacy_snapshots(
                            FROM cc_search_chats.physical_alias_current)
                       AND semantic_generation.embedded_count =
                           (SELECT count(*)
-                           FROM cc_search_chats.message_embedding_current)
+                           FROM cc_search_chats.semantic_chunk_current AS chunk
+                           JOIN cc_search_chats.embedding_value AS value
+                             ON (value.profile_id, value.input_digest) =
+                                (chunk.profile_id, chunk.input_digest)
+                           WHERE chunk.profile_id = semantic_generation.profile_id)
                 )
                 """,
                 (

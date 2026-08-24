@@ -11,6 +11,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 
 from cc_search_chats.cli import main
+from cc_search_chats.semantic import SemanticChunk
 
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
@@ -112,6 +113,10 @@ def _progress_events(stderr: str) -> list[dict[str, object]]:
     assert sum(event["event"] == "terminal" for event in events) == 1
     assert events[-1]["event"] == "terminal"
     return events
+
+
+def _single_chunks(texts):
+    return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
 
 
 def test_postgresql_cli_journey(
@@ -245,6 +250,7 @@ def test_postgresql_cli_journey(
 
     monkeypatch.setattr("cc_search_chats.cli.embed_passages", embed_passages)
     monkeypatch.setattr("cc_search_chats.cli.embed_query", embed_query)
+    monkeypatch.setattr("cc_search_chats.cli.chunk_passages", _single_chunks)
     code, initial_hybrid = _run(
         monkeypatch,
         capsys,

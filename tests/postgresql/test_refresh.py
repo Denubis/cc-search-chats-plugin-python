@@ -1326,7 +1326,12 @@ def test_direct_semantic_index_waits_for_the_shared_index_owner(
             "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
             (_INDEX_QUEUE_LOCK,),
         )
-        pending = executor.submit(index_embeddings, waiter, lambda texts: [])
+        pending = executor.submit(
+            index_embeddings,
+            waiter,
+            lambda texts: [],
+            chunker=lambda texts: (),
+        )
         deadline = time.monotonic() + 1
         queued = False
         while time.monotonic() < deadline and not pending.done():

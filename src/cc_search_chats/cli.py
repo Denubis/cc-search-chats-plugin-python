@@ -42,7 +42,12 @@ from cc_search_chats.output import (
 )
 from cc_search_chats.providers.source_discovery import configured_source_roots
 from cc_search_chats.queueing import client_admission
-from cc_search_chats.semantic import ModelUnavailable, embed_passages, embed_query
+from cc_search_chats.semantic import (
+    ModelUnavailable,
+    chunk_passages,
+    embed_passages,
+    embed_query,
+)
 from cc_search_chats.storage.index import (
     ProjectRebuildError,
     close_db,
@@ -632,15 +637,13 @@ def _handle_postgres(
                         """
                         SELECT cs.current_revision_id, sr.semantic_revision_id,
                                COALESCE(sr.completed, 0),
-                               (SELECT count(*)
-                                FROM cc_search_chats.message_current AS m
-                                WHERE m.content_class = 'prose'
-                                  AND m.prose_content ~ '[^[:space:]]'),
+                               COALESCE(sr.total, 0),
                                COALESCE(sr.selected, false)
                         FROM cc_search_chats.corpus_state AS cs
                         LEFT JOIN LATERAL (
                             SELECT r.semantic_revision_id,
-                                   r.embedded_count AS completed,
+                                   r.completed_units AS completed,
+                                   r.total_units AS total,
                                    ss.current_semantic_revision_id =
                                        r.semantic_revision_id AS selected
                             FROM cc_search_chats.semantic_revision AS r
@@ -782,6 +785,7 @@ def _handle_postgres(
                     vector_count = index_embeddings(
                         connection,
                         passage_embed,
+                        chunker=chunk_passages,
                         progress=embedding_progress,
                     )
                 progress_stream.emit(
@@ -1116,6 +1120,7 @@ def _handle_postgres(
                 embedded_count = index_embeddings(
                     connection,
                     search_passage_embed,
+                    chunker=chunk_passages,
                     progress=search_embedding_progress,
                 )
             progress_stream.emit(
@@ -1188,6 +1193,7 @@ def _handle_postgres(
                     "semantic_rank": hybrid_ranking.semantic_rank,
                     "literal_score": hybrid_ranking.literal_score,
                     "semantic_score": hybrid_ranking.semantic_score,
+                    "semantic_chunk_ordinal": (hybrid_ranking.semantic_chunk_ordinal),
                     "tie_breaker": "canonical_locator",
                 }
                 if hybrid_ranking is not None

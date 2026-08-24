@@ -31,7 +31,6 @@ from cc_search_chats.storage.postgresql.semantic import (
     HybridHit,
     hybrid_search,
     index_embeddings,
-    replace_embeddings,
     semantic_search,
 )
 
@@ -55,7 +54,6 @@ __all__ = [
     "list_sessions",
     "migrate",
     "refresh_native_sources",
-    "replace_embeddings",
     "replace_messages",
     "resolve_message",
     "resolve_exact_messages",

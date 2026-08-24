@@ -1423,17 +1423,6 @@ def _publish_staged_refresh(
         )
         connection.execute(
             """
-            DELETE FROM cc_search_chats.message_embedding_current AS embedding
-            USING cc_search_chats.message_current AS message
-            WHERE (embedding.provider, embedding.source_session_id,
-                   embedding.logical_message_id, embedding.content_class) =
-                  (message.provider, message.source_session_id,
-                   message.logical_message_id, message.content_class)
-              AND embedding.input_digest <> message.embedding_input_digest
-            """
-        )
-        connection.execute(
-            """
             DELETE FROM cc_search_chats.source_file_current AS current
             USING pg_temp.refresh_stage_removed AS removed
             WHERE (current.source_root_id, current.source_file_relative) =

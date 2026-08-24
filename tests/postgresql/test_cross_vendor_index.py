@@ -1,5 +1,6 @@
 """One end-to-end PostgreSQL corpus behavior for both native providers."""
 
+import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -12,7 +13,7 @@ import pytest
 from cc_search_chats.providers.claude import ClaudeSessionContext, parse_claude_session
 from cc_search_chats.providers.codex import CodexSessionContext, parse_codex_session
 from cc_search_chats.providers.source_discovery import read_bounded_jsonl
-from cc_search_chats.semantic import ModelUnavailable
+from cc_search_chats.semantic import ModelUnavailable, SemanticChunk
 from cc_search_chats.storage.postgresql import (
     context_messages,
     exhaustive_search_page,
@@ -38,6 +39,10 @@ def _read(name: str):
         source_file_relative=Path(name),
         target_size=path.stat().st_size,
     )
+
+
+def _single_chunks(texts):
+    return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
 
 
 def test_cross_vendor_messages_are_atomically_searchable(
@@ -142,7 +147,13 @@ def test_cross_vendor_messages_are_atomically_searchable(
 
     expected = sum(value.content_class == "prose" for value in prose)
     assert (
-        index_embeddings(postgres_connection, embed_passages, batch_size=2) == expected
+        index_embeddings(
+            postgres_connection,
+            embed_passages,
+            chunker=_single_chunks,
+            batch_size=2,
+        )
+        == expected
     )
     assert (
         semantic_search(postgres_connection, codex_vector, limit=1)[0].canonical_locator
@@ -153,6 +164,145 @@ def test_cross_vendor_messages_are_atomically_searchable(
     )[0]
     assert hybrid.message.canonical_locator == target
     assert hybrid.literal_rank == hybrid.semantic_rank == 1
+
+
+def test_semantic_chunks_are_profiled_reused_and_collapsed_to_one_message(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    codex_read = _read("codex_modern_primary_145.jsonl")
+    codex = parse_codex_session(
+        codex_read.envelopes,
+        context=CodexSessionContext(repository="/synthetic/repository"),
+        source_diagnostics=codex_read.diagnostics,
+    )
+    migrate(postgres_connection)
+    replace_messages(postgres_connection, codex.messages)
+
+    target_text = "modern visible assistant"
+
+    def chunks(texts):
+        values = []
+        for text in texts:
+            if text == target_text:
+                values.append(
+                    (
+                        SemanticChunk(0, 0, 2, 0, 14, "modern visible"),
+                        SemanticChunk(1, 1, 3, 7, len(text), "visible assistant"),
+                    )
+                )
+            else:
+                values.append((SemanticChunk(0, 0, 1, 0, len(text), text),))
+        return tuple(values)
+
+    target_vector = [0.0] * 1024
+    target_vector[0] = 1.0
+    other_vector = [0.0] * 1024
+    other_vector[1] = 1.0
+    embedded: list[str] = []
+
+    def embed(texts):
+        embedded.extend(texts)
+        return [target_vector if "visible" in text else other_vector for text in texts]
+
+    eligible_messages = sum(
+        message.content_class.value == "prose" and bool(message.text.strip())
+        for message in codex.messages
+    )
+    assert (
+        index_embeddings(
+            postgres_connection,
+            embed,
+            chunker=chunks,
+        )
+        == eligible_messages + 1
+    )
+    assert embedded.count("modern visible") == 1
+    assert embedded.count("visible assistant") == 1
+
+    profile = next(
+        postgres_connection.execute(
+            """
+            SELECT model_id, model_revision, dimensions, passage_prefix,
+                   query_prefix, pooling, normalized, attention_implementation,
+                   chunker_id, target_content_tokens, max_tokens, overlap_tokens
+            FROM cc_search_chats.embedding_profile
+            WHERE profile_id = 'nemotron-3-embed-8b-bf16:chunks-v1'
+            """
+        )
+    )
+    assert profile == (
+        "nvidia/Nemotron-3-Embed-8B-BF16",
+        "c44c20ab3f6b430336706847a6372de4b2eb3dbd",
+        1024,
+        "passage: ",
+        "query: ",
+        "attention-mask-mean",
+        True,
+        "sdpa",
+        "nemotron-token-chunks-768-1024-96:v1",
+        768,
+        1024,
+        96,
+    )
+    digests = {
+        digest
+        for (digest,) in postgres_connection.execute(
+            """
+            SELECT input_digest
+            FROM cc_search_chats.semantic_chunk_current
+            WHERE passage_text IN ('modern visible', 'visible assistant')
+            """
+        )
+    }
+    assert digests == {
+        hashlib.sha256(f"passage: {text}".encode()).hexdigest()
+        for text in ("modern visible", "visible assistant")
+    }
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT to_regclass('cc_search_chats.message_embedding_current')"
+            )
+        )[0]
+        is None
+    )
+
+    postgres_connection.execute(
+        """
+        UPDATE cc_search_chats.semantic_chunk_current
+        SET chunker_id = 'stale-chunker:v0'
+        WHERE passage_text = 'visible assistant'
+        """
+    )
+    with pytest.raises(ValueError, match="semantic chunks are unavailable or stale"):
+        semantic_search(postgres_connection, target_vector, limit=20)
+    embedded.clear()
+    assert (
+        index_embeddings(postgres_connection, embed, chunker=chunks)
+        == eligible_messages + 1
+    )
+    assert embedded == []
+    assert set(
+        postgres_connection.execute(
+            "SELECT DISTINCT chunker_id FROM cc_search_chats.semantic_chunk_current"
+        )
+    ) == {("nemotron-token-chunks-768-1024-96:v1",)}
+
+    hits = semantic_search(postgres_connection, target_vector, limit=20)
+    target_hits = [hit for hit in hits if hit.text == target_text]
+    assert len(target_hits) == 1
+    assert target_hits[0].semantic_chunk_ordinal == 0
+
+    embedded.clear()
+    assert (
+        index_embeddings(
+            postgres_connection,
+            embed,
+            chunker=chunks,
+        )
+        == eligible_messages + 1
+    )
+    assert embedded == []
 
 
 def test_search_scope_defaults_to_primary_prose_and_requires_agent_tool_opt_in(
@@ -282,7 +432,14 @@ def test_semantic_index_skips_blank_prose_and_resumes_failures(
         batch_sizes.append(len(texts))
         return [vector for _ in texts]
 
-    assert index_embeddings(postgres_connection, embed_batch) == eligible
+    assert (
+        index_embeddings(
+            postgres_connection,
+            embed_batch,
+            chunker=_single_chunks,
+        )
+        == eligible
+    )
     assert sum(batch_sizes) == eligible
     selected = next(
         postgres_connection.execute(
@@ -317,6 +474,7 @@ def test_semantic_index_skips_blank_prose_and_resumes_failures(
         index_embeddings(
             postgres_connection,
             fail_after_one_batch,
+            chunker=_single_chunks,
             batch_size=1,
         )
 
@@ -348,7 +506,13 @@ def test_semantic_index_skips_blank_prose_and_resumes_failures(
         return [vector for _ in texts]
 
     assert (
-        index_embeddings(postgres_connection, embed_remaining, batch_size=1) == eligible
+        index_embeddings(
+            postgres_connection,
+            embed_remaining,
+            chunker=_single_chunks,
+            batch_size=1,
+        )
+        == eligible
     )
     assert len(resumed) == eligible - 1
 
@@ -373,6 +537,7 @@ def test_semantic_worker_preserves_named_model_failure_and_records_its_phase(
         index_embeddings(
             postgres_connection,
             lambda texts: (_ for _ in ()).throw(failure),
+            chunker=_single_chunks,
         )
 
     assert raised.value is failure
@@ -426,7 +591,12 @@ def test_semantic_generation_heartbeats_during_a_long_embedding_phase(
         )
         migrate(owner)
         replace_messages(owner, parsed.messages)
-        pending = executor.submit(index_embeddings, owner, paused_embed)
+        pending = executor.submit(
+            index_embeddings,
+            owner,
+            paused_embed,
+            chunker=_single_chunks,
+        )
         assert entered.wait(timeout=1)
         try:
             building = next(
@@ -476,8 +646,18 @@ def test_semantic_generation_heartbeats_during_a_long_embedding_phase(
         ) == ("done", completed, completed, "complete")
 
 
+@pytest.mark.parametrize(
+    ("invalid_vector", "expected_error"),
+    [
+        ([1.0], "1024 dimensions"),
+        ([float("nan"), *([0.0] * 1023)], "finite"),
+        ([1.0] * 1024, "normalized"),
+    ],
+)
 def test_invalid_embedding_output_fails_generation_and_remains_retryable(
     postgres_connection: psycopg.Connection,
+    invalid_vector: list[float],
+    expected_error: str,
 ) -> None:
     read = _read("claude_primary.jsonl")
     parsed = parse_claude_session(
@@ -487,10 +667,11 @@ def test_invalid_embedding_output_fails_generation_and_remains_retryable(
     migrate(postgres_connection)
     replace_messages(postgres_connection, parsed.messages)
 
-    with pytest.raises(ValueError, match="1024 dimensions"):
+    with pytest.raises(ValueError, match=expected_error):
         index_embeddings(
             postgres_connection,
-            lambda texts: [[1.0] for _ in texts],
+            lambda texts: [invalid_vector for _ in texts],
+            chunker=_single_chunks,
         )
 
     failed = next(
@@ -511,6 +692,7 @@ def test_invalid_embedding_output_fails_generation_and_remains_retryable(
     completed = index_embeddings(
         postgres_connection,
         lambda texts: [vector for _ in texts],
+        chunker=_single_chunks,
     )
 
     assert completed > 0
