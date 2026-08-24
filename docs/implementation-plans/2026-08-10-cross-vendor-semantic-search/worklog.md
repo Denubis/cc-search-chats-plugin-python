@@ -161,3 +161,74 @@
 - Fresh evidence: `uv run --frozen pytest tests/postgresql -q` reported 47
   passed; `uv run --frozen pytest --ignore=tests/postgresql -q` reported 573
   passed; Ruff lint, Ruff format check, and ty all passed.
+
+## 2026-08-24 — Outcome 4 cross-vendor consumer contract complete
+
+- Unified PostgreSQL `search`, `list`, `extract`, `context`, `resolve`, and
+  `index` output under JSON schema version 2. Every command envelope reports a
+  terminal status plus coverage, refresh, semantic, and warning state; progress
+  is a separate ordered stderr stream with exactly one terminal event.
+- Search returns provider-qualified canonical identity and verified physical
+  aliases. Ranked hybrid results expose exact reciprocal-rank-fusion inputs;
+  ranked limits are 1–200 and component depth is bounded. Deterministic
+  exhaustive literal search pages through the database without applying the
+  ranked result limit.
+- Default search includes visible primary prose only. `--agents` adds agent and
+  unknown sessions; `--literal --tools` adds lexical tool name/input/output;
+  `--exhaustive` requires literal mode. `--everything` now exits with explicit
+  migration guidance. Reasoning, system/developer instructions, injected
+  context, and unrecognised shapes remain unavailable.
+- Exact resolution verifies native source bytes and distinguishes `resolved`,
+  `no_match`, `multiple_matches`, `source_unavailable`, `stale_source`,
+  `stale_index`, `malformed_locator`, and `unsupported_provider_schema`.
+  `--reference-only` omits message text while retaining verified identity and
+  source coordinates.
+- Positive coverage controls exercise configured/resolved roots, repositories,
+  discovered/read/indexed/skipped/excluded/removed/unreadable files, unknown
+  sessions, unrecognised records, watermarks, and partial-versus-complete state.
+  Progress covers scan, parse, FTS commit, model preflight/load, embedding,
+  semantic commit, query embedding, retrieval, heartbeat, and completion.
+- Fresh evidence on the combined Outcome 4 candidate: the non-PostgreSQL
+  partition reported 582 passed and 54 deselected; the disposable PostgreSQL 18
+  partition reported 54 passed and 582 deselected. Ruff lint, Ruff format check,
+  and ty all passed.
+
+## 2026-08-24 — Outcome 4 semantic contract correction
+
+- The preceding Outcome 4 evidence exposed a design-conformance omission before
+  handoff: semantic storage still embedded one truncated whole message instead
+  of the accepted tokenizer-aware chunk contract. That earlier candidate was
+  not installed or migrated in production.
+- Added migration 5 with the exact model revision, prefixes, pooling,
+  normalization, attention implementation, 1,024 dimensions, chunker identity,
+  768 target content tokens, 1,024 hard model-input tokens, and 96-token
+  overlap. The retired whole-message mapping is dropped by this migration.
+- Added tokenizer-aware, within-message chunks with source/token/character
+  bounds and exactly prefixed input digests. Values remain reusable by
+  profile/input digest, only missing vectors are embedded, and retrieval keeps
+  the best semantic chunk per logical message before RRF.
+- Semantic publication now validates dimensions, finiteness, unit norm, current
+  source digest, exact chunker identity, chunk/vector coverage, and the selected
+  corpus. A wrong-chunker row makes direct semantic retrieval fail and is
+  replaced on the next index pass without recomputing an already reusable
+  vector.
+
+## 2026-08-24 — Outcome 5 project truth complete
+
+- Rewrote `CLAUDE.md`, README, the search skill, and the command wrapper against
+  schema v2, PostgreSQL, search-time refresh, explicit scopes, and standard plus
+  Ponytail Claude/Codex session roots. Message attribution remains explicitly
+  deferred.
+- Added current database architecture and PostgreSQL maintenance/prune guidance.
+  The runbook separates inspection, migration, UAT, and prune authority and
+  states that no ordinary CLI prune flag exists.
+- Added a systemd environment-file seam without embedding source roots,
+  credentials, or cache overrides. Added executable guidance checks and a fish
+  parser check for the prepared four-corpus UAT script.
+- Proposed, but did not write, the only warranted project-note correction:
+  change the production-install gate's expected schema from version 1 to
+  version 2. Project-note writes still require human agreement.
+- Fresh candidate evidence: 586 non-PostgreSQL tests passed with 57 deselected;
+  57 disposable-PostgreSQL tests passed with 586 deselected. Every implemented
+  CLI help form exited successfully; the stale-claim search found only the
+  intentional `--everything` retirement and migration-history references.

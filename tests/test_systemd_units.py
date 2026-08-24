@@ -21,6 +21,20 @@ def test_nightly_refresh_is_a_low_priority_oneshot_service() -> None:
     assert "IOWeight=25" in service
 
 
+def test_nightly_refresh_reads_only_explicit_operator_configuration() -> None:
+    service = _unit("cc-search-chats-index.service")
+
+    assert "EnvironmentFile=-%h/.config/cc-search-chats/index.env" in service
+    assert "CC_SEARCH_CLAUDE_ROOT=" not in service
+    assert "CC_SEARCH_CODEX_ROOT=" not in service
+    assert "CC_SEARCH_CLAUDE_ROOTS=" not in service
+    assert "CC_SEARCH_CODEX_ROOTS=" not in service
+    assert "PGPASSWORD=" not in service
+    assert "HF_HOME=" not in service
+    assert "TORCH_HOME=" not in service
+    assert "UV_CACHE_DIR=" not in service
+
+
 def test_nightly_refresh_timer_is_persistent_and_dephased() -> None:
     timer = _unit("cc-search-chats-index.timer")
 

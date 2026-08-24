@@ -4,6 +4,7 @@ Description=Refresh the cc-search-chats index
 [Service]
 Type=oneshot
 ExecStart=%h/.local/bin/cc-search-chats index
+EnvironmentFile=-%h/.config/cc-search-chats/index.env
 Environment=CC_SEARCH_CONTAINED=1
 Nice=10
 IOSchedulingClass=idle

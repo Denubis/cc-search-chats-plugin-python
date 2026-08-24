@@ -1,76 +1,64 @@
 # cc-search-chats
 
-Search and recover context from Claude Code and Codex chat history.
+Search and recover context from native Claude Code and Codex chat history.
 
-## The Problem
+Current release: cc-search-chats 2.0.4
 
-Claude Code compresses conversation context when sessions grow large. Earlier context is summarised and the original messages become inaccessible through normal conversation. This tool recovers that content by indexing the underlying JSONL session files that Claude Code stores on disk.
+The CLI reads vendor JSONL session logs without modifying them, maintains a
+normalized PostgreSQL search projection, and supports PostgreSQL full-text
+search plus an optional local semantic model. Standard and isolated Ponytail
+session roots can participate in one corpus without sharing either runtime's
+configuration, credentials, caches, plugins, or other state.
 
 ## Installation
 
-The agent plugin and the Python CLI are separate artifacts. The plugin provides
-the search workflow, but it invokes the independently installed
-`cc-search-chats` executable. Install and verify the CLI first.
+The plugin supplies the agent workflow; it invokes an independently installed
+`cc-search-chats` executable. Python 3.14+, PostgreSQL 18, and pgvector are
+required.
 
-### 1. Install the CLI
-
-Install [uv](https://docs.astral.sh/uv/) and ensure Python 3.14 or newer is
-available. The shipped search skill uses hybrid search by default, so the
-semantic installation is recommended:
+Install the CLI with the semantic extra for default hybrid search:
 
 ```console
 uv tool install \
   'cc-search-chats[semantic] @ git+https://github.com/Denubis/cc-search-chats-plugin-python@main'
 ```
 
-For literal search without the local model runtime:
+For literal-only use:
 
 ```console
 uv tool install \
   'cc-search-chats @ git+https://github.com/Denubis/cc-search-chats-plugin-python@main'
 ```
 
-Use `--force` with the same command to replace an existing installation.
-Replace `main` with a commit hash when the machine must use an exactly pinned
-build.
-
-Verify the executable and its package version before installing the plugin:
+Pin a commit instead of `main` when reproducible installation matters. Verify
+the executable before installing either plugin:
 
 ```console
 cc-search-chats --version
-cc-search-chats 2.0.4
+cc-search-chats --help
 ```
 
-### 2. Install an agent plugin
-
-The Python CLI, Claude plugin, and Codex plugin are released together as
-`2.0.4`. Both shipped skills expect JSON `schema_version` 1.
-
-#### Claude Code
-
-Run these commands inside Claude Code:
+Claude Code plugin:
 
 ```text
 /plugin marketplace add Denubis/cc-search-chats-plugin-python
 /plugin install cc-search-chats@cc-search-chats-marketplace
 ```
 
-Or from inside Claude Code, use `/plugin` and navigate to **Discover** to browse and install.
-
-#### Codex
+Codex plugin:
 
 ```console
 codex plugin marketplace add Denubis/cc-search-chats-plugin-python --ref main
 codex plugin add cc-search-chats@cc-search-chats-marketplace
 ```
 
-Start a new Claude Code or Codex session after installing the plugin.
+Start a new agent session after installing or updating a plugin.
 
 ## PostgreSQL Setup
 
-The standard CLI uses local database `cc_search_chats` as
-`cc_search_chats_owner`. PostgreSQL 18 and pgvector must already be installed.
-As a PostgreSQL administrator, provision them once:
+The default connection is libpq service `cc_search_chats`. PostgreSQL and
+pgvector must already exist; the application creates only its own schema.
+Provision the role/database once as a PostgreSQL administrator:
 
 ```sql
 CREATE ROLE cc_search_chats_owner LOGIN;
@@ -81,12 +69,7 @@ CREATE DATABASE cc_search_chats OWNER cc_search_chats_owner;
 CREATE EXTENSION vector;
 ```
 
-Existing installations created from earlier setup instructions must also run
-the `GRANT` line once. Queued reads use this privilege to apply a
-transaction-local 64 MB temporary-file limit; it does not make
-`cc_search_chats_owner` a superuser.
-
-Configure the standard libpq service once in `~/.pg_service.conf`:
+Configure `~/.pg_service.conf`:
 
 ```ini
 [cc_search_chats]
@@ -96,222 +79,195 @@ dbname=cc_search_chats
 user=cc_search_chats_owner
 ```
 
-Store the password separately in `~/.pgpass` (mode `0600`) so cron and agents
-need no connection or password environment variables:
+Put the password in `~/.pgpass` with mode `0600`, not in the systemd unit:
 
 ```text
 127.0.0.1:5432:cc_search_chats:cc_search_chats_owner:YOUR_PASSWORD
 ```
 
-Large installations may create the database in an administrator-managed
-tablespace on external storage. The application creates only its own schema; it
-never creates roles, databases, extensions, or tablespaces.
+Large deployments should provision the database's default and temporary
+tablespaces on operator-managed external storage before the first migration.
+The CLI does not create a database, extension, tablespace, mount, or fallback
+storage location. See
+[`docs/runbooks/postgresql-index-maintenance.md`](docs/runbooks/postgresql-index-maintenance.md).
 
-Semantic search uses the pinned local `nvidia/Nemotron-3-Embed-8B-BF16`
-snapshot in the normal Hugging Face cache (`~/.cache/huggingface` or `$HF_HOME`).
-No network access is used at runtime.
+## Semantic Runtime
+
+Hybrid search uses local snapshot
+`nvidia/Nemotron-3-Embed-8B-BF16@c44c20ab3f6b430336706847a6372de4b2eb3dbd`.
+The snapshot must already be present in the configured Hugging Face cache, or
+`CC_SEARCH_MODEL_PATH` must name that exact snapshot directory. Runtime commands
+use `local_files_only=True`, do not transmit chat text, and do not download a
+model or redirect package/model caches.
+
+Visible prose is split inside each logical message into tokenizer-aware chunks:
+768 target content tokens, a 1,024-token hard input ceiling including prefix and
+special tokens, and 96-token overlap. Each prefixed chunk digest maps to one
+reusable normalized 1,024-dimensional vector. Retrieval keeps only the best
+chunk per logical message before hybrid rank fusion.
+
+If the model, dependencies, CUDA, or VRAM are unavailable, hybrid search exits
+nonzero with a named phase and a shell-safe literal fallback. Literal search
+does not load the model.
 
 ## Quick Start
 
-```bash
-# Find discussions about a topic
+```console
+# Hybrid natural-language search; refreshes changed native records first
 cc-search-chats search "database migration"
 
-# Idempotently refresh the Claude + Codex corpus and semantic vectors
-cc-search-chats index
+# Exact lexical search without the model
+cc-search-chats search "schema_migration" --literal
 
-# Inspect the resumable checkpoint
+# Include agent/unknown sessions
+cc-search-chats search "the earlier runner work" --agents
+
+# Lexical tool content; reasoning and instructions remain excluded
+cc-search-chats search "git diff" --literal --tools
+
+# Every matching prose/tool occurrence in deterministic order
+cc-search-chats search "sentinel" --literal --tools --exhaustive --json
+
+# Resolve and verify an exact native locator without returning message text
+cc-search-chats resolve CCCHAT_LOCATOR --reference-only --json
+
+# Explicit maintenance or read-only semantic checkpoint
+cc-search-chats index --json
 cc-search-chats index --status --json
-
-# Recover the most recent substantial session
-cc-search-chats extract
-
-# Get pre-compression content (epoch 0 = before compression)
-cc-search-chats extract --epoch 0
-
-# Show recent sessions
-cc-search-chats list --days 7
-
-# Context around a specific message
-cc-search-chats context MESSAGE_UUID
 ```
 
-## Commands
+`search` performs metadata discovery and incremental refresh before retrieval.
+Running `index` first is therefore unnecessary for freshness; it remains useful
+for scheduled baseline/semantic maintenance.
 
-| Command | Description | Key Flags |
-|---------|-------------|-----------|
-| `search "query"` | Hybrid PostgreSQL full-text + semantic search | `--literal`, `--provider`, `--limit`, `--json` |
-| `extract [SESSION_ID]` | Extract a conversation (auto-discovers if no ID given) | `--epoch N`, `--verbose` |
-| `list` | List sessions with metadata | `--days N`, `--project PATH` |
-| `context UUID` | Show messages around a specific message | `--depth N` |
-| `index` | Idempotently refresh Claude + Codex and resume semantic work | `--literal-only`, `--semantic-only`, `--status`, `--json` |
+## Search Scope
 
-All commands support `--json` for structured output suitable for programmatic consumption. Every payload is an object carrying `schema_version`; e.g. `search` → `results`, `list` → `sessions`.
+PostgreSQL searches all configured roots by default. Filters narrow that corpus:
 
-## How It Works
+- `--provider claude|codex`
+- `--project PATH` for exact recorded repository/cwd values
+- `--role ROLE`, `--epoch N`, and `--days N`
+- `--agents` for agent and unknown sessions
+- `--literal --tools` for persisted tool names, inputs, and outputs
 
-Chat sessions are read from Claude Code JSONL under `~/.claude/projects/` and
-Codex JSONL under `~/.codex/sessions/`.
+Default and literal ranked searches return at most `--limit` results (1–200).
+Hybrid search fuses bounded lexical and semantic component rankings with exact
+reciprocal-rank-fusion arithmetic. Only `--literal --exhaustive` claims complete
+occurrence coverage; it pages through PostgreSQL and ignores the ranked limit.
 
-**cc-search-chats** stores immutable corpus and semantic revisions in PostgreSQL,
-uses PostgreSQL full-text search and pgvector, and atomically selects complete
-revisions. Indexing commits small batches, resumes missing vectors, reuses
-unchanged vectors after refresh, and prevents concurrent workers with a
-PostgreSQL advisory lock. Every index mode automatically runs in a low-CPU,
-idle-I/O, memory- and task-bounded systemd user scope.
+No supported search mode indexes or returns reasoning/thinking, system or
+developer instructions, injected context, or unrecognized content shapes.
+`--everything` is retired and exits with migration guidance.
 
-### Refresh behavior
+## Source Roots
 
-`cc-search-chats index` is the ordinary safe refresh command for humans, cron,
-and agents. It scans both native roots, creates a new corpus revision when the
-snapshot changed, reuses identical vectors, embeds every new eligible passage,
-and atomically selects the result only when complete. With no semantic delta it
-returns without loading the model. Interrupted work resumes from committed
-batches, while the last complete revision remains searchable.
+Defaults:
 
-Progress distinguishes work already reused from work actually required:
+| Provider | Standard | Isolated root included when present |
+|---|---|---|
+| Claude | `~/.claude/projects` | `~/.claude-ponytail/projects` |
+| Codex | `~/.codex/sessions` | `~/.codex-ponytail/sessions` |
+
+Plural variables replace a provider's default collection using the platform
+path separator:
+
+```fish
+set -x CC_SEARCH_CLAUDE_ROOTS "$HOME/.claude/projects:$HOME/.claude-ponytail/projects"
+set -x CC_SEARCH_CODEX_ROOTS "$HOME/.codex/sessions:$HOME/.codex-ponytail/sessions"
+```
+
+The singular `CC_SEARCH_CLAUDE_ROOT` and `CC_SEARCH_CODEX_ROOT` remain one-root
+migration compatibility. Explicit roots fail loudly when unavailable; optional
+Ponytail defaults are included only when their session directory exists.
+
+Discovery traverses only those session directories. Equal native identities
+share one canonical message and retain each genuine physical occurrence as an
+alias; conflicting content for one identity aborts publication.
+
+## Refresh and Storage
+
+PostgreSQL stores one current canonical message row, one row per physical alias,
+one current semantic chunk row per chunk/profile, and one vector per
+profile/prefixed-input digest. Corpus and semantic generations contain bounded
+publication, progress, and failure metadata—not copies of messages, aliases, or
+vectors.
+
+Unchanged refreshes read metadata but no JSONL content bytes and create no
+generation. Same-device/inode growth reads only after the last complete-record
+watermark. Partial tails remain pending; truncation, replacement, same-size
+modification, and parser-version changes reparse the affected source from byte
+zero. Native logs are never written or locked.
+
+One PostgreSQL advisory owner serializes refresh/semantic work. Long phases
+publish owner, heartbeat, completed/total units, and named state. Committed
+literal rows remain searchable after semantic failure, while hybrid search
+refuses a stale or incomplete semantic generation.
+
+## JSON and Progress Contract
+
+The default PostgreSQL surface emits JSON schema version 2. Each `--json`
+command writes one stdout object containing:
+
+- `schema_version`, `command`, and terminal `status`
+- `coverage` with roots, repositories, file counts, diagnostics, and watermarks
+- `refresh`, `semantic`, and `warnings`
+- command-specific `results`, `sessions`, `messages`, or `resolutions`
+
+Search/extract/context/resolve messages carry provider-qualified canonical
+identity plus verified physical source coordinates. Exact resolution statuses
+are `resolved`, `no_match`, `multiple_matches`, `source_unavailable`,
+`stale_source`, `stale_index`, `malformed_locator`, and
+`unsupported_provider_schema`.
+
+Progress never contaminates JSON stdout. JSON or non-TTY execution writes
+ordered schema-v2 NDJSON events to stderr, including periodic heartbeats and
+exactly one terminal event. Use `--progress human` for concise terminal text.
+
+## Scheduled Maintenance
+
+The distribution includes a low-priority oneshot and persistent nightly timer.
+Copy them to `~/.config/systemd/user/`. Optional operator configuration belongs
+in `~/.config/cc-search-chats/index.env`, which the service reads if present.
+For example:
 
 ```text
-Semantic refresh: 256081 reused, 2143 new passages
-Semantic refresh: 256081 reused, 300 embedded, 1843 remaining, 4.8/s, ETA 6m24s
+CC_SEARCH_CLAUDE_ROOTS=/home/USER/.claude/projects:/home/USER/.claude-ponytail/projects
+CC_SEARCH_CODEX_ROOTS=/home/USER/.codex/sessions:/home/USER/.codex-ponytail/sessions
 ```
 
-An explicit `index` does not suppress real changes behind a threshold: any new
-eligible prose is indexed. Use `index --status --json` for a read-only durable
-checkpoint. Search itself does not silently start a refresh.
+Keep libpq credentials in `.pgpass` and cache configuration in the operator's
+existing environment. The packaged unit supplies neither.
 
-PostgreSQL CLI work first makes one blocking request for a local single-flight
-file lock before opening a connection. Read operations then make one blocking
-request for a transaction-scoped PostgreSQL advisory lock, and complete index
-operations hold a separate session-scoped advisory lock. Contenders sleep until
-admitted rather than rerunning database work. A killed client releases both
-locks without a lease-recovery worker or writable queue table.
-
-For integrity checks, resolve newline-delimited locators in one process, one
-connection, and one ordered database operation:
-
-```bash
-rg -o 'ccchat:v1:[^[:space:]]+' docs | cc-search-chats resolve --stdin --json
-```
-
-### Cross-Project Search
-
-PostgreSQL searches the whole indexed corpus by default. Use `--project PATH`
-only when the indexed rows show that exact path in `repository` or `cwd`;
-older Codex rows without project metadata cannot match a project filter.
-
-The index only contains projects it has already seen. To make the whole machine searchable, build the global index once:
-
-```bash
-cc-search-chats index
-```
-
-This walks both native roots. Re-runs create a fresh corpus receipt, reuse
-unchanged vectors, and resume any interrupted semantic work. The distribution
-ships `cc_search_chats/systemd/cc-search-chats-index.service` and
-`cc-search-chats-index.timer`; copy those templates into
-`~/.config/systemd/user/`, then enable the persistent nightly schedule:
-
-```bash
+```console
 systemctl --user daemon-reload
 systemctl --user enable --now cc-search-chats-index.timer
 ```
 
-The timer starts at 03:00 with up to 30 minutes of randomized delay. The
-oneshot service and the CLI both apply low CPU and idle I/O priority. No
-long-running cc-search-chats daemon is required.
+The timer runs nightly at 03:00 with up to 30 minutes randomized delay. No
+resident daemon is required.
 
-### Searching Thinking and Tool Calls
+## Recovery and Release Boundaries
 
-PostgreSQL persists conversation text, reasoning, and tool inputs/outputs. Add
-`--everything` to select literal full-content search without loading the
-embedding model:
+Native logs are the rebuild authority. Applied SQL migrations are ordered and
+checksummed; their bytes are immutable. Legacy full-snapshot relations remain
+quarantined through migration and positive four-corpus UAT. Pruning them is a
+separate human-authorized operation requiring a matching fresh dry-run,
+accepted exact-commit validation, complete current semantic join, and repeated
+post-prune checks. See the maintenance runbook and
+[`docs/uat/cross-vendor-search-wip.md`](docs/uat/cross-vendor-search-wip.md).
 
-```bash
-cc-search-chats search "that regex we tried" --everything
+Message attribution, receipt correlation, rendered archives, summaries, and
+project-note authorship are outside the search delivery.
+
+## Development
+
+```console
+uv run --frozen pytest -q -m 'not postgresql'
+uv run --frozen pytest -q -m postgresql
+uv run --frozen ruff check src tests
+uv run --frozen ruff format --check src tests
+uv run --frozen ty check src tests
 ```
-
-The legacy SQLite backend retains its slower live-scan behavior.
-
-### Epoch Model
-
-When Claude Code compresses a session, it inserts a `compact_boundary` marker. cc-search-chats uses these markers to segment sessions into **epochs**:
-
-- **Epoch 0**: Messages from before the first compression -- the "lost context" that most users want to recover
-- **Epoch 1+**: Content after each successive compression event
-
-You can filter searches and extractions to specific epochs with `--epoch N`.
-
-### Known Limitations
-
-- **Project path decoding is lossy.** Claude Code encodes project paths by replacing `/` with `-`. This encoding is not reversible when the original path contains hyphens. Project paths displayed in output may differ from the actual filesystem path in these cases.
-- **Python 3.14+ required.** The package uses language features introduced in Python 3.14.
-
-## Compression Recovery
-
-This is the primary use case. When Claude Code compresses a long session:
-
-1. The original messages are still on disk in the JSONL file
-2. Claude Code inserts a `compact_boundary` marker with metadata about how many tokens were compressed
-3. A summary of the compressed content appears in the next message
-
-To recover the pre-compression content:
-
-```bash
-# See what sessions exist
-cc-search-chats list
-
-# Extract pre-compression content from a session
-cc-search-chats extract SESSION_ID --epoch 0
-
-# Or search for specific content across all pre-compression epochs
-cc-search-chats search "that thing we discussed" --epoch 0
-```
-
-## For Subagents
-
-All commands support `--json` output for programmatic consumption. Use this when building workflows that consume search results:
-
-```bash
-# Structured search results
-cc-search-chats search "auth" --json
-
-# Structured session list
-cc-search-chats list --days 7 --json
-
-# Structured extraction
-cc-search-chats extract --json
-```
-
-JSON output includes session IDs, epoch numbers, timestamps, and message content -- everything needed to drill down further. Every `--json` payload is an object carrying `schema_version` (currently `1`): read `search` results from `.results`, `list` from `.sessions`, `extract` from `.epochs`, and `context` from `.target`/`.before`/`.after`. The search payload also carries `scope` (`local` / `widened` / `all`). Check `schema_version` before parsing — if it differs from what your consumer expects, the CLI and the consumer are out of sync. Evolution is additive within a `schema_version`, so new fields may appear over time.
-
-## Tip: Add to Your CLAUDE.md
-
-Adding a line to your project's `CLAUDE.md` makes Claude automatically use `/search-chat` when you casually reference something from a previous session:
-
-```markdown
-## Chat History
-
-When I reference a previous conversation, earlier discussion, or ask to continue/revisit a topic from another session, use `/search-chat` to find it.
-```
-
-Now you can say things like *"that staging bug from the other day"* and Claude will search your chat history instead of asking you to explain from scratch.
-
-## Requirements
-
-- Python 3.14+
-- PostgreSQL 18 with pgvector
-- A CUDA-capable GPU and the pinned local Nemotron model for semantic search
-
-Set `CC_SEARCH_DB_PATH` only to opt into the legacy SQLite implementation.
-Standard libpq variables such as `PGSERVICE` and `PGHOST`, plus
-`CC_SEARCH_MODEL_PATH` and source-root variables, remain available for
-non-default deployments.
-
-## Acknowledgements
-
-- [pcvelz/cc-search-chats-plugin](https://github.com/pcvelz/cc-search-chats-plugin) -- original bash implementation that this project is forked from
-- [akatz-ai/cc-conversation-search](https://github.com/akatz-ai/cc-conversation-search) -- validated the SQLite FTS5 + JIT indexing approach
 
 ## Licence
 

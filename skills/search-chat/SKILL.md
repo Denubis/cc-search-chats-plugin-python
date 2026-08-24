@@ -6,25 +6,24 @@ allowed-tools: ["Bash(cc-search-chats:*)"]
 
 # Search Chat History
 
-Use the PostgreSQL-backed CLI with `--json`. Check `schema_version` is `1`
-before interpreting output.
+Use the PostgreSQL-backed CLI with `--json`. Require `schema_version: 2` before
+interpreting stdout. Progress is an independent NDJSON stream on stderr.
 
 ## Execution boundary
 
-In Codex, run every `cc-search-chats` command through the harness's host
-approval or escalation mechanism on the first attempt. Do not run it in the
-sandbox first. The host PostgreSQL service, D-Bus user session, GPU, and model
-cache may be deliberately absent from a sandbox, so a failure there describes
-only that process. The configured approver decides whether host execution is
-allowed; do not bypass it or invent environment variables to reach the host.
+In Codex, request the harness's configured host approval or escalation route for
+every `cc-search-chats` invocation on the first attempt. The host PostgreSQL
+service, D-Bus user session, GPU, and configured model cache may be absent from a
+sandbox, so a sandbox failure establishes only that process's environment. Do
+not invent connection, source-root, or cache variables to bypass the boundary.
 
 Claude Code's allowed Bash invocation runs in its ordinary host environment.
-For either provider, report an environmental failure as process-scoped unless
-a host probe established the corresponding host fact.
+For either provider, report an environmental failure as process-scoped unless a
+host probe established the corresponding host fact.
 
-## Route the request
+## Choose the smallest search
 
-```bash
+```console
 # Topic or natural-language search (hybrid FTS + semantic)
 cc-search-chats search "query" --json
 
@@ -32,45 +31,67 @@ cc-search-chats search "query" --json
 cc-search-chats search "query" --literal --json
 cc-search-chats search "query" --literal --provider codex --days 7 --json
 
-# Thinking and tool calls (persisted full-content literal search)
-cc-search-chats search "query" --everything --json
+# Include agent and unknown sessions
+cc-search-chats search "query" --agents --json
 
-# Recent sessions across Claude and Codex
+# Lexical tool names/inputs/outputs; reasoning and instructions stay excluded
+cc-search-chats search "query" --literal --tools --json
+
+# Complete deterministic prose/tool occurrences rather than ranked top results
+cc-search-chats search "query" --literal --tools --exhaustive --json
+
+# Recent sessions across configured standard and Ponytail Claude/Codex roots
 cc-search-chats list --days 7 --json
 
-# Recover a session; omit ID for the most recent substantial session
-cc-search-chats extract [SESSION_ID] --json
+# Recover one session; qualify collisions with --provider
+cc-search-chats extract [SESSION_ID] --provider codex --json
 
-# Surrounding messages from a search-result locator
+# Verify and follow a search-result locator
+cc-search-chats resolve CCCHAT_LOCATOR --reference-only --json
 cc-search-chats context CCCHAT_LOCATOR --depth 10 --json
 
-# Exact resolution of a durable locator
-cc-search-chats resolve CCCHAT_LOCATOR --json
-
-# Idempotent refresh, or inspect a resumable semantic checkpoint
+# Explicit maintenance or read-only semantic checkpoint
 cc-search-chats index --json
 cc-search-chats index --status --json
 ```
 
-Run `index` when freshness matters or the newest indexed session predates the
-requested conversation. It is idempotent, reuses unchanged vectors, resumes
-interruptions, and reports reused/new/remaining work with an ETA. A miss alone
-still merits trying alternative terms or `--literal` before refreshing.
-Do not add `--project` unless `list` shows the desired path; older Codex rows
-may have no project metadata and therefore cannot match that filter.
+Search already performs metadata discovery and incremental refresh before
+retrieval. Use `index` for explicit baseline/semantic maintenance, not as the
+automatic response to a miss. A miss merits alternate terms, `--literal`, and
+careful filter review. Add `--project` only when `list` or prior results show the
+exact recorded repository/cwd; missing project metadata cannot match it.
 
-## Interpret output
+Default search is visible primary-session prose. `--agents` adds agent and
+unknown sessions. `--tools` requires `--literal`; `--exhaustive` also requires
+literal mode and is the only complete occurrence mode. Ranked results are
+bounded top results. No flag exposes reasoning/thinking, system/developer
+instructions, injected context, or unrecognized record shapes.
 
-- `search`: read `results`; show provider, session ID, timestamp, role, text,
-  and locator. Offer `context` or `extract` for follow-up.
-- `list`: read `sessions`; show provider, session ID, kind, latest timestamp,
-  message count, repository, and cwd.
-- `extract`, `context`, `resolve`: read `messages` in order.
-- `index --status`: read `completed`, `total`, and `selected`.
+## Interpret schema v2
 
-Always retain provider-qualified session IDs and `ccchat:v1:` locators. A
-vendor `role=user` does not prove human authorship; use `submitted_by` only when
-the result provides positive provenance.
+Every command object contains `command`, terminal `status`, `coverage`,
+`refresh`, `semantic`, and `warnings`.
 
-If `schema_version` is missing or not `1`, stop and report that the plugin and
-CLI are out of sync.
+- `search`: read `results`; retain `identity.provider`,
+  `identity.source_session_id`, `identity.canonical_locator`, physical aliases,
+  timestamp, role, session kind, content class, text, and ranking evidence.
+- `list`: read `sessions`; retain provider, source session ID, kind, latest
+  timestamp, message count, repository, and cwd.
+- `extract` and `context`: read ordered `messages`.
+- Single `resolve`: read `status` and `messages`; batched `resolve --stdin` reads
+  `resolutions` in input order. `--reference-only` deliberately omits text.
+- `index --status`: read `completed`, `total`, `selected`, and the shared
+  semantic/refresh objects.
+
+Treat `coverage.completeness != "complete"`, unreadable files, pending bytes,
+unrecognized records, warnings, or stale semantic state as evidence limits—not
+as a clean absence result. An empty result is meaningful only after the searched
+roots, filters, freshness, and positive controls are established.
+
+Exact resolution statuses are `resolved`, `no_match`, `multiple_matches`,
+`source_unavailable`, `stale_source`, `stale_index`, `malformed_locator`, and
+`unsupported_provider_schema`. Report the status rather than turning every
+non-result into “not found.”
+
+If `schema_version` is missing or not `2`, stop: the plugin instructions and CLI
+are out of sync.

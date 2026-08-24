@@ -7,23 +7,32 @@ allowed-tools: ["Bash(cc-search-chats:*)"]
 
 **Request:** $ARGUMENTS
 
-Use `cc-search-chats` with `--json` and require `schema_version: 1`.
-When the caller is sandboxed, request the configured host approval route on the
-first attempt; do not infer host PostgreSQL, D-Bus, or CUDA state from a
-sandboxed failure, and do not invent connection or cache environment variables.
+Use `cc-search-chats --json` and require `schema_version: 2`. In a sandboxed
+caller, request the configured host approval route on the first attempt; do not
+infer host PostgreSQL, D-Bus, CUDA, or model-cache state from a sandbox failure,
+and do not invent connection or cache environment variables.
 
 - Topic: `cc-search-chats search "QUERY" --json`
 - Exact/filter search: `cc-search-chats search "QUERY" --literal --json`
-- Thinking/tool search: `cc-search-chats search "QUERY" --everything --json`
+- Agent/unknown sessions: `cc-search-chats search "QUERY" --agents --json`
+- Tool content: `cc-search-chats search "QUERY" --literal --tools --json`
+- Complete occurrences: `cc-search-chats search "QUERY" --literal --tools --exhaustive --json`
 - Recent sessions: `cc-search-chats list --days 7 --json`
-- Recover: `cc-search-chats extract [SESSION_ID] --json`
+- Recover: `cc-search-chats extract [SESSION_ID] --provider PROVIDER --json`
+- Verify a result: `cc-search-chats resolve CCCHAT_LOCATOR --reference-only --json`
 - Follow a result: `cc-search-chats context CCCHAT_LOCATOR --depth 10 --json`
-- Reindex: `cc-search-chats index --json`
-- Index progress: `cc-search-chats index --status --json`
+- Explicit maintenance: `cc-search-chats index --json`
+- Semantic checkpoint: `cc-search-chats index --status --json`
 
-Search results are in `results`; list results in `sessions`; extract/context/
-resolve results in `messages`. Include provider, session ID, timestamp, and the
-durable `ccchat:v1:` locator when presenting matches. Run the idempotent index
-when freshness matters; a miss alone merits alternative terms or `--literal`
-first. Do not pin `--project` unless `list` shows that exact repository/cwd;
-older Codex rows may not carry project metadata.
+Search refreshes changed native records before retrieval. A miss merits alternate
+terms, `--literal`, and filter review before explicit maintenance. Default search
+contains visible primary prose from configured standard and Ponytail roots;
+`--agents` adds agent/unknown sessions;
+`--literal --tools` adds tool content. Reasoning, instructions, injected context,
+and unrecognized shapes are unavailable.
+
+Read `results`, `sessions`, `messages`, or batched `resolutions` as appropriate.
+Retain provider-qualified native identity and `ccchat:v1:` locators when
+presenting matches. Check `coverage`, `refresh`, `semantic`, `warnings`, and the
+terminal `status`; an empty result is not proof of absence when coverage is
+partial or filters exclude the intended corpus.

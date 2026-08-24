@@ -18,6 +18,9 @@ ANTIGRAVITY_MANIFEST = REPO_ROOT / "plugin.json"
 CODEX_RULE = REPO_ROOT / "rules" / "cc-search-chats.rules"
 CODEX_RULE_INSTALLER = REPO_ROOT / "scripts" / "install_codex_rule.py"
 EXPECTED_CLI_VERSION = "2.0.4"
+SEARCH_SKILL = REPO_ROOT / "skills" / "search-chat" / "SKILL.md"
+SEARCH_COMMAND = REPO_ROOT / "commands" / "search-chat.md"
+SEARCH_UAT = REPO_ROOT / "docs" / "uat" / "cross-vendor-search-wip.md"
 
 
 def test_cli_release_version_is_synchronized() -> None:
@@ -91,6 +94,48 @@ def test_search_skill_has_intentional_codex_discovery_metadata() -> None:
     assert 25 <= len(metadata["interface"]["short_description"]) <= 64
     assert "$search-chat" in metadata["interface"]["default_prompt"]
     assert metadata["policy"] == {"allow_implicit_invocation": True}
+
+
+def test_search_guidance_describes_the_v2_cross_vendor_contract() -> None:
+    documents = {
+        "README": (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
+        "CLAUDE": (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8"),
+        "skill": SEARCH_SKILL.read_text(encoding="utf-8"),
+        "command": SEARCH_COMMAND.read_text(encoding="utf-8"),
+    }
+
+    for name, document in documents.items():
+        schema_markers = ("schema version 2", "schema v2", "`schema_version: 2`")
+        assert any(marker in document.lower() for marker in schema_markers), name
+        assert "PostgreSQL" in document, name
+        assert "Ponytail" in document, name
+        assert "--literal" in document, name
+        assert "--tools" in document, name
+        assert "--exhaustive" in document, name
+
+    assert (
+        "Search refreshes changed native records before retrieval"
+        in documents["command"]
+    )
+    assert "Search already performs metadata discovery" in documents["skill"]
+    assert "--everything` is retired" in documents["README"]
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish is unavailable")
+def test_cross_vendor_uat_fish_script_has_valid_syntax() -> None:
+    document = SEARCH_UAT.read_text(encoding="utf-8")
+    fence_start = document.index("```fish\n") + len("```fish\n")
+    script_start = document.index("```fish\n", fence_start) + len("```fish\n")
+    script_end = document.index("\n```", script_start)
+    script = document[script_start:script_end]
+
+    subprocess.run(
+        ["fish", "--no-execute"],
+        input=script,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.mark.skipif(shutil.which("codex") is None, reason="Codex CLI is unavailable")
