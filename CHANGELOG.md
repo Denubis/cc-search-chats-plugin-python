@@ -1,5 +1,29 @@
 # Changelog
 
+## cc-search-chats 2.0.5
+
+Adds incremental cross-vendor PostgreSQL search across standard and isolated
+Ponytail Claude/Codex session corpora.
+
+**New:**
+- JSON schema version 2 unifies search, list, extract, context, resolve, and
+  index output with explicit coverage, freshness, progress, and exact native
+  locators.
+- Tokenizer-aware Nemotron passage chunks use the pinned model profile and
+  collapse to one logical-message result before hybrid rank fusion.
+- Explicit agent, tool-content, and exhaustive-literal scopes replace the
+  retired reasoning-inclusive `--everything` behavior.
+
+**Changed:**
+- Search incrementally refreshes changed native records before retrieval;
+  unchanged files require metadata checks but no JSONL content reads.
+- Current messages, physical aliases, and reusable vectors are normalized
+  instead of copied into every corpus or semantic generation.
+- The nightly systemd unit can read operator-owned source-root configuration
+  from `%h/.config/cc-search-chats/index.env`.
+- The lockfile records the configured rolling 14-day release cutoff; the
+  semantic extra consequently resolves Transformers 5.14.1.
+
 ## cc-search-chats 2.0.4
 
 Repairs ad-hoc index containment on systemd scope units while preserving idle
