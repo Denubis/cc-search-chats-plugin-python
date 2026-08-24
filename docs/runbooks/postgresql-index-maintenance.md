@@ -49,7 +49,7 @@ or model location.
 Confirm the runtime connection without exposing its password:
 
 ```console
-pg_isready --service=cc_search_chats
+pg_isready -d 'service=cc_search_chats'
 cc-search-chats index --status --json
 ```
 

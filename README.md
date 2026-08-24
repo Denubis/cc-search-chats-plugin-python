@@ -131,6 +131,9 @@ cc-search-chats search "sentinel" --literal --tools --exhaustive --json
 # Resolve and verify an exact native locator without returning message text
 cc-search-chats resolve CCCHAT_LOCATOR --reference-only --json
 
+# Export canonical human-message points from a half-open UTC window, without bodies
+cc-search-chats events --from 2026-01-01T00:00:00Z --until 2027-01-01T00:00:00Z --json
+
 # Explicit maintenance or read-only semantic checkpoint
 cc-search-chats index --json
 cc-search-chats index --status --json
@@ -211,13 +214,20 @@ command writes one stdout object containing:
 - `schema_version`, `command`, and terminal `status`
 - `coverage` with roots, repositories, file counts, diagnostics, and watermarks
 - `refresh`, `semantic`, and `warnings`
-- command-specific `results`, `sessions`, `messages`, or `resolutions`
+- command-specific `results`, `sessions`, `messages`, `resolutions`, or `events`
 
 Search/extract/context/resolve messages carry provider-qualified canonical
 identity plus verified physical source coordinates. Exact resolution statuses
 are `resolved`, `no_match`, `multiple_matches`, `source_unavailable`,
 `stale_source`, `stale_index`, `malformed_locator`, and
 `unsupported_provider_schema`.
+
+`events` is a read-only export from the selected corpus revision. Its required
+timezone-aware `--from` and `--until` bounds are half-open. It emits no message
+bodies: retained rows contain canonical locator, UTC timestamp, provider,
+session kind, cwd/repository provenance, and physical-alias count. Its positive
+population block separately reconciles scanned content rows and logical
+messages with retained, excluded, and unresolved authorship counts.
 
 Progress never contaminates JSON stdout. JSON or non-TTY execution writes
 ordered schema-v2 NDJSON events to stderr, including periodic heartbeats and

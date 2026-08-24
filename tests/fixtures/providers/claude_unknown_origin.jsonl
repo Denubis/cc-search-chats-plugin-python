@@ -1,0 +1,1 @@
+{"type":"user","uuid":"claude-unknown-user-1","sessionId":"claude-session-unknown","timestamp":"2026-08-11T04:30:01Z","cwd":"/synthetic/unmapped","isSidechain":true,"message":{"role":"user","content":"visible but origin-ambiguous user"}}

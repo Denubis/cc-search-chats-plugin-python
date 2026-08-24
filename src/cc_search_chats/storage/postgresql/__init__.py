@@ -1,5 +1,11 @@
 """PostgreSQL-backed cross-vendor chat index."""
 
+from cc_search_chats.storage.postgresql.events import (
+    EventExport,
+    EventPopulation,
+    HumanMessageEvent,
+    export_human_message_events,
+)
 from cc_search_chats.storage.postgresql.index import (
     ExhaustiveCursor,
     ExhaustivePage,
@@ -35,6 +41,8 @@ from cc_search_chats.storage.postgresql.semantic import (
 )
 
 __all__ = [
+    "EventExport",
+    "EventPopulation",
     "ExhaustiveCursor",
     "ExhaustivePage",
     "ExactResolution",
@@ -43,11 +51,13 @@ __all__ = [
     "RefreshResult",
     "RefreshProgress",
     "HybridHit",
+    "HumanMessageEvent",
     "StoredMessage",
     "StoredAlias",
     "StoredSession",
     "context_messages",
     "extract_session",
+    "export_human_message_events",
     "exhaustive_search_page",
     "hybrid_search",
     "index_embeddings",

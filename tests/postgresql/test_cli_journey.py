@@ -119,7 +119,7 @@ def _single_chunks(texts):
     return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
 
 
-def test_postgresql_cli_journey(
+def test_postgresql_cli_journey_with_events(
     postgres_cluster,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -138,9 +138,19 @@ def test_postgresql_cli_journey(
             claude_root / "claude-session-primary.jsonl",
         )
     )
+    claude_agent_dir = claude_root / "parent-session" / "subagents"
+    claude_agent_dir.mkdir(parents=True)
+    shutil.copy(
+        FIXTURES / "claude_agent.jsonl",
+        claude_agent_dir / "claude-agent-session.jsonl",
+    )
     shutil.copy(
         FIXTURES / "codex_modern_primary_145.jsonl",
         codex_day / "rollout-modern.jsonl",
+    )
+    shutil.copy(
+        FIXTURES / "claude_unknown_origin.jsonl",
+        claude_root / "claude-session-unknown.jsonl",
     )
     connection = conninfo_to_dict(postgres_cluster.dsn)
     for variable, key in (
@@ -160,16 +170,19 @@ def test_postgresql_cli_journey(
     coverage = indexed_payload["coverage"]
     assert coverage["configured_root_count"] == 2
     assert coverage["resolved_root_count"] == 2
-    assert coverage["discovered_files"] == 2
-    assert coverage["read_files"] == 2
-    assert coverage["indexed_files"] == 2
+    assert coverage["discovered_files"] == 4
+    assert coverage["read_files"] == 4
+    assert coverage["indexed_files"] == 4
     assert coverage["skipped_files"] == 0
     assert coverage["excluded_files"] == 0
     assert coverage["unreadable_files"] == 0
-    assert coverage["unknown_sessions"] == 0
+    assert coverage["unknown_sessions"] == 1
     assert coverage["unrecognized_conversation_records"] == 0
-    assert coverage["repositories"] == ["/synthetic/repository"]
-    assert len(coverage["source_watermarks"]) == 2
+    assert coverage["repositories"] == [
+        "/synthetic/repository",
+        "/synthetic/unmapped",
+    ]
+    assert len(coverage["source_watermarks"]) == 4
     assert coverage["completeness"] == "complete"
     index_progress = _progress_events(indexed.err)
     assert {event["phase"] for event in index_progress} >= {
@@ -182,6 +195,90 @@ def test_postgresql_cli_journey(
     assert index_progress[-1]["coverage"] == indexed_payload["coverage"]
     assert index_progress[-1]["refresh"] == indexed_payload["refresh"]
     assert index_progress[-1]["semantic"] == indexed_payload["semantic"]
+
+    code, exported = _run(
+        monkeypatch,
+        capsys,
+        "events",
+        "--from",
+        "2026-08-11T00:00:00Z",
+        "--until",
+        "2026-08-12T00:00:00Z",
+        "--json",
+    )
+    assert code == 0
+    exported_payload = json.loads(exported.out)
+    _assert_v2_envelope(exported_payload, "events")
+    assert exported_payload["window"] == {
+        "from_utc": "2026-08-11T00:00:00Z",
+        "until_utc": "2026-08-12T00:00:00Z",
+    }
+    assert exported_payload["source_revision"] == indexed_payload["revision_id"]
+    assert exported_payload["population"] == {
+        "scanned_content_rows": 13,
+        "scanned_logical_messages": 11,
+        "retained": 2,
+        "excluded": 8,
+        "unresolved": 1,
+        "excluded_by_reason": {
+            "identified_harness": 1,
+            "non_prose": 1,
+            "non_user_role": 6,
+        },
+        "unresolved_by_reason": {"unknown_authorship": 1},
+        "content_rows_by_class": {
+            "prose": 10,
+            "tool_input": 1,
+            "tool_name": 1,
+            "tool_output": 1,
+        },
+    }
+    events = exported_payload["events"]
+    assert len(events) == 2
+    assert all(
+        set(event)
+        == {
+            "event_id",
+            "occurred_at_utc",
+            "canonical_locator",
+            "provider",
+            "source_session_id",
+            "session_kind",
+            "cwd",
+            "repository",
+            "submitted_by",
+            "retention_status",
+            "physical_alias_count",
+            "source_revision",
+        }
+        for event in events
+    )
+    assert [event["submitted_by"] for event in events] == ["human", "human"]
+    assert [event["retention_status"] for event in events] == [
+        "retained",
+        "retained",
+    ]
+    assert [event["physical_alias_count"] for event in events] == [1, 2]
+    assert all(
+        event["source_revision"] == indexed_payload["revision_id"] for event in events
+    )
+    assert "visible primary user" not in exported.out
+    assert "modern visible user" not in exported.out
+
+    code, bounded_export = _run(
+        monkeypatch,
+        capsys,
+        "events",
+        "--from",
+        "2026-08-11T03:00:02Z",
+        "--until",
+        "2026-08-11T03:00:03Z",
+        "--json",
+    )
+    assert code == 0
+    bounded_payload = json.loads(bounded_export.out)
+    assert [event["provider"] for event in bounded_payload["events"]] == ["codex"]
+    assert bounded_payload["population"]["retained"] == 1
 
     appended = {
         "type": "assistant",

@@ -11,7 +11,12 @@ objects, which support dict-like access) and produce output strings.
 import json
 import re
 import sqlite3
+from datetime import UTC, datetime
 from string.templatelib import Interpolation, Template
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cc_search_chats.storage.postgresql.events import EventExport
 
 # Version of the --json output contract. Every JSON payload carries this as
 # `schema_version`. Evolve the JSON additively (add fields; never remove,
@@ -480,3 +485,46 @@ def json_index_all_result(counts: dict[str, int]) -> str:
         indent=2,
         ensure_ascii=False,
     )
+
+
+def _utc_json(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def event_export_payload(export: EventExport) -> dict[str, object]:
+    """Render the content-free event fields owned by the PostgreSQL export."""
+    population = export.population
+    return {
+        "window": {
+            "from_utc": _utc_json(export.from_utc),
+            "until_utc": _utc_json(export.until_utc),
+        },
+        "source_revision": export.source_revision,
+        "population": {
+            "scanned_content_rows": population.scanned_content_rows,
+            "scanned_logical_messages": population.scanned_logical_messages,
+            "retained": population.retained,
+            "excluded": population.excluded,
+            "unresolved": population.unresolved,
+            "excluded_by_reason": population.excluded_by_reason,
+            "unresolved_by_reason": population.unresolved_by_reason,
+            "content_rows_by_class": population.content_rows_by_class,
+        },
+        "events": [
+            {
+                "event_id": event.event_id,
+                "occurred_at_utc": _utc_json(event.occurred_at_utc),
+                "canonical_locator": event.canonical_locator,
+                "provider": event.provider,
+                "source_session_id": event.source_session_id,
+                "session_kind": event.session_kind,
+                "cwd": event.cwd,
+                "repository": event.repository,
+                "submitted_by": event.submitted_by,
+                "retention_status": event.retention_status,
+                "physical_alias_count": event.physical_alias_count,
+                "source_revision": export.source_revision,
+            }
+            for event in export.events
+        ],
+    }

@@ -29,6 +29,7 @@ from cc_search_chats.core.discovery import (
 )
 from cc_search_chats.core.identity import ResolutionStatus
 from cc_search_chats.output import (
+    event_export_payload,
     format_context,
     format_extract,
     format_search_results,
@@ -71,6 +72,7 @@ from cc_search_chats.storage.postgresql import (
     StoredAlias,
     StoredMessage,
     exhaustive_search_page,
+    export_human_message_events,
     index_embeddings,
     refresh_native_sources,
     resolve_exact_messages,
@@ -811,6 +813,30 @@ def _handle_postgres(
                 )
             return 0
 
+        if args.command == "events":
+            export = export_human_message_events(
+                connection,
+                from_utc=_parse_utc_bound(args.from_utc),
+                until_utc=_parse_utc_bound(args.until_utc),
+            )
+            payload = event_export_payload(export)
+            envelope = finish(
+                "events",
+                window=payload["window"],
+                source_revision=payload["source_revision"],
+                population=payload["population"],
+                events=payload["events"],
+            )
+            if args.json:
+                print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
+            else:
+                population = export.population
+                print(
+                    f"Retained {population.retained} human events from "
+                    f"{population.scanned_logical_messages} canonical messages"
+                )
+            return 0
+
         if args.command == "list":
             sessions = pg_list_sessions(
                 connection,
@@ -1256,6 +1282,16 @@ def _since_days(days: int | None) -> str | None:
     return (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
 
+def _parse_utc_bound(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"invalid event timestamp bound: {value}") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("event timestamp bounds must include a timezone")
+    return parsed.astimezone(UTC)
+
+
 def _resolve_project(args: argparse.Namespace) -> str:
     """Resolve the project path from args or cwd."""
     if hasattr(args, "project") and args.project is not None:
@@ -1677,6 +1713,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_parser.set_defaults(func=_handle_list)
 
+    events_parser = subparsers.add_parser(
+        "events",
+        help="export bounded canonical human-message events without content",
+        parents=[common_parser],
+    )
+    events_parser.add_argument(
+        "--from",
+        dest="from_utc",
+        required=True,
+        help="inclusive ISO 8601 timestamp with timezone",
+    )
+    events_parser.add_argument(
+        "--until",
+        dest="until_utc",
+        required=True,
+        help="exclusive ISO 8601 timestamp with timezone",
+    )
+    events_parser.set_defaults(func=None)
+
     # index
     index_parser = subparsers.add_parser(
         "index",
@@ -1788,7 +1843,15 @@ def main() -> None:
         if not args.exhaustive and not 1 <= args.limit <= 200:
             parser.error("--limit must be between 1 and 200 for ranked search")
 
-    postgres_commands = {"index", "search", "list", "extract", "context", "resolve"}
+    postgres_commands = {
+        "index",
+        "search",
+        "list",
+        "events",
+        "extract",
+        "context",
+        "resolve",
+    }
     postgres = (
         args.command in postgres_commands and "CC_SEARCH_DB_PATH" not in os.environ
     )

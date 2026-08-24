@@ -44,6 +44,10 @@ They do not use the operator's production database.
 - `resolve` verifies exact `ccchat:v1:` locators against native source bytes.
   `--reference-only` retains verified identity and coordinates while omitting
   text.
+- `events` reads the selected corpus revision inside required half-open,
+  timezone-aware bounds. It exports canonical human-message timestamps and
+  provenance without message bodies, plus positive retained, excluded, and
+  unresolved population counts.
 - PostgreSQL JSON stdout uses schema version 2. Every command returns an object
   with `command`, `status`, `coverage`, `refresh`, `semantic`, and `warnings`.
   JSON/non-TTY progress is ordered NDJSON on stderr and ends with one terminal
@@ -71,7 +75,8 @@ locks, or runtime state.
 - `src/cc_search_chats/providers/` — native-source discovery and provider schema
   adapters
 - `src/cc_search_chats/storage/postgresql/` — checksummed migrations, canonical
-  current rows, incremental refresh, exact resolution, and semantic retrieval
+  current rows, incremental refresh, bounded event export, exact resolution,
+  and semantic retrieval
 - `src/cc_search_chats/semantic/` — local-only model preflight and embedding
 - `src/cc_search_chats/cli.py` — imperative shell and v2 output/progress contract
 - `skills/search-chat/` and `commands/search-chat.md` — agent consumers

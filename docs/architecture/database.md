@@ -71,6 +71,15 @@ indexed identity/aliases, reads the bounded native record, verifies its digest
 and provider schema, and returns a named outcome. Ranked search is never exact
 evidence.
 
+The read-only `events` projection groups content-class rows by canonical
+logical identity inside a half-open, timezone-aware window. Primary-session
+user prose is positive human evidence; identified harness submissions and
+non-user/non-prose messages are excluded, while user prose from unknown session
+origins remains unresolved. Retained events contain no prose and are pinned to
+the selected corpus revision. Raw content-row counts, logical-message counts,
+physical-alias counts, and exclusion/unresolved reasons make replay dedupe and
+the human boundary auditable.
+
 ## Refresh publication
 
 Discovery stats every configured session file. Unchanged sources do not read
