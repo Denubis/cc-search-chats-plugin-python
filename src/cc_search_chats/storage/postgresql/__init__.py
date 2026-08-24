@@ -1,11 +1,15 @@
 """PostgreSQL-backed cross-vendor chat index."""
 
 from cc_search_chats.storage.postgresql.index import (
+    ExhaustiveCursor,
+    ExhaustivePage,
     MessageResolution,
     SearchHit,
+    StoredAlias,
     StoredMessage,
     StoredSession,
     context_messages,
+    exhaustive_search_page,
     extract_session,
     list_sessions,
     migrate,
@@ -19,6 +23,10 @@ from cc_search_chats.storage.postgresql.refresh import (
     RefreshResult,
     refresh_native_sources,
 )
+from cc_search_chats.storage.postgresql.resolution import (
+    ExactResolution,
+    resolve_exact_messages,
+)
 from cc_search_chats.storage.postgresql.semantic import (
     HybridHit,
     hybrid_search,
@@ -28,15 +36,20 @@ from cc_search_chats.storage.postgresql.semantic import (
 )
 
 __all__ = [
+    "ExhaustiveCursor",
+    "ExhaustivePage",
+    "ExactResolution",
     "SearchHit",
     "MessageResolution",
     "RefreshResult",
     "RefreshProgress",
     "HybridHit",
     "StoredMessage",
+    "StoredAlias",
     "StoredSession",
     "context_messages",
     "extract_session",
+    "exhaustive_search_page",
     "hybrid_search",
     "index_embeddings",
     "list_sessions",
@@ -45,6 +58,7 @@ __all__ = [
     "replace_embeddings",
     "replace_messages",
     "resolve_message",
+    "resolve_exact_messages",
     "resolve_messages",
     "search_messages",
     "semantic_search",

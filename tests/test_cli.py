@@ -28,7 +28,12 @@ from typing import Literal
 import pytest
 
 from cc_search_chats import __version__
-from cc_search_chats.cli import _contain_semantic_index, build_parser, main
+from cc_search_chats.cli import (
+    _contain_semantic_index,
+    _ProgressStream,
+    build_parser,
+    main,
+)
 from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.queueing import client_admission
@@ -76,7 +81,7 @@ def test_semantic_failure_names_phase_and_prints_literal_fallback(
         "cc_search_chats.cli.client_admission", lambda name: nullcontext()
     )
 
-    def unavailable(args, dsn):
+    def unavailable(args, dsn, progress_stream):
         raise ModelUnavailable(
             "fixture model load failed",
             code="model_load_failed",
@@ -93,6 +98,75 @@ def test_semantic_failure_names_phase_and_prints_literal_fallback(
     assert "model_load" in error
     assert "Literal search is required for complete current results" in error
     assert "cc-search-chats search 'needle phrase' --literal" in error
+
+
+def test_search_scope_flags_are_explicit_and_everything_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parsed = build_parser().parse_args(
+        [
+            "search",
+            "needle",
+            "--agents",
+            "--literal",
+            "--tools",
+            "--exhaustive",
+        ]
+    )
+    assert parsed.agents is True
+    assert parsed.tools is True
+    assert parsed.exhaustive is True
+
+    retired = build_parser().parse_args(["search", "needle", "--everything"])
+    assert retired.everything is True
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "needle", "--everything"],
+    )
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    migration_error = capsys.readouterr().err
+    assert "--everything was removed" in migration_error
+    assert "--literal --tools --exhaustive" in migration_error
+    assert "Reasoning and instructions remain excluded" in migration_error
+
+    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "search", "needle", "--tools"])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert "--tools requires --literal" in capsys.readouterr().err
+
+    monkeypatch.setattr(
+        sys, "argv", ["cc-search-chats", "search", "needle", "--limit", "201"]
+    )
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert "--limit must be between 1 and 200" in capsys.readouterr().err
+
+
+def test_progress_heartbeat_tracks_the_active_phase() -> None:
+    args = build_parser().parse_args(["list", "--json"])
+    progress = _ProgressStream(args)
+    stderr = io.StringIO()
+
+    with (
+        redirect_stderr(stderr),
+        progress.heartbeat(
+            "scan",
+            interval_seconds=0.01,
+        ) as update,
+    ):
+        update("model_load", 12, 3, 7)
+        Event().wait(timeout=0.04)
+
+    events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+    assert events
+    assert all(event["event"] == "heartbeat" for event in events)
+    assert all(event["phase"] == "model_load" for event in events)
+    assert all(event["run_id"] == 12 for event in events)
+    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
 
 
 # ============================================================
@@ -599,72 +673,6 @@ class TestMainErrors:
         assert "Traceback" not in captured.err
         assert "corrupt" not in captured.err.lower()
 
-    def test_everything_corruption_preserves_persistent_index_identity(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
-    ) -> None:
-        """Transient full-content damage never deletes the persistent index."""
-        projects_dir = _setup_project_dir(tmp_path)
-        monkeypatch.setattr(
-            "cc_search_chats.cli.get_claude_projects_dir",
-            lambda: projects_dir,
-        )
-        db_path = tmp_path / "persistent" / "index.db"
-        monkeypatch.setenv("CC_SEARCH_DB_PATH", str(db_path))
-        conn = open_db(db_path)
-        close_db(conn)
-        original = db_path.read_bytes()
-        error = sqlite3.DatabaseError("transient database disk image is malformed")
-        error.sqlite_errorname = "SQLITE_CORRUPT_INDEX"
-
-        def fail_transient_search(
-            _conn: sqlite3.Connection,
-            _query: str,
-            *,
-            epoch: int | None = None,
-            project: str | None = None,
-            days: int | None = None,
-            limit: int = 50,
-        ) -> list[sqlite3.Row]:
-            del epoch, project, days, limit
-            raise error
-
-        monkeypatch.setattr(
-            "cc_search_chats.storage.index.search",
-            fail_transient_search,
-        )
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "cc-search-chats",
-                "search",
-                "query",
-                "--everything",
-                "--project",
-                FAKE_PROJECT_PATH,
-            ],
-        )
-
-        with pytest.raises(SystemExit) as caught:
-            main()
-
-        captured = capsys.readouterr()
-        assert caught.value.code == 1
-        assert captured.out == ""
-        assert "SQLITE_CORRUPT_INDEX" in captured.err
-        assert (
-            "DatabaseError: transient database disk image is malformed" in captured.err
-        )
-        assert "in-memory" in captured.err.lower()
-        assert "The persistent index was not modified." in captured.err
-        assert "The database file was deleted" not in captured.err
-        assert "`cc-search-chats index`" not in captured.err
-        assert "Traceback" not in captured.err
-        assert db_path.read_bytes() == original
-
     def test_source_file_failure_does_not_recommend_database_permissions(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1019,8 +1027,8 @@ class TestSearchScope:
         assert parsed["results"] == []
 
 
-class TestSearchEverything:
-    """--everything runs a live full-content scan (thinking + tool calls)."""
+class TestExcludedThinking:
+    """Private thinking remains excluded from every supported search mode."""
 
     def _write_thinking_session(self, tmp_path: Path) -> None:
         proj = tmp_path / "claude" / "projects" / encode_project_path(FAKE_PROJECT_PATH)
@@ -1049,23 +1057,6 @@ class TestSearchEverything:
             cli_env,
         )
         assert json.loads(stdout)["results"] == []
-
-    def test_everything_finds_thinking(
-        self, cli_env: sqlite3.Connection, tmp_path: Path
-    ) -> None:
-        self._write_thinking_session(tmp_path)
-        _, stdout, _ = _run_cli(
-            [
-                "search",
-                "secretwombat",
-                "--everything",
-                "--project",
-                FAKE_PROJECT_PATH,
-                "--json",
-            ],
-            cli_env,
-        )
-        assert len(json.loads(stdout)["results"]) > 0
 
 
 # ============================================================

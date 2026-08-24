@@ -9,7 +9,7 @@ from threading import Event
 import psycopg
 import pytest
 
-from cc_search_chats.cli import _handle_postgres, build_parser
+from cc_search_chats.cli import _handle_postgres, _ProgressStream, build_parser
 from cc_search_chats.storage.postgresql import migrate, resolve_message
 from cc_search_chats.storage.postgresql.guardrails import queued_read
 
@@ -281,7 +281,12 @@ def test_composed_index_holds_the_database_queue_through_embedding(
         psycopg.connect(postgres_cluster.dsn, autocommit=True) as observer,
         ThreadPoolExecutor(max_workers=1) as executor,
     ):
-        pending = executor.submit(_handle_postgres, args, postgres_cluster.dsn)
+        pending = executor.submit(
+            _handle_postgres,
+            args,
+            postgres_cluster.dsn,
+            _ProgressStream(args),
+        )
         assert embedding_started.wait(timeout=1)
         acquired = next(
             observer.execute(

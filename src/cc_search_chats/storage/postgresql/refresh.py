@@ -108,6 +108,8 @@ class RefreshResult:
     message_count: int
     changed_source_count: int = 0
     failed_source_count: int = 0
+    read_source_count: int = 0
+    removed_source_count: int = 0
     advanced_source_count: int = 0
     pending_bytes: int = 0
 
@@ -1088,6 +1090,7 @@ def _start_run(
     *,
     source_count: int,
     changed_source_count: int,
+    removed_source_count: int,
 ) -> int:
     with connection.transaction():
         connection.execute(
@@ -1115,13 +1118,20 @@ def _start_run(
                 """
                 INSERT INTO cc_search_chats.refresh_run (
                     status, source_count, changed_source_count,
-                    owner_pid, phase, heartbeat_at, completed_units, total_units
+                    removed_source_count, owner_pid, phase, heartbeat_at,
+                    completed_units, total_units
                 ) VALUES (
-                    'building', %s, %s, pg_backend_pid(), 'parse', now(), 0, %s
+                    'building', %s, %s, %s, pg_backend_pid(),
+                    'parse', now(), 0, %s
                 )
                 RETURNING run_id
                 """,
-                (source_count, changed_source_count, changed_source_count),
+                (
+                    source_count,
+                    changed_source_count,
+                    removed_source_count,
+                    changed_source_count,
+                ),
             )
         )[0]
 
@@ -1257,6 +1267,8 @@ def _publish_staged_refresh(
     run_id: int,
     roots: tuple[ConfiguredSourceRoot, ...],
     failed_source_count: int,
+    read_source_count: int,
+    removed_source_count: int,
     advanced_source_count: int,
     diagnostics: tuple[dict[str, object], ...],
 ) -> int:
@@ -1517,6 +1529,8 @@ def _publish_staged_refresh(
             UPDATE cc_search_chats.refresh_run
             SET status = %s, completed_at = now(), corpus_revision_id = %s,
                 failed_source_count = %s,
+                read_source_count = %s,
+                removed_source_count = %s,
                 advanced_source_count = %s,
                 diagnostics = %s, phase = 'done', heartbeat_at = now(),
                 completed_units = total_units
@@ -1526,6 +1540,8 @@ def _publish_staged_refresh(
                 "partial" if failed_source_count else "complete",
                 revision_id,
                 failed_source_count,
+                read_source_count,
+                removed_source_count,
                 advanced_source_count,
                 Jsonb(list(diagnostics)),
                 run_id,
@@ -1638,6 +1654,7 @@ def refresh_native_sources(
             connection,
             source_count=len(discovered_keys),
             changed_source_count=changed_source_count,
+            removed_source_count=len(removed_keys),
         )
         diagnostics = list(preflight_failures)
         failed_source_count = len(preflight_failures)
@@ -1704,15 +1721,16 @@ def refresh_native_sources(
                     )
 
             heartbeat.raise_if_failed()
-            successful_changes = next(
+            read_source_count, removed_source_count = next(
                 connection.execute(
                     """
                     SELECT
-                      (SELECT count(*) FROM pg_temp.refresh_stage_source)
-                      + (SELECT count(*) FROM pg_temp.refresh_stage_removed)
+                      (SELECT count(*) FROM pg_temp.refresh_stage_source),
+                      (SELECT count(*) FROM pg_temp.refresh_stage_removed)
                     """
                 )
-            )[0]
+            )
+            successful_changes = read_source_count + removed_source_count
             if successful_changes:
                 _update_run_progress(
                     connection,
@@ -1725,6 +1743,8 @@ def refresh_native_sources(
                     run_id=run_id,
                     roots=roots,
                     failed_source_count=failed_source_count,
+                    read_source_count=read_source_count,
+                    removed_source_count=removed_source_count,
                     advanced_source_count=advanced_source_count,
                     diagnostics=tuple(diagnostics),
                 )
@@ -1758,6 +1778,8 @@ def refresh_native_sources(
                 message_count=message_count,
                 changed_source_count=changed_source_count,
                 failed_source_count=failed_source_count,
+                read_source_count=read_source_count,
+                removed_source_count=removed_source_count,
                 advanced_source_count=advanced_source_count,
                 pending_bytes=pending_bytes,
             )

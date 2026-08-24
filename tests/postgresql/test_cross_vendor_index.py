@@ -15,6 +15,7 @@ from cc_search_chats.providers.source_discovery import read_bounded_jsonl
 from cc_search_chats.semantic import ModelUnavailable
 from cc_search_chats.storage.postgresql import (
     context_messages,
+    exhaustive_search_page,
     extract_session,
     hybrid_search,
     index_embeddings,
@@ -152,6 +153,104 @@ def test_cross_vendor_messages_are_atomically_searchable(
     )[0]
     assert hybrid.message.canonical_locator == target
     assert hybrid.literal_rank == hybrid.semantic_rank == 1
+
+
+def test_search_scope_defaults_to_primary_prose_and_requires_agent_tool_opt_in(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    primary_read = _read("claude_multiple_tools.jsonl")
+    primary = parse_claude_session(
+        primary_read.envelopes,
+        context=ClaudeSessionContext(source_session_id="claude-multiple-tools"),
+    )
+    agent_path = FIXTURES / "claude_agent.jsonl"
+    agent_read = read_bounded_jsonl(
+        agent_path,
+        source_file_relative=Path(
+            "project/parent-session/subagents/claude-agent-session.jsonl"
+        ),
+        target_size=agent_path.stat().st_size,
+    )
+    agent = parse_claude_session(
+        agent_read.envelopes,
+        context=ClaudeSessionContext(source_session_id="claude-agent-session"),
+    )
+    unknown_read = _read("claude_primary.jsonl")
+    unknown = parse_claude_session(
+        unknown_read.envelopes,
+        context=ClaudeSessionContext(source_session_id="unknown-session"),
+    )
+    migrate(postgres_connection)
+    replace_messages(
+        postgres_connection,
+        (*primary.messages, *agent.messages, *unknown.messages),
+    )
+
+    assert search_messages(postgres_connection, "synthetic delegated") == ()
+    agent_hits = search_messages(
+        postgres_connection,
+        "synthetic delegated",
+        include_agents=True,
+    )
+    assert agent_hits
+    assert {hit.session_kind for hit in agent_hits} == {"agent"}
+    assert search_messages(postgres_connection, "visible primary") == ()
+    unknown_hits = search_messages(
+        postgres_connection,
+        "visible primary",
+        include_agents=True,
+    )
+    assert unknown_hits
+    assert {hit.session_kind for hit in unknown_hits} == {"unknown"}
+
+    assert search_messages(postgres_connection, "one.txt") == ()
+    tool_hits = search_messages(
+        postgres_connection,
+        "one.txt",
+        include_tools=True,
+    )
+    assert tool_hits
+    assert {hit.content_class for hit in tool_hits} == {"tool_input"}
+
+
+def test_exhaustive_literal_search_pages_every_occurrence_in_stable_order(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    read = _read("claude_multiple_tools.jsonl")
+    parsed = parse_claude_session(
+        read.envelopes,
+        context=ClaudeSessionContext(source_session_id="claude-multiple-tools"),
+    )
+    migrate(postgres_connection)
+    replace_messages(postgres_connection, parsed.messages)
+    cursor = None
+    hits = []
+
+    while True:
+        page = exhaustive_search_page(
+            postgres_connection,
+            "Read OR Grep OR one.txt OR needle",
+            include_tools=True,
+            page_size=1,
+            after=cursor,
+        )
+        hits.extend(page.hits)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+
+    assert len(hits) == 2
+    assert [hit.content_class for hit in hits] == [
+        "tool_name",
+        "tool_input",
+    ]
+    assert [hit.text for hit in hits] == [
+        "Read\nGrep",
+        '{"file_path":"one.txt"}\n{"pattern":"needle"}',
+    ]
+    assert len(
+        {(hit.logical_message_id, hit.content_class, hit.text) for hit in hits}
+    ) == len(hits)
 
 
 def test_semantic_index_skips_blank_prose_and_resumes_failures(

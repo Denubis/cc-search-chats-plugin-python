@@ -1,7 +1,7 @@
 """Offline-only adapter for the pinned local Nemotron embedding model."""
 
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import lru_cache
 from importlib import import_module
 from pathlib import Path
@@ -9,6 +9,7 @@ from pathlib import Path
 MODEL_ID = "nvidia/Nemotron-3-Embed-8B-BF16"
 MODEL_REVISION = "c44c20ab3f6b430336706847a6372de4b2eb3dbd"
 DIMENSIONS = 1024
+type ModelProgress = Callable[[str, str], None]
 
 
 class ModelUnavailable(RuntimeError):
@@ -171,11 +172,33 @@ def _embed(texts: Sequence[str], prefix: str) -> list[list[float]]:
     return _embed(texts[:middle], prefix) + _embed(texts[middle:], prefix)
 
 
-def embed_query(text: str) -> list[float]:
+def _prepare_runtime(progress: ModelProgress | None) -> None:
+    if progress is not None:
+        progress("model_preflight", "running")
+    _model_path()
+    if progress is not None:
+        progress("model_preflight", "complete")
+        progress("model_load", "running")
+    _runtime()
+    if progress is not None:
+        progress("model_load", "complete")
+
+
+def embed_query(
+    text: str,
+    *,
+    progress: ModelProgress | None = None,
+) -> list[float]:
     """Embed one retrieval query with the model's required prompt."""
+    _prepare_runtime(progress)
     return _embed([text], "query:")[0]
 
 
-def embed_passages(texts: Sequence[str]) -> list[list[float]]:
+def embed_passages(
+    texts: Sequence[str],
+    *,
+    progress: ModelProgress | None = None,
+) -> list[list[float]]:
     """Embed a batch of retrieval passages with the required prompt."""
+    _prepare_runtime(progress)
     return _embed(texts, "passage:")

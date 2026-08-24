@@ -20,10 +20,48 @@ class SearchHit:
     timestamp: str
     role: str
     session_kind: str
+    conversation_epoch: int
+    content_class: str
     text: str
     repository: str | None
     cwd: str | None
     rank: float
+
+
+@dataclass(frozen=True, slots=True)
+class ExhaustiveCursor:
+    """Stable position immediately after one exhaustive literal result."""
+
+    canonical_locator: str
+    content_order: int
+    record_ordinal: int
+    source_digest: str
+    provider: str
+    source_session_id: str
+    logical_message_id: str
+    content_class: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExhaustivePage:
+    """One bounded page of exhaustive literal results."""
+
+    hits: tuple[SearchHit, ...]
+    next_cursor: ExhaustiveCursor | None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredAlias:
+    """One root-independent physical source coordinate for public identity."""
+
+    source_root_id: str
+    locator: str
+    source_file_relative: str
+    record_ordinal: int
+    source_line: int
+    source_byte_offset: int
+    raw_byte_length: int
+    source_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +76,7 @@ class StoredMessage:
     conversation_epoch: int
     content_class: str
     text: str
+    physical_aliases: tuple[StoredAlias, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,13 +442,22 @@ def search_messages(
     project: str | None = None,
     since: str | None = None,
     epoch: int | None = None,
+    include_agents: bool = False,
+    include_tools: bool = False,
 ) -> tuple[SearchHit, ...]:
     """Search the current revision with PostgreSQL's plain-text query parser."""
     if not query.strip():
         return ()
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("limit must be a positive integer")
-    filters = ["m.search_vector @@ plainto_tsquery('simple', %s)"]
+    filters = ["m.search_vector @@ websearch_to_tsquery('simple', %s)"]
+    filters.append(
+        "m.session_kind IN ('primary', 'agent', 'unknown')"
+        if include_agents
+        else "m.session_kind = 'primary'"
+    )
+    if not include_tools:
+        filters.append("m.content_class = 'prose'")
     params: list[object] = [query]
     for value, clause in (
         (provider, "m.provider = %s"),
@@ -425,8 +473,12 @@ def search_messages(
     sql = f"""
         SELECT m.provider, m.source_session_id, m.logical_message_id,
                m.canonical_locator, m.timestamp_text, m.role, m.session_kind,
-               m.prose_content, m.repository, m.cwd,
-               ts_rank_cd(m.search_vector, plainto_tsquery('simple', %s)) AS rank
+               m.conversation_epoch, m.content_class, m.prose_content,
+               m.repository, m.cwd,
+               ts_rank_cd(
+                   m.search_vector,
+                   websearch_to_tsquery('simple', %s)
+               ) AS rank
         FROM cc_search_chats.message_current AS m
         WHERE {" AND ".join(filters)}
         ORDER BY rank DESC, m.provider, m.source_session_id, m.logical_message_id
@@ -436,11 +488,171 @@ def search_messages(
     return tuple(SearchHit(*row) for row in rows)
 
 
+@queued_read_operation
+def exhaustive_search_page(
+    connection: psycopg.Connection,
+    query: str,
+    *,
+    page_size: int = 500,
+    after: ExhaustiveCursor | None = None,
+    provider: str | None = None,
+    role: str | None = None,
+    project: str | None = None,
+    since: str | None = None,
+    epoch: int | None = None,
+    include_agents: bool = False,
+    include_tools: bool = False,
+) -> ExhaustivePage:
+    """Return one deterministic page containing each matching content row once."""
+    if not query.strip():
+        return ExhaustivePage((), None)
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size <= 0:
+        raise ValueError("page_size must be a positive integer")
+    filters = ["m.search_vector @@ websearch_to_tsquery('simple', %s)"]
+    filters.append(
+        "m.session_kind IN ('primary', 'agent', 'unknown')"
+        if include_agents
+        else "m.session_kind = 'primary'"
+    )
+    if not include_tools:
+        filters.append("m.content_class = 'prose'")
+    params: list[object] = [query]
+    for value, clause in (
+        (provider, "m.provider = %s"),
+        (role, "m.role = %s"),
+        (project, "COALESCE(m.repository, m.cwd) = %s"),
+        (since, "m.timestamp_text >= %s"),
+        (epoch, "m.conversation_epoch = %s"),
+    ):
+        if value is not None:
+            filters.append(clause)
+            params.append(value)
+    if after is not None:
+        filters.append(
+            """(m.canonical_locator, content_order.value,
+                   source_alias.record_ordinal, source_alias.source_digest,
+                   m.provider, m.source_session_id, m.logical_message_id,
+                   m.content_class) > (%s, %s, %s, %s, %s, %s, %s, %s)"""
+        )
+        params.extend(
+            (
+                after.canonical_locator,
+                after.content_order,
+                after.record_ordinal,
+                after.source_digest,
+                after.provider,
+                after.source_session_id,
+                after.logical_message_id,
+                after.content_class,
+            )
+        )
+    params.append(page_size + 1)
+    rows = tuple(
+        connection.execute(
+            f"""
+            SELECT m.provider, m.source_session_id, m.logical_message_id,
+                   m.canonical_locator, m.timestamp_text, m.role, m.session_kind,
+                   m.conversation_epoch, m.content_class, m.prose_content,
+                   m.repository, m.cwd,
+                   ts_rank_cd(
+                       m.search_vector,
+                       websearch_to_tsquery('simple', %s)
+                   ) AS rank,
+                   content_order.value, source_alias.record_ordinal,
+                   source_alias.source_digest
+            FROM cc_search_chats.message_current AS m
+            CROSS JOIN LATERAL (
+                VALUES (CASE m.content_class
+                    WHEN 'prose' THEN 0
+                    WHEN 'tool_name' THEN 1
+                    WHEN 'tool_input' THEN 2
+                    WHEN 'tool_output' THEN 3
+                END)
+            ) AS content_order(value)
+            CROSS JOIN LATERAL (
+                SELECT alias.record_ordinal, alias.source_digest
+                FROM cc_search_chats.physical_alias_current AS alias
+                WHERE (alias.provider, alias.source_session_id,
+                       alias.logical_message_id, alias.content_class) =
+                      (m.provider, m.source_session_id,
+                       m.logical_message_id, m.content_class)
+                ORDER BY alias.record_ordinal, alias.source_digest,
+                         alias.source_file_relative, alias.source_byte_offset
+                LIMIT 1
+            ) AS source_alias
+            WHERE {" AND ".join(filters)}
+            ORDER BY m.canonical_locator, content_order.value,
+                     source_alias.record_ordinal, source_alias.source_digest,
+                     m.provider, m.source_session_id, m.logical_message_id,
+                     m.content_class
+            LIMIT %s
+            """.encode(),
+            (query, *params),
+        )
+    )
+    page_rows = rows[:page_size]
+    hits = tuple(SearchHit(*row[:13]) for row in page_rows)
+    if len(rows) <= page_size:
+        return ExhaustivePage(hits, None)
+    last = page_rows[-1]
+    return ExhaustivePage(
+        hits,
+        ExhaustiveCursor(
+            canonical_locator=last[3],
+            content_order=last[13],
+            record_ordinal=last[14],
+            source_digest=last[15],
+            provider=last[0],
+            source_session_id=last[1],
+            logical_message_id=last[2],
+            content_class=last[8],
+        ),
+    )
+
+
 _MESSAGE_COLUMNS = """
     m.provider, m.source_session_id, m.logical_message_id,
     m.canonical_locator, m.timestamp_text, m.role, m.session_kind,
-    m.conversation_epoch, m.content_class, m.prose_content
+    m.conversation_epoch, m.content_class, m.prose_content,
+    COALESCE((
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'locator', alias.locator,
+                'source_root_id', alias.source_root_id,
+                'source_file_relative', alias.source_file_relative,
+                'record_ordinal', alias.record_ordinal,
+                'source_line', alias.source_line,
+                'source_byte_offset', alias.source_byte_offset,
+                'raw_byte_length', alias.raw_byte_length,
+                'source_digest', alias.source_digest
+            )
+            ORDER BY alias.source_file_relative, alias.record_ordinal,
+                     alias.source_byte_offset, alias.locator
+        )
+        FROM cc_search_chats.physical_alias_current AS alias
+        WHERE (alias.provider, alias.source_session_id,
+               alias.logical_message_id, alias.content_class) =
+              (m.provider, m.source_session_id,
+               m.logical_message_id, m.content_class)
+    ), '[]'::jsonb)
 """
+
+
+def _stored_message(row: tuple) -> StoredMessage:
+    aliases = tuple(
+        StoredAlias(
+            source_root_id=value["source_root_id"],
+            locator=value["locator"],
+            source_file_relative=value["source_file_relative"],
+            record_ordinal=value["record_ordinal"],
+            source_line=value["source_line"],
+            source_byte_offset=value["source_byte_offset"],
+            raw_byte_length=value["raw_byte_length"],
+            source_digest=value["source_digest"],
+        )
+        for value in row[-1]
+    )
+    return StoredMessage(*row[:-1], physical_aliases=aliases)
 
 
 @queued_read_operation
@@ -490,7 +702,7 @@ def extract_session(
         """.encode(),
         (source_session_id, provider, provider, epoch, epoch),
     )
-    return tuple(StoredMessage(*row) for row in rows)
+    return tuple(_stored_message(row) for row in rows)
 
 
 def resolve_message(
@@ -546,7 +758,7 @@ def resolve_messages(
     for row in rows:
         input_order = row[0]
         if row[2] is not None:
-            resolved[input_order - 1].append(StoredMessage(*row[2:]))
+            resolved[input_order - 1].append(_stored_message(row[2:]))
     return tuple(
         MessageResolution(locator, tuple(messages))
         for locator, messages in zip(requested, resolved, strict=True)

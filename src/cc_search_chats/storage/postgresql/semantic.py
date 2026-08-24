@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 
 import psycopg
 
@@ -23,9 +24,13 @@ _RUN_HEARTBEAT_SECONDS = 5.0
 @dataclass(frozen=True, slots=True)
 class HybridHit:
     message: SearchHit
-    score: float
+    score: Fraction
     literal_rank: int | None
     semantic_rank: int | None
+    literal_score: float | None
+    semantic_score: float | None
+    rank_constant: int
+    component_depth: int
 
 
 def _vector(value: Sequence[float]) -> str:
@@ -531,6 +536,7 @@ def semantic_search(
     project: str | None = None,
     since: str | None = None,
     epoch: int | None = None,
+    include_agents: bool = False,
 ) -> tuple[SearchHit, ...]:
     """Return exact cosine-ranked messages from the current semantic state."""
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
@@ -554,7 +560,11 @@ def semantic_search(
     )
     if state is None or state[0] is not True:
         raise ValueError("semantic revision is unavailable or stale")
-    filters = []
+    filters = [
+        "message.session_kind IN ('primary', 'agent', 'unknown')"
+        if include_agents
+        else "message.session_kind = 'primary'"
+    ]
     params: list[object] = [vector, _PROFILE_ID]
     for value, clause in (
         (provider, "message.provider = %s"),
@@ -573,6 +583,7 @@ def semantic_search(
         SELECT message.provider, message.source_session_id,
                message.logical_message_id, message.canonical_locator,
                message.timestamp_text, message.role, message.session_kind,
+               message.conversation_epoch, message.content_class,
                message.prose_content, message.repository, message.cwd,
                1 - (value.embedding <=> %s::vector) AS score
         FROM cc_search_chats.message_embedding_current AS mapping
@@ -592,8 +603,68 @@ def semantic_search(
     return tuple(SearchHit(*row) for row in rows)
 
 
-@queued_read_operation
-def hybrid_search(
+def _ranked_component_depth(limit: int) -> int:
+    """Validate a public ranked limit and return its bounded component depth."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+        raise ValueError("limit must be between 1 and 200")
+    return min(1000, max(100, 5 * limit))
+
+
+def _fuse_hybrid(
+    literal: Sequence[SearchHit],
+    semantic: Sequence[SearchHit],
+    *,
+    limit: int,
+    rank_constant: int,
+    component_depth: int,
+) -> tuple[HybridHit, ...]:
+    """Fuse two already-ranked components with exact RRF arithmetic."""
+    if (
+        isinstance(rank_constant, bool)
+        or not isinstance(rank_constant, int)
+        or rank_constant <= 0
+    ):
+        raise ValueError("rank_constant must be a positive integer")
+    literal_ranks = {
+        value.canonical_locator: rank for rank, value in enumerate(literal, 1)
+    }
+    semantic_ranks = {
+        value.canonical_locator: rank for rank, value in enumerate(semantic, 1)
+    }
+    literal_scores = {value.canonical_locator: value.rank for value in literal}
+    semantic_scores = {value.canonical_locator: value.rank for value in semantic}
+    messages = {value.canonical_locator: value for value in (*literal, *semantic)}
+    fused = [
+        HybridHit(
+            message=message,
+            score=sum(
+                (
+                    Fraction(1, rank_constant + rank)
+                    for rank in (
+                        literal_ranks.get(locator),
+                        semantic_ranks.get(locator),
+                    )
+                    if rank is not None
+                ),
+                start=Fraction(0),
+            ),
+            literal_rank=literal_ranks.get(locator),
+            semantic_rank=semantic_ranks.get(locator),
+            literal_score=literal_scores.get(locator),
+            semantic_score=semantic_scores.get(locator),
+            rank_constant=rank_constant,
+            component_depth=component_depth,
+        )
+        for locator, message in messages.items()
+    ]
+    return tuple(
+        sorted(
+            fused, key=lambda value: (-value.score, value.message.canonical_locator)
+        )[:limit]
+    )
+
+
+def _hybrid_search(
     connection: psycopg.Connection,
     query: str,
     embedding: Sequence[float],
@@ -605,9 +676,16 @@ def hybrid_search(
     since: str | None = None,
     epoch: int | None = None,
     rank_constant: int = 60,
+    include_agents: bool = False,
 ) -> tuple[HybridHit, ...]:
-    """Fuse bounded literal and exact-vector ranks with RRF."""
-    depth = max(limit * 4, limit)
+    """Fetch bounded lexical/vector components and fuse them with exact RRF."""
+    depth = _ranked_component_depth(limit)
+    if (
+        isinstance(rank_constant, bool)
+        or not isinstance(rank_constant, int)
+        or rank_constant <= 0
+    ):
+        raise ValueError("rank_constant must be a positive integer")
     literal = search_messages(
         connection,
         query,
@@ -617,6 +695,7 @@ def hybrid_search(
         project=project,
         since=since,
         epoch=epoch,
+        include_agents=include_agents,
     )
     semantic = semantic_search(
         connection,
@@ -627,29 +706,15 @@ def hybrid_search(
         project=project,
         since=since,
         epoch=epoch,
+        include_agents=include_agents,
     )
-    literal_ranks = {
-        value.canonical_locator: rank for rank, value in enumerate(literal, 1)
-    }
-    semantic_ranks = {
-        value.canonical_locator: rank for rank, value in enumerate(semantic, 1)
-    }
-    messages = {value.canonical_locator: value for value in (*literal, *semantic)}
-    fused = [
-        HybridHit(
-            message=message,
-            score=sum(
-                1 / (rank_constant + rank)
-                for rank in (literal_ranks.get(locator), semantic_ranks.get(locator))
-                if rank is not None
-            ),
-            literal_rank=literal_ranks.get(locator),
-            semantic_rank=semantic_ranks.get(locator),
-        )
-        for locator, message in messages.items()
-    ]
-    return tuple(
-        sorted(
-            fused, key=lambda value: (-value.score, value.message.canonical_locator)
-        )[:limit]
+    return _fuse_hybrid(
+        literal,
+        semantic,
+        limit=limit,
+        rank_constant=rank_constant,
+        component_depth=depth,
     )
+
+
+hybrid_search = queued_read_operation(_hybrid_search)

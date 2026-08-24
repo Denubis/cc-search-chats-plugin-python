@@ -151,6 +151,7 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
         (1, "schema.sql", 64),
         (2, "refresh_schema.sql", 64),
         (3, "freshness_schema.sql", 64),
+        (4, "coverage_schema.sql", 64),
     )
     postgres_connection.execute(
         "UPDATE cc_search_chats.schema_migration "
@@ -175,7 +176,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
     monkeypatch.setattr(
         migrations,
         "_MIGRATIONS",
-        (*migrations._MIGRATIONS, migrations.Migration(4, "missing-migration.sql")),
+        (*migrations._MIGRATIONS, migrations.Migration(5, "missing-migration.sql")),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -185,7 +186,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
         postgres_connection.execute(
             "SELECT version FROM cc_search_chats.schema_migration ORDER BY version"
         )
-    ) == ((1,), (2,), (3,))
+    ) == ((1,), (2,), (3,), (4,))
 
 
 def _seed_legacy_snapshots(connection: psycopg.Connection) -> None:

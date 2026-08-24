@@ -7,10 +7,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
+from typing import cast
 
 import psycopg
 import pytest
 
+from cc_search_chats.cli import _postgres_envelope
 from cc_search_chats.core.identity import Provider
 from cc_search_chats.providers.source_discovery import (
     ConfiguredSourceRoot,
@@ -24,13 +26,29 @@ from cc_search_chats.storage.postgresql import (
     migrate,
     refresh_native_sources,
     replace_messages,
-    search_messages,
 )
 from cc_search_chats.storage.postgresql import refresh as refresh_module
+from cc_search_chats.storage.postgresql import (
+    search_messages as _search_messages,
+)
 
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
 _INDEX_QUEUE_LOCK = "cc_search_chats.index_queue"
+
+
+def search_messages(
+    connection: psycopg.Connection,
+    query: str,
+    *,
+    include_agents: bool = True,
+):
+    """Keep refresh assertions independent of fail-closed session classification."""
+    return _search_messages(
+        connection,
+        query,
+        include_agents=include_agents,
+    )
 
 
 def _source_root(provider: Provider, path: Path) -> ConfiguredSourceRoot:
@@ -693,12 +711,35 @@ def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(
         )
         == checkpoint
     )
-    assert search_messages(postgres_connection, "unreadable append sentinel") == ()
+    assert (
+        search_messages(
+            postgres_connection,
+            "unreadable append sentinel",
+            include_agents=True,
+        )
+        == ()
+    )
+    failed_coverage = cast(
+        dict[str, object],
+        _postgres_envelope(postgres_connection, "index")["coverage"],
+    )
+    assert failed_coverage["read_files"] == 0
+    assert failed_coverage["unreadable_files"] == 1
+    assert failed_coverage["completeness"] == "partial"
 
     monkeypatch.setattr(refresh_module, "read_bounded_jsonl", original_reader)
     refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert len(search_messages(postgres_connection, "unreadable append sentinel")) == 1
+    assert (
+        len(
+            search_messages(
+                postgres_connection,
+                "unreadable append sentinel",
+                include_agents=True,
+            )
+        )
+        == 1
+    )
 
 
 def test_unreadable_artifact_probe_retains_committed_rows_and_checkpoint(
@@ -858,6 +899,12 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
     )[0]
     assert diagnostics[0]["code"] == "source_refresh_failed"
     assert "unknown_conversation_record" in diagnostics[0]["detail"]
+    failed_coverage = cast(
+        dict[str, object],
+        _postgres_envelope(postgres_connection, "index")["coverage"],
+    )
+    assert failed_coverage["unrecognized_conversation_records"] == 1
+    assert failed_coverage["completeness"] == "partial"
 
 
 def test_failed_publication_keeps_checkpoint_and_corpus_then_retry_cleans_stage(
