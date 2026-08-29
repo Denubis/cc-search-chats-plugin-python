@@ -1502,7 +1502,7 @@ def _message_conflict(connection: psycopg.Connection) -> str | None:
                      content_class
             HAVING count(DISTINCT jsonb_build_array(
                 canonical_locator, timestamp_text, role, session_kind,
-                conversation_epoch, prose_content, repository, cwd,
+                conversation_epoch, prose_content, repository,
                 submitted_by, embedding_input_digest
             )) > 1
             LIMIT 1
@@ -1530,12 +1530,12 @@ def _message_conflict(connection: psycopg.Connection) -> str | None:
             WHERE ROW(
                 current.canonical_locator, current.timestamp_text, current.role,
                 current.session_kind, current.conversation_epoch,
-                current.prose_content, current.repository, current.cwd,
+                current.prose_content, current.repository,
                 current.submitted_by, current.embedding_input_digest
             ) IS DISTINCT FROM ROW(
                 staged.canonical_locator, staged.timestamp_text, staged.role,
                 staged.session_kind, staged.conversation_epoch,
-                staged.prose_content, staged.repository, staged.cwd,
+                staged.prose_content, staged.repository,
                 staged.submitted_by, staged.embedding_input_digest
             )
               AND EXISTS (

@@ -65,13 +65,15 @@ def _source_root(provider: Provider, path: Path) -> ConfiguredSourceRoot:
     )
 
 
-def _claude_message_bytes(*, uuid: str, text: str) -> bytes:
+def _claude_message_bytes(
+    *, uuid: str, text: str, cwd: str = "/synthetic/repository"
+) -> bytes:
     payload = {
         "type": "assistant",
         "uuid": uuid,
         "sessionId": "claude-session-primary",
         "timestamp": "2026-08-11T00:01:00Z",
-        "cwd": "/synthetic/repository",
+        "cwd": cwd,
         "isSidechain": False,
         "message": {"role": "assistant", "content": text},
     }
@@ -164,6 +166,62 @@ def test_refresh_keeps_colliding_relative_paths_distinct_by_source_root(
     )
     assert alias_roots == tuple(sorted(root.source_root_id for root in roots))
     assert len(search_messages(postgres_connection, "visible primary user")) == 1
+
+
+def test_same_native_content_with_changed_cwd_keeps_earliest_message_and_aliases(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "claude"
+    root.mkdir()
+    source = root / "claude-session-primary.jsonl"
+    source.write_bytes(
+        _claude_message_bytes(
+            uuid="replayed-message",
+            text="replayed visible content",
+            cwd="/synthetic/earliest",
+        )
+        + _claude_message_bytes(
+            uuid="replayed-message",
+            text="replayed visible content",
+            cwd="/synthetic/later",
+        )
+    )
+    original_reader = refresh_module.read_bounded_jsonl
+
+    def one_record_reader(path: Path, **kwargs):
+        return original_reader(path, max_records_per_batch=1, **kwargs)
+
+    monkeypatch.setattr(refresh_module, "read_bounded_jsonl", one_record_reader)
+
+    refresh_native_sources(
+        postgres_connection,
+        source_roots=(_source_root(Provider.CLAUDE, root),),
+    )
+
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT count(*), min(cwd)
+            FROM cc_search_chats.message_current
+            WHERE logical_message_id = 'replayed-message'
+              AND content_class = 'prose'
+            """
+        )
+    ) == (1, "/synthetic/earliest")
+    assert tuple(
+        row[0]
+        for row in postgres_connection.execute(
+            """
+            SELECT record_ordinal
+            FROM cc_search_chats.physical_alias_current
+            WHERE logical_message_id = 'replayed-message'
+              AND content_class = 'prose'
+            ORDER BY record_ordinal
+            """
+        )
+    ) == (0, 1)
 
 
 def test_cross_root_canonical_conflict_aborts_publication(

@@ -187,7 +187,7 @@ def replace_messages(
                          content_class
                 HAVING count(DISTINCT jsonb_build_array(
                     canonical_locator, timestamp_text, role, session_kind,
-                    conversation_epoch, prose_content, repository, cwd,
+                    conversation_epoch, prose_content, repository,
                     submitted_by, embedding_input_digest
                 )) > 1
                 LIMIT 1

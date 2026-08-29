@@ -94,7 +94,24 @@
   - `uv run --frozen pytest -q -m 'not postgresql'`: 692 passed, 64 deselected;
   - `uv run --frozen pytest -q -m postgresql`: 64 passed, 692 deselected;
   - Ruff lint/format, ty, `git diff --check`, and packaged CLI help passed.
-- The installed tool still resolves to candidate `1b7a671...`, not the repaired
-  working tree. A new exact commit/install and a literal production refresh are
-  required before semantic refresh or four-corpus UAT. The timer stays disabled;
-  no prune, push, merge, or timer enablement has occurred.
+- Exact parser-repair candidate
+  `7ab2faf3f9f66149c71bc33a8bee4d5069f0a68e` was then installed and verified,
+  but literal run 28 found one separate canonicalization defect after parsing:
+  two occurrences of the same Claude UUID, timestamp, role, epoch, tool-use ID,
+  and searchable output differed only in `cwd`. Publication failed atomically;
+  selected revision stayed 26, all durable source checkpoints stayed at parser
+  version 1, and no semantic work followed.
+- A second complete read-only collision audit covered 11,087 native sources and
+  10,247,026,633 bytes. It found 583 identical repeated message projections and
+  exactly one divergent identity, whose only differing canonical field was
+  `cwd`. Red PostgreSQL tests now force that replay across parser batches and
+  through both ingestion paths. Canonical conflict detection ignores `cwd`
+  alone, retains the earliest deterministic message row plus every physical
+  alias, and continues to reject changed searchable content and every other
+  canonical field.
+- Fresh verification after the canonicalization repair reports 692
+  non-PostgreSQL tests and 66 PostgreSQL tests passing, plus green Ruff, format,
+  ty, and diff hygiene. The installed tool still resolves to `7ab2faf3...`, not
+  this final repair. A new exact commit/install and literal production refresh
+  are required before semantic refresh or four-corpus UAT. The timer stays
+  disabled; no prune, push, merge, or timer enablement has occurred.

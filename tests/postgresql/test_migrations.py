@@ -1,6 +1,7 @@
 """Normalized PostgreSQL storage and migration behavior."""
 
 import hashlib
+import json
 from pathlib import Path
 
 import psycopg
@@ -100,6 +101,66 @@ def test_unchanged_replace_creates_no_generation_or_row_copies(
 
     assert second_generation == first_generation
     assert _snapshot_cardinality(postgres_connection) == first_cardinality
+
+
+def test_replace_merges_same_native_content_with_changed_cwd(
+    postgres_connection: psycopg.Connection, tmp_path: Path
+) -> None:
+    migrate(postgres_connection)
+    path = tmp_path / "claude-session.jsonl"
+    payloads = [
+        {
+            "type": "assistant",
+            "uuid": "replayed-message",
+            "sessionId": "claude-session",
+            "timestamp": "2026-08-29T00:00:00Z",
+            "cwd": cwd,
+            "isSidechain": False,
+            "message": {"role": "assistant", "content": "visible replay"},
+        }
+        for cwd in ("/synthetic/earliest", "/synthetic/later")
+    ]
+    path.write_text(
+        "".join(
+            f"{json.dumps(payload, separators=(',', ':'))}\n" for payload in payloads
+        ),
+        encoding="utf-8",
+    )
+    bounded = read_bounded_jsonl(
+        path,
+        source_file_relative=Path(path.name),
+        target_size=path.stat().st_size,
+    )
+    messages = parse_claude_session(
+        bounded.envelopes,
+        context=ClaudeSessionContext(source_session_id="claude-session"),
+    ).messages
+
+    replace_messages(postgres_connection, messages)
+
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT count(*), min(cwd)
+            FROM cc_search_chats.message_current
+            WHERE logical_message_id = 'replayed-message'
+              AND content_class = 'prose'
+            """
+        )
+    ) == (1, "/synthetic/earliest")
+    assert (
+        next(
+            postgres_connection.execute(
+                """
+            SELECT count(*)
+            FROM cc_search_chats.physical_alias_current
+            WHERE logical_message_id = 'replayed-message'
+              AND content_class = 'prose'
+            """
+            )
+        )[0]
+        == 2
+    )
 
 
 def test_append_preserves_unchanged_rows_and_adds_only_new_identities(
