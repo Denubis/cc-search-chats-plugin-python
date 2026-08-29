@@ -97,6 +97,97 @@ def established_unknown_session(session_id: str) -> CodexParserState:
 
 
 class TestCodexSchemaFamilies:
+    def test_child_lineage_session_id_names_parent_while_id_names_child(self) -> None:
+        result = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "child-session",
+                        "session_id": "parent-session",
+                        "parent_thread_id": "parent-session",
+                        "thread_source": "subagent",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": "parent-session",
+                                    "depth": 1,
+                                }
+                            }
+                        },
+                    },
+                },
+                {
+                    "timestamp": "2026-08-29T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "visible"}],
+                    },
+                },
+            ),
+            context=CodexSessionContext(),
+        )
+
+        assert result.source_session_id == "child-session"
+        assert result.session_kind is SessionKind.AGENT
+        assert len(result.messages) == 1
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY not in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "type": "task_started",
+                "collaboration_mode_kind": "default",
+                "model_context_window": 1000,
+                "started_at": 1.0,
+                "turn_id": "turn",
+            },
+            {
+                "type": "entered_review_mode",
+                "target": "diff",
+                "user_facing_hint": "review",
+            },
+            {"type": "token_count", "info": {}, "rate_limits": {}},
+        ],
+    )
+    def test_observed_lifecycle_events_are_explicitly_excluded(
+        self, payload: dict[str, object]
+    ) -> None:
+        result = parse_codex_session(
+            (envelope({"type": "event_msg", "payload": payload}),),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.EXCLUDED_LIFECYCLE_EVENT
+        ]
+
+    def test_known_lifecycle_type_with_unobserved_shape_stays_unknown(self) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "unexpected": True},
+                    }
+                ),
+            ),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("session"),
+        )
+
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.UNKNOWN_EVENT
+        ]
+
     def test_full_parse_uses_native_metadata_identity_not_rollout_filename(
         self,
     ) -> None:

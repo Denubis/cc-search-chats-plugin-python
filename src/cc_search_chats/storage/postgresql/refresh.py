@@ -58,7 +58,7 @@ from cc_search_chats.storage.postgresql.guardrails import (
     INDEX_QUEUE_LOCK,
     DatabaseHeartbeat,
 )
-from cc_search_chats.storage.postgresql.index import migrate
+from cc_search_chats.storage.postgresql.migrations import require_current_schema
 
 _PARSER_STATE_VERSIONS = {
     Provider.CLAUDE: 1,
@@ -112,6 +112,12 @@ class RefreshResult:
     removed_source_count: int = 0
     advanced_source_count: int = 0
     pending_bytes: int = 0
+    metadata_checked_source_count: int = 0
+    attempted_source_count: int = 0
+    attempted_content_bytes: int = 0
+    blocked_source_count: int = 0
+    transient_failure_source_count: int = 0
+    run_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,8 +175,46 @@ class _SourcePlan:
     prior_state: ClaudeParserState | CodexParserState | None
 
 
+@dataclass(frozen=True, slots=True)
+class _FailedObservation:
+    source_root_id: str
+    source_file_relative: Path
+    file_device: int
+    file_inode: int
+    observed_size: int
+    observed_mtime_ns: int
+    parser_state_version: int
+    failure_record_ordinal: int | None
+    failure_source_line: int | None
+    failure_source_byte_offset: int | None
+    failure_code: str
+    failure_class: str
+    attempted_content_bytes: int
+    consecutive_failures: int
+    retry_eligible: bool
+
+
 class _SourceRefreshError(RuntimeError):
     """A source-local failure that must not publish its staged rows."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        code: str = "source_refresh_failed",
+        failure_class: str = "transient",
+        record_ordinal: int | None = None,
+        source_line: int | None = None,
+        source_byte_offset: int | None = None,
+        attempted_content_bytes: int = 0,
+    ) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.failure_class = failure_class
+        self.record_ordinal = record_ordinal
+        self.source_line = source_line
+        self.source_byte_offset = source_byte_offset
+        self.attempted_content_bytes = attempted_content_bytes
 
 
 def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
@@ -548,6 +592,58 @@ def _load_checkpoints(
     }
 
 
+def _load_failed_observations(
+    connection: psycopg.Connection,
+) -> dict[tuple[str, Path], _FailedObservation]:
+    return {
+        (source_root, Path(relative)): _FailedObservation(
+            source_root_id=source_root,
+            source_file_relative=Path(relative),
+            file_device=device,
+            file_inode=inode,
+            observed_size=size,
+            observed_mtime_ns=mtime_ns,
+            parser_state_version=parser_version,
+            failure_record_ordinal=record_ordinal,
+            failure_source_line=source_line,
+            failure_source_byte_offset=source_byte_offset,
+            failure_code=failure_code,
+            failure_class=failure_class,
+            attempted_content_bytes=attempted_bytes,
+            consecutive_failures=consecutive_failures,
+            retry_eligible=retry_eligible,
+        )
+        for (
+            source_root,
+            relative,
+            device,
+            inode,
+            size,
+            mtime_ns,
+            parser_version,
+            record_ordinal,
+            source_line,
+            source_byte_offset,
+            failure_code,
+            failure_class,
+            attempted_bytes,
+            consecutive_failures,
+            retry_eligible,
+        ) in connection.execute(
+            """
+            SELECT source_root_id, source_file_relative, file_device,
+                   file_inode, observed_size, observed_mtime_ns,
+                   parser_state_version, failure_record_ordinal,
+                   failure_source_line, failure_source_byte_offset,
+                   failure_code, failure_class, attempted_content_bytes,
+                   consecutive_failures,
+                   retry_after IS NULL OR retry_after <= now()
+            FROM cc_search_chats.source_failure_current
+            """
+        )
+    }
+
+
 def _discover_sources(
     roots: tuple[ConfiguredSourceRoot, ...],
 ) -> tuple[
@@ -667,6 +763,38 @@ def _plan_source(
                 prior_state=prior_state,
             )
     return _SourcePlan(observed, "replace", 0, 0, 1, None)
+
+
+def _failed_observation_matches(
+    observed: _ObservedSource,
+    failure: _FailedObservation | None,
+) -> bool:
+    return failure is not None and (
+        observed.file_device,
+        observed.file_inode,
+        observed.size,
+        observed.mtime_ns,
+        _PARSER_STATE_VERSIONS[observed.root.provider],
+    ) == (
+        failure.file_device,
+        failure.file_inode,
+        failure.observed_size,
+        failure.observed_mtime_ns,
+        failure.parser_state_version,
+    )
+
+
+def _failed_observation_blocks(
+    observed: _ObservedSource,
+    failure: _FailedObservation | None,
+    *,
+    force_retry: bool,
+) -> bool:
+    if force_retry or not _failed_observation_matches(observed, failure):
+        return False
+    if failure is None:
+        return False
+    return failure.failure_class == "deterministic" or not failure.retry_eligible
 
 
 def _create_stage_tables(connection: psycopg.Connection) -> None:
@@ -878,7 +1006,12 @@ def _parse_batch(
         if unsupported is not None:
             raise _SourceRefreshError(
                 "unsupported Claude record "
-                f"{unsupported.code.value} at ordinal {unsupported.record_ordinal}"
+                f"{unsupported.code.value} at ordinal {unsupported.record_ordinal}",
+                code=unsupported.code.value,
+                failure_class="deterministic",
+                record_ordinal=unsupported.record_ordinal,
+                source_line=unsupported.source_line,
+                source_byte_offset=unsupported.source_byte_offset,
             )
         return parsed
     if state is not None and not isinstance(state, CodexParserState):
@@ -900,7 +1033,12 @@ def _parse_batch(
     if unsupported is not None:
         raise _SourceRefreshError(
             "unsupported Codex record "
-            f"{unsupported.code.value} at ordinal {unsupported.record_ordinal}"
+            f"{unsupported.code.value} at ordinal {unsupported.record_ordinal}",
+            code=unsupported.code.value,
+            failure_class="deterministic",
+            record_ordinal=unsupported.record_ordinal,
+            source_line=unsupported.source_line,
+            source_byte_offset=unsupported.source_byte_offset,
         )
     return parsed
 
@@ -968,7 +1106,7 @@ def _stage_source_checkpoint(
 
 def _parse_and_stage_source(
     connection: psycopg.Connection, plan: _SourcePlan
-) -> tuple[bool, int]:
+) -> tuple[bool, int, int]:
     observed = plan.observed
     artifact = inspect_non_native_artifact(observed.source.path)
     if artifact is not None:
@@ -978,9 +1116,18 @@ def _parse_and_stage_source(
         }:
             raise _SourceRefreshError(
                 "native source inspection failed: "
-                f"{artifact.code.value}: {artifact.detail}"
+                f"{artifact.code.value}: {artifact.detail}",
+                code=artifact.code.value,
+                failure_class=(
+                    "transient"
+                    if artifact.code is SourceDiagnosticCode.UNREADABLE_SOURCE
+                    else "deterministic"
+                ),
+                record_ordinal=artifact.record_ordinal,
+                source_line=artifact.source_line,
+                source_byte_offset=artifact.source_byte_offset,
             )
-        return _stage_source_checkpoint(
+        advanced, pending = _stage_source_checkpoint(
             connection,
             plan,
             complete_byte_offset=0,
@@ -993,6 +1140,7 @@ def _parse_and_stage_source(
             source_status="excluded",
             final_size=observed.size,
         )
+        return advanced, pending, 0
 
     offset = plan.start_byte_offset
     ordinal = plan.next_record_ordinal
@@ -1019,14 +1167,30 @@ def _parse_and_stage_source(
             BoundedReadStopReason.PARTIAL_TAIL,
         }:
             raise _SourceRefreshError(
-                f"native source stopped at {batch.stop_reason.value}"
+                f"native source stopped at {batch.stop_reason.value}",
+                code=batch.stop_reason.value,
+                failure_class=(
+                    "deterministic"
+                    if batch.stop_reason is BoundedReadStopReason.OVERSIZED_RECORD
+                    else "transient"
+                ),
+                attempted_content_bytes=max(
+                    0, batch.next_source_byte_offset - plan.start_byte_offset
+                ),
             )
-        parsed = _parse_batch(
-            plan,
-            batch.envelopes,
-            batch.diagnostics,
-            state,
-        )
+        try:
+            parsed = _parse_batch(
+                plan,
+                batch.envelopes,
+                batch.diagnostics,
+                state,
+            )
+        except _SourceRefreshError as error:
+            error.attempted_content_bytes = max(
+                error.attempted_content_bytes,
+                batch.next_source_byte_offset - plan.start_byte_offset,
+            )
+            raise
         _stage_messages(connection, plan, parsed.messages)
         state = parsed.next_state
         next_offset = batch.next_source_byte_offset
@@ -1056,7 +1220,7 @@ def _parse_and_stage_source(
         raise _SourceRefreshError("native source was truncated during refresh")
     if final.st_size == observed.size and final.st_mtime_ns != observed.mtime_ns:
         raise _SourceRefreshError("native source changed during its bounded read")
-    return _stage_source_checkpoint(
+    advanced, pending = _stage_source_checkpoint(
         connection,
         plan,
         complete_byte_offset=offset,
@@ -1066,6 +1230,7 @@ def _parse_and_stage_source(
         source_status="indexed",
         final_size=final.st_size,
     )
+    return advanced, pending, max(0, offset - plan.start_byte_offset)
 
 
 def _clear_staged_source(connection: psycopg.Connection, plan: _SourcePlan) -> None:
@@ -1082,6 +1247,134 @@ def _clear_staged_source(connection: psycopg.Connection, plan: _SourcePlan) -> N
         "DELETE FROM pg_temp.refresh_stage_source "
         "WHERE source_root_id = %s AND source_file_relative = %s",
         key,
+    )
+
+
+def _record_failed_observation(
+    connection: psycopg.Connection,
+    *,
+    plan: _SourcePlan,
+    run_id: int,
+    error: _SourceRefreshError,
+    previous: _FailedObservation | None,
+) -> None:
+    observed = plan.observed
+    same_failure = (
+        _failed_observation_matches(observed, previous)
+        and previous is not None
+        and (
+            previous.failure_class,
+            previous.failure_code,
+            previous.failure_record_ordinal,
+            previous.failure_source_line,
+            previous.failure_source_byte_offset,
+        )
+        == (
+            error.failure_class,
+            error.code,
+            error.record_ordinal,
+            error.source_line,
+            error.source_byte_offset,
+        )
+    )
+    consecutive_failures = (
+        previous.consecutive_failures + 1
+        if same_failure and previous is not None
+        else 1
+    )
+    retry_seconds = min(300, 5 * (2 ** min(consecutive_failures - 1, 6)))
+    connection.execute(
+        """
+        INSERT INTO cc_search_chats.source_failure_current (
+            source_root_id, source_file_relative, provider,
+            file_device, file_inode, observed_size, observed_mtime_ns,
+            parser_state_version, failure_record_ordinal,
+            failure_source_line, failure_source_byte_offset,
+            failure_code, failure_detail, failure_class,
+            attempted_content_bytes, consecutive_failures,
+            retry_after, last_run_id
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s,
+            CASE WHEN %s = 'transient'
+                 THEN now() + make_interval(secs => %s)
+                 ELSE NULL END,
+            %s
+        )
+        ON CONFLICT (source_root_id, source_file_relative) DO UPDATE SET
+            provider = EXCLUDED.provider,
+            file_device = EXCLUDED.file_device,
+            file_inode = EXCLUDED.file_inode,
+            observed_size = EXCLUDED.observed_size,
+            observed_mtime_ns = EXCLUDED.observed_mtime_ns,
+            parser_state_version = EXCLUDED.parser_state_version,
+            failure_record_ordinal = EXCLUDED.failure_record_ordinal,
+            failure_source_line = EXCLUDED.failure_source_line,
+            failure_source_byte_offset = EXCLUDED.failure_source_byte_offset,
+            failure_code = EXCLUDED.failure_code,
+            failure_detail = EXCLUDED.failure_detail,
+            failure_class = EXCLUDED.failure_class,
+            attempted_content_bytes = EXCLUDED.attempted_content_bytes,
+            consecutive_failures = EXCLUDED.consecutive_failures,
+            first_failed_at = CASE
+                WHEN %s THEN source_failure_current.first_failed_at
+                ELSE now()
+            END,
+            last_failed_at = now(),
+            retry_after = EXCLUDED.retry_after,
+            last_run_id = EXCLUDED.last_run_id
+        """,
+        (
+            observed.root.source_root_id,
+            observed.source.source_file_relative.as_posix(),
+            observed.root.provider.value,
+            observed.file_device,
+            observed.file_inode,
+            observed.size,
+            observed.mtime_ns,
+            _PARSER_STATE_VERSIONS[observed.root.provider],
+            error.record_ordinal,
+            error.source_line,
+            error.source_byte_offset,
+            error.code,
+            str(error),
+            error.failure_class,
+            error.attempted_content_bytes,
+            consecutive_failures,
+            error.failure_class,
+            retry_seconds,
+            run_id,
+            same_failure,
+        ),
+    )
+
+
+def _delete_obsolete_failed_observations(
+    connection: psycopg.Connection,
+    failures: Mapping[tuple[str, Path], _FailedObservation],
+    discovered_keys: frozenset[tuple[str, Path]],
+    complete_roots: frozenset[str],
+) -> None:
+    obsolete = [
+        (root_id, relative.as_posix())
+        for root_id, relative in failures
+        if root_id in complete_roots and (root_id, relative) not in discovered_keys
+    ]
+    if not obsolete:
+        return
+    connection.execute(
+        """
+        DELETE FROM cc_search_chats.source_failure_current AS failure
+        USING unnest(%s::text[], %s::text[]) AS removed(
+            source_root_id, source_file_relative
+        )
+        WHERE (failure.source_root_id, failure.source_file_relative) =
+              (removed.source_root_id, removed.source_file_relative)
+        """,
+        (
+            [root_id for root_id, _relative in obsolete],
+            [relative for _root_id, relative in obsolete],
+        ),
     )
 
 
@@ -1270,6 +1563,11 @@ def _publish_staged_refresh(
     read_source_count: int,
     removed_source_count: int,
     advanced_source_count: int,
+    metadata_checked_source_count: int,
+    attempted_source_count: int,
+    attempted_content_bytes: int,
+    blocked_source_count: int,
+    transient_failure_source_count: int,
     diagnostics: tuple[dict[str, object], ...],
 ) -> int:
     with connection.transaction():
@@ -1458,6 +1756,20 @@ def _publish_staged_refresh(
             """,
             (revision_id,),
         )
+        connection.execute(
+            """
+            DELETE FROM cc_search_chats.source_failure_current AS failure
+            USING (
+                SELECT source_root_id, source_file_relative
+                FROM pg_temp.refresh_stage_source
+                UNION ALL
+                SELECT source_root_id, source_file_relative
+                FROM pg_temp.refresh_stage_removed
+            ) AS resolved
+            WHERE (failure.source_root_id, failure.source_file_relative) =
+                  (resolved.source_root_id, resolved.source_file_relative)
+            """
+        )
         configured_ids = [root.source_root_id for root in roots]
         connection.execute(
             """
@@ -1521,6 +1833,11 @@ def _publish_staged_refresh(
                 read_source_count = %s,
                 removed_source_count = %s,
                 advanced_source_count = %s,
+                metadata_checked_source_count = %s,
+                attempted_source_count = %s,
+                attempted_content_bytes = %s,
+                blocked_source_count = %s,
+                transient_failure_source_count = %s,
                 diagnostics = %s, phase = 'done', heartbeat_at = now(),
                 completed_units = total_units
             WHERE run_id = %s
@@ -1532,6 +1849,11 @@ def _publish_staged_refresh(
                 read_source_count,
                 removed_source_count,
                 advanced_source_count,
+                metadata_checked_source_count,
+                attempted_source_count,
+                attempted_content_bytes,
+                blocked_source_count,
+                transient_failure_source_count,
                 Jsonb(list(diagnostics)),
                 run_id,
             ),
@@ -1598,6 +1920,7 @@ def refresh_native_sources(
     claude_root: Path | None = None,
     codex_root: Path | None = None,
     progress: ProgressCallback | None = None,
+    force_retry: bool = False,
 ) -> RefreshResult:
     """Refresh changed native sources and atomically publish their deltas."""
     roots = _resolved_roots(
@@ -1605,19 +1928,31 @@ def refresh_native_sources(
         claude_root=claude_root,
         codex_root=codex_root,
     )
-    migrate(connection)
+    require_current_schema(connection)
     with _refresh_owner(connection, progress):
         checkpoints = _load_checkpoints(connection)
+        failed_observations = _load_failed_observations(connection)
         (
             observed,
             complete_roots,
             discovered_keys,
             preflight_failures,
         ) = _discover_sources(roots)
+        blocked_observations = tuple(
+            value
+            for value in observed
+            if _failed_observation_blocks(
+                value,
+                failed_observations.get(value.key),
+                force_retry=force_retry,
+            )
+        )
+        blocked_keys = {value.key for value in blocked_observations}
         plans = tuple(
             plan
             for value in observed
-            if (plan := _plan_source(value, checkpoints.get(value.key))) is not None
+            if value.key not in blocked_keys
+            and (plan := _plan_source(value, checkpoints.get(value.key))) is not None
         )
         configured_root_ids = {root.source_root_id for root in roots}
         removed_keys = {
@@ -1626,16 +1961,34 @@ def refresh_native_sources(
             if key not in discovered_keys
             and (key[0] not in configured_root_ids or key[0] in complete_roots)
         }
+        with connection.transaction():
+            _sync_roots(connection, roots)
+            _delete_obsolete_failed_observations(
+                connection,
+                failed_observations,
+                discovered_keys,
+                complete_roots,
+            )
         current_revision, current_messages = _current_result_values(connection)
         if not plans and not removed_keys and not preflight_failures:
-            with connection.transaction():
-                _sync_roots(connection, roots)
             if current_revision is None:
                 current_revision = _empty_initial_revision(connection)
+            blocked_source_count = sum(
+                failed_observations[value.key].failure_class == "deterministic"
+                for value in blocked_observations
+            )
+            transient_failure_source_count = sum(
+                failed_observations[value.key].failure_class == "transient"
+                for value in blocked_observations
+            )
             return RefreshResult(
                 revision_id=current_revision,
                 source_count=len(discovered_keys),
                 message_count=current_messages,
+                failed_source_count=len(blocked_observations),
+                metadata_checked_source_count=len(discovered_keys),
+                blocked_source_count=blocked_source_count,
+                transient_failure_source_count=transient_failure_source_count,
             )
 
         changed_source_count = len(plans) + len(removed_keys)
@@ -1649,6 +2002,15 @@ def refresh_native_sources(
         failed_source_count = len(preflight_failures)
         advanced_source_count = 0
         pending_bytes = 0
+        attempted_content_bytes = 0
+        blocked_source_count = sum(
+            failed_observations[value.key].failure_class == "deterministic"
+            for value in blocked_observations
+        )
+        transient_failure_source_count = sum(
+            failed_observations[value.key].failure_class == "transient"
+            for value in blocked_observations
+        )
         completed = 0
         heartbeat = DatabaseHeartbeat(
             connection.info.dsn,
@@ -1673,22 +2035,43 @@ def refresh_native_sources(
             )
             for plan in plans:
                 try:
-                    advanced, source_pending = _parse_and_stage_source(connection, plan)
+                    advanced, source_pending, source_attempted_bytes = (
+                        _parse_and_stage_source(connection, plan)
+                    )
                 except _SourceRefreshError as error:
                     _clear_staged_source(connection, plan)
+                    attempted_content_bytes += error.attempted_content_bytes
                     failed_source_count += 1
+                    if error.failure_class == "deterministic":
+                        blocked_source_count += 1
+                    else:
+                        transient_failure_source_count += 1
+                    _record_failed_observation(
+                        connection,
+                        plan=plan,
+                        run_id=run_id,
+                        error=error,
+                        previous=failed_observations.get(plan.observed.key),
+                    )
                     diagnostics.append(
                         {
                             "code": "source_refresh_failed",
+                            "failure_code": error.code,
+                            "failure_class": error.failure_class,
                             "provider": plan.observed.root.provider.value,
                             "source_root_id": plan.observed.root.source_root_id,
                             "source_file_relative": (
                                 plan.observed.source.source_file_relative.as_posix()
                             ),
                             "detail": str(error),
+                            "record_ordinal": error.record_ordinal,
+                            "source_line": error.source_line,
+                            "source_byte_offset": error.source_byte_offset,
+                            "attempted_content_bytes": (error.attempted_content_bytes),
                         }
                     )
                 else:
+                    attempted_content_bytes += source_attempted_bytes
                     advanced_source_count += int(advanced)
                     pending_bytes += source_pending
                 completed += 1
@@ -1735,6 +2118,11 @@ def refresh_native_sources(
                     read_source_count=read_source_count,
                     removed_source_count=removed_source_count,
                     advanced_source_count=advanced_source_count,
+                    metadata_checked_source_count=len(discovered_keys),
+                    attempted_source_count=len(plans),
+                    attempted_content_bytes=attempted_content_bytes,
+                    blocked_source_count=blocked_source_count,
+                    transient_failure_source_count=(transient_failure_source_count),
                     diagnostics=tuple(diagnostics),
                 )
             else:
@@ -1748,6 +2136,11 @@ def refresh_native_sources(
                     UPDATE cc_search_chats.refresh_run
                     SET status = 'failed', completed_at = now(),
                         corpus_revision_id = %s, failed_source_count = %s,
+                        metadata_checked_source_count = %s,
+                        attempted_source_count = %s,
+                        attempted_content_bytes = %s,
+                        blocked_source_count = %s,
+                        transient_failure_source_count = %s,
                         diagnostics = %s, phase = 'done', heartbeat_at = now(),
                         completed_units = total_units
                     WHERE run_id = %s
@@ -1755,6 +2148,11 @@ def refresh_native_sources(
                     (
                         revision_id,
                         failed_source_count,
+                        len(discovered_keys),
+                        len(plans),
+                        attempted_content_bytes,
+                        blocked_source_count,
+                        transient_failure_source_count,
                         Jsonb(diagnostics),
                         run_id,
                     ),
@@ -1771,6 +2169,12 @@ def refresh_native_sources(
                 removed_source_count=removed_source_count,
                 advanced_source_count=advanced_source_count,
                 pending_bytes=pending_bytes,
+                metadata_checked_source_count=len(discovered_keys),
+                attempted_source_count=len(plans),
+                attempted_content_bytes=attempted_content_bytes,
+                blocked_source_count=blocked_source_count,
+                transient_failure_source_count=transient_failure_source_count,
+                run_id=run_id,
             )
         except Exception as error:
             _record_run_failure(

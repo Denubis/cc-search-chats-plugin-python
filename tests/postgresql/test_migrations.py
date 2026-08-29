@@ -18,6 +18,7 @@ from cc_search_chats.storage.postgresql import (
     index_embeddings,
     migrate,
     migrations,
+    refresh_native_sources,
     replace_messages,
 )
 
@@ -158,7 +159,18 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
         (3, "freshness_schema.sql", 64),
         (4, "coverage_schema.sql", 64),
         (5, "semantic_chunk_schema.sql", 64),
+        (6, "incremental_refresh_schema.sql", 64),
     )
+    assert next(
+        postgres_connection.execute(
+            "SELECT to_regclass('cc_search_chats.source_failure_current') IS NOT NULL"
+        )
+    )[0]
+    assert next(
+        postgres_connection.execute(
+            "SELECT to_regclass('cc_search_chats.auto_refresh_state') IS NOT NULL"
+        )
+    )[0]
     postgres_connection.execute(
         "UPDATE cc_search_chats.schema_migration "
         "SET sha256 = repeat('0', 64) WHERE version = 1"
@@ -166,6 +178,33 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
 
     with pytest.raises(RuntimeError, match="migration 1 checksum mismatch"):
         migrate(postgres_connection)
+
+
+def test_pending_migrations_is_read_only_and_reports_the_packaged_suffix(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    assert tuple(
+        migration.version
+        for migration in migrations.pending_migrations(postgres_connection)
+    ) == (1, 2, 3, 4, 5, 6)
+    assert (
+        next(postgres_connection.execute("SELECT to_regnamespace('cc_search_chats')"))[
+            0
+        ]
+        is None
+    )
+    with pytest.raises(migrations.MaintenanceRequired):
+        refresh_native_sources(postgres_connection, source_roots=())
+    assert (
+        next(postgres_connection.execute("SELECT to_regnamespace('cc_search_chats')"))[
+            0
+        ]
+        is None
+    )
+
+    migrate(postgres_connection)
+
+    assert migrations.pending_migrations(postgres_connection) == ()
 
     assert next(
         postgres_connection.execute(
@@ -182,7 +221,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
     monkeypatch.setattr(
         migrations,
         "_MIGRATIONS",
-        (*migrations._MIGRATIONS, migrations.Migration(6, "missing-migration.sql")),
+        (*migrations._MIGRATIONS, migrations.Migration(7, "missing-migration.sql")),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -192,7 +231,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
         postgres_connection.execute(
             "SELECT version FROM cc_search_chats.schema_migration ORDER BY version"
         )
-    ) == ((1,), (2,), (3,), (4,), (5,))
+    ) == ((1,), (2,), (3,), (4,), (5,), (6,))
 
 
 def _seed_legacy_snapshots(connection: psycopg.Connection) -> None:

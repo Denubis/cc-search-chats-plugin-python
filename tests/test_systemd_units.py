@@ -42,3 +42,19 @@ def test_nightly_refresh_timer_is_persistent_and_dephased() -> None:
     assert "RandomizedDelaySec=30m" in timer
     assert "Persistent=true" in timer
     assert "WantedBy=timers.target" in timer
+
+
+def test_automatic_refresh_is_a_separate_literal_only_oneshot() -> None:
+    service = _unit("cc-search-chats-refresh.service")
+
+    assert "Type=oneshot" in service
+    assert (
+        "ExecStart=%h/.local/bin/cc-search-chats index --literal-only "
+        "--background-refresh" in service
+    )
+    assert "Environment=CC_SEARCH_CONTAINED=1" in service
+    assert "Nice=10" in service
+    assert "IOSchedulingClass=idle" in service
+    assert "CPUWeight=25" in service
+    assert "IOWeight=25" in service
+    assert "[Install]" not in service

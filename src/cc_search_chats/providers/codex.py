@@ -93,6 +93,7 @@ class CodexDiagnosticCode(StrEnum):
     UNKNOWN_COMPACTION = "unknown_compaction"
     DUPLICATE_COMPACTION = "duplicate_compaction"
     EXCLUDED_INTER_AGENT_METADATA = "excluded_inter_agent_metadata"
+    EXCLUDED_LIFECYCLE_EVENT = "excluded_lifecycle_event"
     PARTIAL_TAIL = "partial_tail"
     INVALID_PAYLOAD = "invalid_payload"
     INVALID_UNICODE = "invalid_unicode"
@@ -310,6 +311,32 @@ def _source_kind(source: object) -> SessionKind | None:
     return None
 
 
+def _child_lineage_identity(payload: dict[str, object]) -> str | None:
+    """Resolve the audited child-thread identity without treating its parent as it."""
+    source = payload.get("source")
+    if not _modern_subagent(source) or not _is_json_object(source):
+        return None
+    subagent = source.get("subagent")
+    if not _is_json_object(subagent):
+        return None
+    spawn = subagent.get("thread_spawn")
+    if not _is_json_object(spawn):
+        return None
+    identity = _locator_safe_id(payload.get("id"))
+    parent = _locator_safe_id(payload.get("parent_thread_id"))
+    legacy_parent = _locator_safe_id(payload.get("session_id"))
+    spawn_parent = _locator_safe_id(spawn.get("parent_thread_id"))
+    if (
+        payload.get("thread_source") == "subagent"
+        and identity is not None
+        and parent is not None
+        and legacy_parent == parent == spawn_parent
+        and identity != parent
+    ):
+        return identity
+    return None
+
+
 def _session_kind(
     records: tuple[_DecodedRecord, ...],
 ) -> tuple[SessionKind, tuple[CodexDiagnostic, ...]]:
@@ -413,7 +440,12 @@ def _metadata_session_identity(
                 )
             )
             continue
-        present = tuple(payload[key] for key in ("id", "session_id") if key in payload)
+        child_identity = _child_lineage_identity(payload)
+        present = (
+            (child_identity,)
+            if child_identity is not None
+            else tuple(payload[key] for key in ("id", "session_id") if key in payload)
+        )
         validated = tuple(_locator_safe_id(value) for value in present)
         if (
             not present
@@ -854,6 +886,37 @@ def _parse_event(
             "event_msg payload is not an object",
         )
     event_type = payload.get("type")
+    lifecycle_keysets = {
+        "task_started": {
+            frozenset(
+                {
+                    "type",
+                    "collaboration_mode_kind",
+                    "model_context_window",
+                    "started_at",
+                    "turn_id",
+                }
+            ),
+            frozenset(
+                {
+                    "type",
+                    "collaboration_mode_kind",
+                    "model_context_window",
+                    "turn_id",
+                }
+            ),
+        },
+        "entered_review_mode": {frozenset({"type", "target", "user_facing_hint"})},
+        "token_count": {frozenset({"type", "info", "rate_limits"})},
+    }
+    if isinstance(event_type, str) and frozenset(payload) in lifecycle_keysets.get(
+        event_type, set()
+    ):
+        return None, _diagnostic(
+            CodexDiagnosticCode.EXCLUDED_LIFECYCLE_EVENT,
+            record.envelope,
+            f"{event_type} lifecycle event is deliberately non-searchable",
+        )
     role = {"user_message": "user", "agent_message": "assistant"}.get(event_type)
     message = payload.get("message")
     if role is None or not isinstance(message, str):

@@ -20,6 +20,9 @@ authorizes and performs UAT.
   `~/.codex-ponytail/sessions`.
 - A previous `index --literal-only` and `index --semantic-only` completed before
   the append actions below. Record that baseline's corpus/semantic IDs.
+- `cc-search-chats-refresh.service` is installed, while
+  `cc-search-chats-index.timer` is disabled and inactive. Keep the timer in that
+  state through human acceptance.
 
 ## Create four positive append controls
 
@@ -33,8 +36,10 @@ session root, native session ID, and exact phrase for:
 3. standard Codex;
 4. Codex Ponytail.
 
-Do not run `index` after creating these controls. The first searches below must
-discover the appended records on demand.
+Do not run `index` after creating these controls. The first ranked search below
+must return the prior committed snapshot inside its deadline, explicitly omit
+the new sentinel, and durably request background refresh. Search must not parse
+the append itself.
 
 ## Configure the exact four roots
 
@@ -59,17 +64,43 @@ directories; they do not point at either isolated home.
 
 ## Acceptance script
 
-This script keeps stdout JSON and stderr NDJSON separate. It positively locates
-the expected provider/session/message, verifies exact native resolution, checks
-the result has a physical alias under the expected root through PostgreSQL, and
-requires one terminal progress event. It then repeats the same control through
-hybrid search.
+This script keeps stdout JSON and stderr NDJSON separate. It first proves the
+stale-first bounded answer and durable systemd handoff, waits for the oneshot,
+then positively locates all four appended messages. Semantic maintenance is
+explicitly run only after literal publication; the final cases verify exact
+native resolution and complete hybrid ranking.
 
 ```fish
 set -g uat_dir (mktemp -d)
 
 function assert_progress --argument-names path
     python -c 'import json,sys; e=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]; assert e; assert [x["sequence"] for x in e]==list(range(1,len(e)+1)); assert sum(x["event"]=="terminal" for x in e)==1; assert e[-1]["event"]=="terminal"' "$path"
+end
+
+function probe_background_refresh
+    test (systemctl --user is-enabled cc-search-chats-index.timer 2>/dev/null) = disabled
+    or return 1
+
+    set -l probe "$uat_dir/background-probe.json"
+    set -l probe_progress "$uat_dir/background-probe.ndjson"
+    set -l started (date +%s%N)
+    cc-search-chats search "$UAT_CLAUDE_STANDARD_QUERY" --literal --provider claude --limit 200 --json >$probe 2>$probe_progress
+    or return 1
+    set -l finished (date +%s%N)
+    set -l elapsed_ms (math "($finished - $started) / 1000000")
+    test "$elapsed_ms" -lt 5000
+    or return 1
+    assert_progress "$probe_progress"
+    or return 1
+    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["status"]=="complete" and d["deadline_ms"]==5000 and d["retrieval_mode"]=="literal"; assert "native_sources_not_checked" in d["stale_reasons"]; assert all(sys.argv[2] not in r["text"] for r in d["results"]); b=d["background_refresh"]; assert b["request_id"]>0 and b["state"] in {"launching","launched","running","complete"}' "$probe" "$UAT_CLAUDE_STANDARD_QUERY"
+    or return 1
+
+    systemctl --user start cc-search-chats-refresh.service
+    or return 1
+    test (systemctl --user show cc-search-chats-refresh.service --property=ActiveState --value) = inactive
+    or return 1
+    test (systemctl --user show cc-search-chats-refresh.service --property=Result --value) = success
+    or return 1
 end
 
 function run_case --argument-names label provider expected_root session query
@@ -110,6 +141,14 @@ function run_case --argument-names label provider expected_root session query
 end
 
 function execute_uat
+    probe_background_refresh
+    or return 1
+
+    cc-search-chats index --semantic-only --json >$uat_dir/semantic-refresh.json 2>$uat_dir/semantic-refresh.ndjson
+    or return 1
+    assert_progress "$uat_dir/semantic-refresh.ndjson"
+    or return 1
+
     run_case claude-standard claude "$HOME/.claude/projects" "$UAT_CLAUDE_STANDARD_SESSION" "$UAT_CLAUDE_STANDARD_QUERY"
     or return 1
     run_case claude-ponytail claude "$HOME/.claude-ponytail/projects" "$UAT_CLAUDE_PONYTAIL_SESSION" "$UAT_CLAUDE_PONYTAIL_QUERY"
@@ -124,6 +163,9 @@ function execute_uat
     assert_progress "$uat_dir/final-status.ndjson"
     or return 1
     python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["schema_version"]==2 and d["status"]=="complete"; assert d["selected"] is True and d["completed"]==d["total"]; assert d["semantic"]["fresh"] is True; assert d["coverage"]["configured_root_count"]==4 and d["coverage"]["resolved_root_count"]==4 and d["coverage"]["completeness"]=="complete"' "$uat_dir/final-status.json"
+    or return 1
+
+    test (systemctl --user is-enabled cc-search-chats-index.timer 2>/dev/null) = disabled
     or return 1
 
     printf 'UAT evidence: %s\n' "$uat_dir"
@@ -141,7 +183,8 @@ The human reviews:
 
 - all four expected messages and their surrounding context;
 - ranking usefulness and false positives;
-- baseline, on-demand refresh, model-load, and query latency;
+- baseline, stale-first invocation-to-answer, background incremental byte work,
+  model-load, and query latency;
 - coverage/warnings and the exact roots associated with each control;
 - stdout/stderr artifacts and final fresh semantic state.
 

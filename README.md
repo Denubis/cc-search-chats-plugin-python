@@ -106,14 +106,18 @@ special tokens, and 96-token overlap. Each prefixed chunk digest maps to one
 reusable normalized 1,024-dimensional vector. Retrieval keeps only the best
 chunk per logical message before hybrid rank fusion.
 
-If the model, dependencies, CUDA, or VRAM are unavailable, hybrid search exits
-nonzero with a named phase and a shell-safe literal fallback. Literal search
-does not load the model.
+If the model, dependencies, CUDA, VRAM, or request budget are unavailable,
+ranked search returns its already-computed literal answer with named semantic
+degradation. Literal search does not load the model. Explicit semantic
+maintenance still exits nonzero when its required model work cannot run.
 
 ## Quick Start
 
 ```console
-# Hybrid natural-language search; refreshes changed native records first
+# Explicit schema maintenance before using a newly installed schema version
+cc-search-chats index --migrate --json
+
+# Hybrid natural-language search over the committed snapshot
 cc-search-chats search "database migration"
 
 # Exact lexical search without the model
@@ -134,14 +138,22 @@ cc-search-chats resolve CCCHAT_LOCATOR --reference-only --json
 # Export canonical human-message points from a half-open UTC window, without bodies
 cc-search-chats events --from 2026-01-01T00:00:00Z --until 2027-01-01T00:00:00Z --json
 
-# Explicit maintenance or read-only semantic checkpoint
+# Explicit corpus/semantic maintenance or read-only semantic checkpoint
 cc-search-chats index --json
 cc-search-chats index --status --json
 ```
 
-`search` performs metadata discovery and incremental refresh before retrieval.
-Running `index` first is therefore unnecessary for freshness; it remains useful
-for scheduled baseline/semantic maintenance.
+Ranked `search` measures a provisional five-second deadline from executable
+invocation. It retrieves literal candidates from the committed PostgreSQL
+snapshot first and never waits for the index owner. After retrieval it may
+atomically request one low-priority literal refresh per five-minute cooldown;
+user systemd owns that work after the requesting CLI exits. A later search sees
+the resulting revision. Output names the queried revision, index time,
+staleness reasons, retrieval mode, deadline, and durable background state.
+
+`index --migrate` is the only CLI path that applies pending schema migrations.
+Search and routine index/status commands report `maintenance_required` without
+DDL until the operator runs that explicit action.
 
 ## Search Scope
 
@@ -203,8 +215,15 @@ zero. Native logs are never written or locked.
 
 One PostgreSQL advisory owner serializes refresh/semantic work. Long phases
 publish owner, heartbeat, completed/total units, and named state. Committed
-literal rows remain searchable after semantic failure, while hybrid search
-refuses a stale or incomplete semantic generation.
+literal rows remain searchable after semantic failure. Ranked search may fuse
+only digest-valid rows from the selected semantic generation; missing mappings
+produce partial hybrid coverage or literal fallback rather than stale vectors.
+
+Deterministic source failures retain a separate observation fingerprint. An
+unchanged blocked file is metadata-checked without reopening JSONL bytes;
+metadata/parser changes or explicit `index --force-retry` retry it. Transient
+failures retain a bounded retry time without advancing the successful source
+checkpoint.
 
 ## JSON and Progress Contract
 
@@ -213,7 +232,9 @@ command writes one stdout object containing:
 
 - `schema_version`, `command`, and terminal `status`
 - `coverage` with roots, repositories, file counts, diagnostics, and watermarks
-- `refresh`, `semantic`, and `warnings`
+- `refresh`, `semantic`, `background_refresh`, and `warnings`
+- ranked-search `deadline_ms`, `elapsed_ms`, `retrieval_mode`, `indexed_at`, and
+  `stale_reasons`
 - command-specific `results`, `sessions`, `messages`, `resolutions`, or `events`
 
 Search/extract/context/resolve messages carry provider-qualified canonical
@@ -235,9 +256,10 @@ exactly one terminal event. Use `--progress human` for concise terminal text.
 
 ## Scheduled Maintenance
 
-The distribution includes a low-priority oneshot and persistent nightly timer.
-Copy them to `~/.config/systemd/user/`. Optional operator configuration belongs
-in `~/.config/cc-search-chats/index.env`, which the service reads if present.
+The distribution includes a low-priority automatic literal-refresh oneshot plus
+the composed nightly service and persistent timer. Copy all packaged units to
+`~/.config/systemd/user/`. Optional operator configuration belongs in
+`~/.config/cc-search-chats/index.env`, which both services read if present.
 For example:
 
 ```text
@@ -250,11 +272,13 @@ existing environment. The packaged unit supplies neither.
 
 ```console
 systemctl --user daemon-reload
-systemctl --user enable --now cc-search-chats-index.timer
+systemctl --user enable --now cc-search-chats-index.timer  # only after accepted UAT
 ```
 
-The timer runs nightly at 03:00 with up to 30 minutes randomized delay. No
-resident daemon is required.
+The timer runs nightly at 03:00 with up to 30 minutes randomized delay. Keep it
+disabled through migration and UAT. Search starts
+`cc-search-chats-refresh.service` with `--no-block`; the automatic oneshot has no
+timer and never loads the model. No resident daemon is required.
 
 ## Recovery and Release Boundaries
 

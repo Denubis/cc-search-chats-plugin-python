@@ -21,14 +21,17 @@ import sys
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
+from multiprocessing import active_children, get_context
 from pathlib import Path
 from threading import Event
+from time import monotonic, sleep
 from typing import Literal
 
 import pytest
 
 from cc_search_chats import __version__
 from cc_search_chats.cli import (
+    _bounded_query_embedding,
     _contain_semantic_index,
     _ProgressStream,
     build_parser,
@@ -98,6 +101,79 @@ def test_semantic_failure_names_phase_and_prints_literal_fallback(
     assert "model_load" in error
     assert "Literal search is required for complete current results" in error
     assert "cc-search-chats search 'needle phrase' --literal" in error
+
+
+def test_postgresql_search_does_not_wait_on_a_local_admission_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PGSERVICE", "fixture")
+    monkeypatch.delenv("CC_SEARCH_DB_PATH", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "needle", "--literal", "--json"],
+    )
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+    )
+    admissions: list[str] = []
+
+    def observed_admission(name: str):
+        admissions.append(name)
+        return nullcontext()
+
+    monkeypatch.setattr("cc_search_chats.cli.client_admission", observed_admission)
+    monkeypatch.setattr(
+        "cc_search_chats.cli._handle_postgres",
+        lambda args, dsn, progress_stream: 0,
+    )
+
+    with pytest.raises(SystemExit, match="0"):
+        main()
+
+    assert admissions == []
+
+
+def test_background_refresh_service_invocation_is_a_valid_literal_index_mode() -> None:
+    args = build_parser().parse_args(
+        ["index", "--literal-only", "--background-refresh"]
+    )
+
+    assert args.command == "index"
+    assert args.literal_only is True
+    assert args.background_refresh is True
+
+
+def test_explicit_postgresql_migration_is_an_index_maintenance_mode() -> None:
+    args = build_parser().parse_args(["index", "--migrate", "--json"])
+
+    assert args.command == "index"
+    assert args.migrate is True
+
+
+def test_semantic_query_timeout_terminates_and_reaps_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = get_context("fork")
+
+    def never_respond(pipe) -> None:
+        pipe.recv()
+        sleep(5)
+
+    monkeypatch.setattr("cc_search_chats.cli.get_context", lambda method: context)
+    monkeypatch.setattr("cc_search_chats.cli._query_embedding_child", never_respond)
+    children_before = {child.pid for child in active_children()}
+    started = monotonic()
+
+    with pytest.raises(TimeoutError, match="exceeded its deadline"):
+        _bounded_query_embedding(
+            "private query text",
+            timeout_seconds=0.05,
+            progress=lambda phase, state: None,
+        )
+
+    assert monotonic() - started < 1
+    assert {child.pid for child in active_children()} == children_before
 
 
 def test_search_scope_flags_are_explicit_and_everything_is_rejected(

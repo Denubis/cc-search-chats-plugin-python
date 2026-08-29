@@ -1,6 +1,6 @@
 # PostgreSQL index maintenance
 
-Last verified: 2026-08-24
+Last verified: 2026-08-29
 
 This runbook separates read-only inspection, candidate migration, production
 UAT, and irreversible legacy pruning. Preparing or testing code does not
@@ -60,14 +60,19 @@ unverified checkout.
 ## 3. Apply migration without pruning
 
 Only after explicit production-migration authority, use the exact installed
-entrypoint. Literal-only refresh applies ordered migrations and performs the
-bounded native parse without loading the model:
+entrypoint. Migration and literal refresh are separate commands; a failed
+migration cannot be obscured by refresh output:
 
 ```console
+cc-search-chats index --migrate --json
 cc-search-chats index --literal-only --json
 ```
 
-Capture stdout/stderr separately. Stdout must parse as one schema-v2 object.
+The migration result must report `applied_schema_version == 6`. Re-running it is
+idempotent. Routine search/index commands must have reported
+`maintenance_required` without schema mutation before this explicit step.
+
+Capture each stdout/stderr separately. Stdout must parse as one schema-v2 object.
 Stderr must parse as ordered schema-v2 NDJSON ending in exactly one terminal
 event. Require positive root/file counts and
 `coverage.completeness == "complete"`; zero resolved roots is not passing.
@@ -92,8 +97,9 @@ messages. Retry may reuse existing chunk vectors but must not create another
 vector for the same profile/input digest.
 
 On semantic failure, preserve its phase/code and run a positive literal control.
-Literal search must remain current; hybrid search must fail rather than serve a
-stale generation.
+Literal search must remain available. Ranked hybrid search must return that
+literal answer with named degradation and may fuse only digest-valid mappings;
+explicit semantic maintenance/status must not claim current completeness.
 
 ## 5. Recovery
 

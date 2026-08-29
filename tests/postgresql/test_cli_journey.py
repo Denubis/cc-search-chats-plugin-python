@@ -7,6 +7,7 @@ from io import StringIO
 from pathlib import Path
 from typing import cast
 
+import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
@@ -102,6 +103,11 @@ def _progress_events(stderr: str) -> list[dict[str, object]]:
             "fts_revision",
             "semantic_revision",
             "source_watermark",
+            "deadline_ms",
+            "retrieval_mode",
+            "indexed_at",
+            "stale_reasons",
+            "background_refresh",
             "warning",
             "error",
             "coverage",
@@ -127,6 +133,9 @@ def test_postgresql_cli_journey_with_events(
 ) -> None:
     monkeypatch.setattr(
         "cc_search_chats.cli._contain_semantic_index", lambda args: None
+    )
+    monkeypatch.setattr(
+        "cc_search_chats.cli._start_systemd_refresh", lambda timeout_seconds: None
     )
     claude_root, codex_root = tmp_path / "claude", tmp_path / "codex"
     claude_root.mkdir()
@@ -163,6 +172,9 @@ def test_postgresql_cli_journey_with_events(
     monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
     monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
 
+    code, migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
+    assert code == 0
+    assert json.loads(migrated.out)["applied_schema_version"] == 6
     code, indexed = _run(monkeypatch, capsys, "index", "--literal-only", "--json")
     assert code == 0
     indexed_payload = json.loads(indexed.out)
@@ -295,6 +307,40 @@ def test_postgresql_cli_journey_with_events(
     with claude_source.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(appended, separators=(",", ":")) + "\n")
 
+    code, stale_search = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "on-demand refresh sentinel",
+        "--literal",
+        "--json",
+    )
+    assert code == 0
+    stale_payload = json.loads(stale_search.out)
+    _assert_v2_envelope(stale_payload, "search")
+    assert stale_payload["results"] == []
+    assert stale_payload["stale_reasons"] == [
+        "native_sources_not_checked",
+        "semantic_revision_stale",
+    ]
+    assert stale_payload["background_refresh"]["state"] == "launched"
+    stale_events = _progress_events(stale_search.err)
+    assert {event["phase"] for event in stale_events} == {"retrieve", "done"}
+    assert stale_events[-1]["deadline_ms"] == stale_payload["deadline_ms"]
+    assert stale_events[-1]["retrieval_mode"] == stale_payload["retrieval_mode"]
+    assert stale_events[-1]["indexed_at"] == stale_payload["indexed_at"]
+    assert stale_events[-1]["stale_reasons"] == stale_payload["stale_reasons"]
+    assert stale_events[-1]["background_refresh"] == stale_payload["background_refresh"]
+
+    code, _background = _run(
+        monkeypatch,
+        capsys,
+        "index",
+        "--literal-only",
+        "--background-refresh",
+        "--json",
+    )
+    assert code == 0
     code, refreshed_search = _run(
         monkeypatch,
         capsys,
@@ -305,21 +351,12 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     refreshed_payload = json.loads(refreshed_search.out)
-    _assert_v2_envelope(refreshed_payload, "search")
     refreshed_results = refreshed_payload["results"]
     assert len(refreshed_results) == 1
     _assert_message_identity(refreshed_results[0])
     assert refreshed_results[0]["logical_message_id"] == (
         "claude-search-refresh-append"
     )
-    refreshed_events = _progress_events(refreshed_search.err)
-    assert {event["phase"] for event in refreshed_events} >= {
-        "scan",
-        "parse",
-        "fts_commit",
-        "retrieve",
-        "done",
-    }
     claude_locator = refreshed_results[0]["locator"]
 
     vector = [0.0] * 1024
@@ -336,8 +373,8 @@ def test_postgresql_cli_journey_with_events(
         embedded_texts.extend(texts)
         return [vector for _ in texts]
 
-    def embed_query(query, **kwargs):
-        progress = kwargs.get("progress")
+    def bounded_query_embedding(query, *, timeout_seconds, progress):
+        assert 0 < timeout_seconds <= 5
         if progress is not None:
             progress("model_preflight", "running")
             progress("model_preflight", "complete")
@@ -346,8 +383,21 @@ def test_postgresql_cli_journey_with_events(
         return vector
 
     monkeypatch.setattr("cc_search_chats.cli.embed_passages", embed_passages)
-    monkeypatch.setattr("cc_search_chats.cli.embed_query", embed_query)
+    monkeypatch.setattr(
+        "cc_search_chats.cli._bounded_query_embedding",
+        bounded_query_embedding,
+        raising=False,
+    )
     monkeypatch.setattr("cc_search_chats.cli.chunk_passages", _single_chunks)
+    code, _semantic_index = _run(
+        monkeypatch,
+        capsys,
+        "index",
+        "--semantic-only",
+        "--json",
+    )
+    assert code == 0
+    embedded_texts.clear()
     code, initial_hybrid = _run(
         monkeypatch,
         capsys,
@@ -370,8 +420,6 @@ def test_postgresql_cli_journey_with_events(
     assert {event["phase"] for event in hybrid_events} >= {
         "model_preflight",
         "model_load",
-        "semantic_embed",
-        "semantic_commit",
         "query_embed",
         "retrieve",
         "done",
@@ -387,6 +435,36 @@ def test_postgresql_cli_journey_with_events(
         handle.write(json.dumps(appended, separators=(",", ":")) + "\n")
     embedded_texts.clear()
 
+    with psycopg.connect(postgres_cluster.dsn) as database:
+        database.execute(
+            """
+            UPDATE cc_search_chats.auto_refresh_state
+            SET requested_at = requested_at - interval '5 minutes'
+            WHERE singleton
+            """
+        )
+
+    code, stale_hybrid = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "hybrid refresh sentinel",
+        "--json",
+    )
+    assert code == 0
+    assert all(
+        result["logical_message_id"] != "claude-hybrid-refresh-append"
+        for result in json.loads(stale_hybrid.out)["results"]
+    )
+    code, _background = _run(
+        monkeypatch,
+        capsys,
+        "index",
+        "--literal-only",
+        "--background-refresh",
+        "--json",
+    )
+    assert code == 0
     code, refreshed_hybrid = _run(
         monkeypatch,
         capsys,
@@ -396,8 +474,11 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     hybrid_results = json.loads(refreshed_hybrid.out)["results"]
-    assert hybrid_results[0]["logical_message_id"] == "claude-hybrid-refresh-append"
-    assert embedded_texts == ["hybrid refresh sentinel"]
+    assert any(
+        result["logical_message_id"] == "claude-hybrid-refresh-append"
+        for result in hybrid_results
+    )
+    assert embedded_texts == []
 
     code, searched = _run(
         monkeypatch,
@@ -564,6 +645,8 @@ def test_extract_requires_provider_when_native_session_ids_collide(
     monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
     monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
 
+    code, _migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
+    assert code == 0
     code, _indexed = _run(monkeypatch, capsys, "index", "--literal-only", "--json")
     assert code == 0
     code, ambiguous = _run(

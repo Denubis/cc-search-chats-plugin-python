@@ -54,6 +54,9 @@ def test_cli_release_version_is_synchronized() -> None:
     changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert f"cc-search-chats {EXPECTED_CLI_VERSION}" in readme
     assert f"## cc-search-chats {EXPECTED_CLI_VERSION}" in changelog
+    assert project["project"]["scripts"]["cc-search-chats"] == (
+        "cc_search_chats.bootstrap:main"
+    )
 
 
 def test_codex_marketplace_resolves_the_shared_plugin_source() -> None:

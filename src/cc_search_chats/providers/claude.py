@@ -37,6 +37,9 @@ class ClaudeDiagnosticCode(StrEnum):
     EXCLUDED_REASONING = "excluded_reasoning"
     EXCLUDED_SYSTEM = "excluded_system"
     EXCLUDED_INJECTED = "excluded_injected"
+    EXCLUDED_METADATA = "excluded_metadata"
+    EXCLUDED_NON_TEXT_TOOL_RESULT = "excluded_non_text_tool_result"
+    EXCLUDED_TOOL_METADATA = "excluded_tool_metadata"
     MISSING_MESSAGE_UUID = "missing_message_uuid"
     INVALID_COMPACT_BOUNDARY = "invalid_compact_boundary"
     DUPLICATE_COMPACT_BOUNDARY = "duplicate_compact_boundary"
@@ -114,6 +117,241 @@ class _DecodedRecord:
     payload: dict[str, object]
 
 
+_CLAUDE_METADATA_KEYSETS = {
+    "progress": {
+        frozenset(
+            {
+                "type",
+                "agentId",
+                "cwd",
+                "data",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "slug",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "agentId",
+                "cwd",
+                "data",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "slug",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "cwd",
+                "data",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "cwd",
+                "data",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "agentId",
+                "cwd",
+                "data",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "agentId",
+                "cwd",
+                "data",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "agentName",
+                "cwd",
+                "data",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "teamName",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+    },
+    "attachment": {
+        frozenset(
+            {
+                "type",
+                "agentId",
+                "attachment",
+                "cwd",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentUuid",
+                "sessionId",
+                "timestamp",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "agentId",
+                "attachment",
+                "cwd",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentUuid",
+                "sessionId",
+                "slug",
+                "timestamp",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "agentId",
+                "attachment",
+                "cwd",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentUuid",
+                "sessionId",
+                "sessionKind",
+                "timestamp",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "agentId",
+                "attachment",
+                "cwd",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentUuid",
+                "sessionId",
+                "sessionKind",
+                "slug",
+                "timestamp",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+    },
+    "last-prompt": {frozenset({"type", "leafUuid", "sessionId"})},
+    "file-history-snapshot": {
+        frozenset({"type", "isSnapshotUpdate", "messageId", "snapshot"})
+    },
+    "agent-setting": {frozenset({"type", "agentSetting", "sessionId"})},
+    "permission-mode": {frozenset({"type", "permissionMode", "sessionId"})},
+    "mode": {frozenset({"type", "mode", "sessionId"})},
+    "custom-title": {frozenset({"type", "customTitle", "sessionId"})},
+    "fork-context-ref": {
+        frozenset(
+            {"type", "agentId", "contextLength", "parentLastUuid", "parentSessionId"}
+        )
+    },
+    "queue-operation": {
+        frozenset({"type", "content", "operation", "sessionId", "timestamp"})
+    },
+    "started": {frozenset({"type", "agentId", "key"})},
+    "ai-title": {frozenset({"type", "aiTitle", "sessionId"})},
+}
+
+
+def _is_known_metadata_record(payload: dict[str, object]) -> bool:
+    record_type = payload.get("type")
+    return isinstance(record_type, str) and frozenset(payload) in (
+        _CLAUDE_METADATA_KEYSETS.get(record_type, set())
+    )
+
+
 def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
     """Narrow an untrusted JSON value after checking its key contract."""
     return isinstance(value, dict) and all(isinstance(key, str) for key in value)
@@ -188,6 +426,8 @@ def _classify_session_kind(
     kind = next(iter(path_kinds), SessionKind.UNKNOWN)
     for record in records:
         payload = record.payload
+        if _is_known_metadata_record(payload):
+            continue
         recorded_session_id = payload.get("sessionId")
         if "sessionId" in payload and (
             not isinstance(recorded_session_id, str)
@@ -249,26 +489,44 @@ def _stringify_tool_value(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _tool_output(value: object) -> str | None:
+def _is_known_non_text_tool_item(value: object) -> bool:
+    if not _is_json_object(value):
+        return False
+    if value.get("type") == "tool_reference":
+        return frozenset(value) == {"type", "tool_name"}
+    if value.get("type") != "image" or frozenset(value) != {"type", "source"}:
+        return False
+    source = value.get("source")
+    return _is_json_object(source) and frozenset(source) == {
+        "type",
+        "media_type",
+        "data",
+    }
+
+
+def _tool_output(value: object) -> tuple[str | None, bool]:
     """Extract only understood Claude tool-result output shapes."""
     if isinstance(value, str):
-        return value
+        return value, False
     if isinstance(value, list):
         parts: list[str] = []
+        excluded_non_text = False
         for item in value:
             if isinstance(item, str):
                 parts.append(item)
             elif _is_json_object(item) and item.get("type") == "text":
                 text = item.get("text")
                 if not isinstance(text, str):
-                    return None
+                    return None, False
                 parts.append(text)
+            elif _is_known_non_text_tool_item(item):
+                excluded_non_text = True
             else:
-                return None
-        return "\n".join(parts)
+                return None, False
+        return ("\n".join(parts) or None), excluded_non_text
     if isinstance(value, dict):
-        return _stringify_tool_value(value)
-    return None
+        return _stringify_tool_value(value), False
+    return None, False
 
 
 def _extract_content(
@@ -377,8 +635,8 @@ def _extract_content(
             if rendered_input is not None:
                 rows.append((ContentClass.TOOL_INPUT, rendered_input))
         elif block_type == "tool_result":
-            output = _tool_output(block.get("content"))
-            if output is None:
+            output, excluded_non_text = _tool_output(block.get("content"))
+            if output is None and not excluded_non_text:
                 diagnostics.append(
                     _diagnostic(
                         ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
@@ -386,7 +644,7 @@ def _extract_content(
                         "tool_result block has an unsupported content shape",
                     )
                 )
-            elif not is_unicode_scalar_text(output):
+            elif output is not None and not is_unicode_scalar_text(output):
                 diagnostics.append(
                     _diagnostic(
                         ClaudeDiagnosticCode.INVALID_UNICODE,
@@ -394,8 +652,29 @@ def _extract_content(
                         "tool_result block contains a non-scalar Unicode value",
                     )
                 )
-            else:
+            elif output is not None:
                 rows.append((ContentClass.TOOL_OUTPUT, output))
+            if excluded_non_text:
+                diagnostics.append(
+                    _diagnostic(
+                        ClaudeDiagnosticCode.EXCLUDED_NON_TEXT_TOOL_RESULT,
+                        envelope,
+                        "non-text tool result content is deliberately non-searchable",
+                    )
+                )
+        elif block_type == "server_tool_use" and frozenset(block) == {
+            "type",
+            "id",
+            "input",
+            "name",
+        }:
+            diagnostics.append(
+                _diagnostic(
+                    ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA,
+                    envelope,
+                    "server tool metadata is deliberately non-searchable",
+                )
+            )
         elif block_type == "thinking":
             diagnostics.append(
                 _diagnostic(
@@ -560,6 +839,15 @@ def parse_claude_session(
     for record in records:
         payload = record.payload
         record_type = payload.get("type")
+        if _is_known_metadata_record(payload):
+            diagnostics.append(
+                _diagnostic(
+                    ClaudeDiagnosticCode.EXCLUDED_METADATA,
+                    record.envelope,
+                    f"{record_type} metadata is deliberately non-searchable",
+                )
+            )
+            continue
         if record_type == "system":
             if payload.get("subtype") == "compact_boundary":
                 boundary, diagnostic = _parse_boundary(

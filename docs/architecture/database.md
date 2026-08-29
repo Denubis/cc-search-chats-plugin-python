@@ -1,6 +1,6 @@
 # Database architecture
 
-Last verified: 2026-08-24
+Last verified: 2026-08-29
 
 ## Authority and ownership
 
@@ -30,6 +30,7 @@ ledger.
 | 3 | `freshness_schema.sql` | owners, phases, heartbeats, completed/total units |
 | 4 | `coverage_schema.sql` | actual read and removed-source counts |
 | 5 | `semantic_chunk_schema.sql` | exact chunk profile, chunk coordinates, retirement of whole-message mappings |
+| 6 | `incremental_refresh_schema.sql` | failed-observation fingerprints, truthful attempted work, durable automatic-refresh admission |
 
 Applied migration bytes are immutable. A future schema change is a new ordered
 resource plus a ledger test.
@@ -45,6 +46,8 @@ resource plus a ledger test.
 | `corpus_state` | singleton | selects current corpus generation metadata |
 | `corpus_revision` | one small row per changed publication | counts, watermarks, terminal state; no message copies |
 | `refresh_run` | one per attempted changed refresh | progress/diagnostics; terminal rows retained to newest 100 |
+| `source_failure_current` | zero or one per current source | deterministic fingerprint or transient retry boundary without advancing the successful checkpoint |
+| `auto_refresh_state` | singleton | five-minute admission, launch/run state, retry time, and resulting refresh run |
 | `embedding_profile` | one per embedding/chunker contract | model snapshot, prefixes, pooling, dimensions, normalization, attention, token budgets |
 | `semantic_chunk_current` | one per current message/profile/chunk ordinal | source digest, token/character bounds, passage and prefixed-input digest |
 | `embedding_value` | one per profile/prefixed-input digest | reusable `vector(1024)`; unreachable rows reclaimed after publication |
@@ -94,7 +97,18 @@ checkpoints, and selects a new `corpus_revision`. PostgreSQL MVCC exposes either
 the old or new committed state. A no-op creates no generation and changes no
 current row versions.
 
-One session advisory owner serializes refresh/semantic work. Scanning, parsing,
+A deterministic parse failure stores its observed file identity, size, mtime,
+parser version, failing coordinate/code, and attempted bytes separately from the
+last successful checkpoint. The same observation is a metadata-only blocked
+source on later refreshes. Transient I/O failures retain retry-after/backoff;
+manual force retry and changed observations invalidate the relevant boundary.
+
+One session advisory owner serializes refresh/semantic work. Search never
+acquires or waits for that owner. One `auto_refresh_state` compare-and-set admits
+at most one automatic request per five minutes; a bounded
+`systemctl --user start --no-block` launch hands it to the literal-only oneshot.
+The service claims the durable request and records completion/failure and its
+refresh run. Scanning, parsing,
 tokenization, model loading, and embedding occur without a long write
 transaction. Independent heartbeat connections expose progress; database
 session death releases ownership.
@@ -115,10 +129,19 @@ chunk to join one vector before selection. Failure leaves literal state current
 and semantic state stale for the new corpus. Retry reuses already validated
 chunk vectors.
 
-Semantic retrieval validates selected corpus/profile freshness, applies filters
-before ranking, uses exact inner product over normalized vectors, and keeps the
-best chunk per logical message. Hybrid retrieval fuses bounded literal and
-semantic components with exact reciprocal-rank-fusion arithmetic.
+Explicit semantic retrieval validates selected corpus/profile completeness.
+Ranked interactive search may instead use a selected older complete generation,
+but joins only current message/chunk rows whose profile, chunker, and source-text
+digest still match; missing mappings make coverage partial. It applies filters
+before exact inner-product ranking and keeps the best chunk per logical message.
+Hybrid retrieval fuses bounded literal and semantic components with exact
+reciprocal-rank-fusion arithmetic.
+
+Ranked search starts its monotonic five-second clock in the console bootstrap,
+uses deadline-derived connection/lock/statement budgets, reads literal results
+first, and runs query embedding in a terminable/reaped child. It reports a named
+deadline error only when no literal answer can be obtained; optional semantic or
+background-launch failure degrades the committed literal answer.
 
 ## Storage, backup, and rebuild boundary
 

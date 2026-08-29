@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-cc-search-chats = "cc_search_chats.cli:main"
+cc-search-chats = "cc_search_chats.bootstrap:main"
 
 [project.optional-dependencies]
 semantic = [

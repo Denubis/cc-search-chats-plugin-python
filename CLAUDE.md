@@ -30,9 +30,10 @@ They do not use the operator's production database.
 
 ## CLI Contract
 
-- PostgreSQL is the default backend. `search` refreshes native metadata and any
-  changed complete records before retrieval; `index` is explicit maintenance,
-  not a prerequisite for freshness.
+- PostgreSQL is the default backend. Ranked `search` reads one committed
+  snapshot under a five-second invocation-to-answer deadline, then admits at
+  most one durable literal background refresh per five-minute cooldown. It
+  never migrates, refreshes, or embeds inline; `index` owns maintenance.
 - Hybrid search is the default. `--literal` avoids the model. Default search
   returns visible primary-session prose; `--agents` includes agent and unknown
   sessions; `--literal --tools` includes tool name/input/output rows;
@@ -40,7 +41,9 @@ They do not use the operator's production database.
   occurrences. No supported mode exposes reasoning, system/developer
   instructions, injected context, or unrecognised record shapes.
 - Ranked `--limit` is 1–200. Hybrid ranking uses bounded literal and semantic
-  components with exact reciprocal-rank-fusion arithmetic.
+  components with exact reciprocal-rank-fusion arithmetic. Query embedding is
+  a bounded, reaped child; timeout or unavailable semantic state returns the
+  literal answer with explicit degradation.
 - `resolve` verifies exact `ccchat:v1:` locators against native source bytes.
   `--reference-only` retains verified identity and coordinates while omitting
   text.
@@ -52,6 +55,8 @@ They do not use the operator's production database.
   with `command`, `status`, `coverage`, `refresh`, `semantic`, and `warnings`.
   JSON/non-TTY progress is ordered NDJSON on stderr and ends with one terminal
   event; stdout remains one JSON document.
+- Schema migration is explicit `index --migrate` maintenance. Other PostgreSQL
+  commands report `maintenance_required` without changing schema.
 
 ## Source Roots and Isolation
 

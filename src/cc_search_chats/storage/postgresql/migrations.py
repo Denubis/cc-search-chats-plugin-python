@@ -25,7 +25,65 @@ _MIGRATIONS = (
     Migration(3, "freshness_schema.sql"),
     Migration(4, "coverage_schema.sql"),
     Migration(5, "semantic_chunk_schema.sql"),
+    Migration(6, "incremental_refresh_schema.sql"),
 )
+
+
+class MaintenanceRequired(RuntimeError):
+    """The database migration ledger is behind the packaged schema."""
+
+    def __init__(self, pending: tuple[Migration, ...]) -> None:
+        self.pending = pending
+        versions = ", ".join(str(migration.version) for migration in pending)
+        super().__init__(f"pending PostgreSQL schema migrations: {versions}")
+
+
+def pending_migrations(
+    connection: psycopg.Connection,
+) -> tuple[Migration, ...]:
+    """Inspect and validate the migration ledger without creating schema objects."""
+    ledger_exists = next(
+        connection.execute(
+            "SELECT to_regclass('cc_search_chats.schema_migration') IS NOT NULL"
+        )
+    )[0]
+    if not ledger_exists:
+        return _MIGRATIONS
+    applied = {
+        version: (resource_name, sha256)
+        for version, resource_name, sha256 in connection.execute(
+            "SELECT version, resource_name, sha256 "
+            "FROM cc_search_chats.schema_migration ORDER BY version"
+        )
+    }
+    known_versions = {migration.version for migration in _MIGRATIONS}
+    unknown_versions = sorted(set(applied) - known_versions)
+    if unknown_versions:
+        raise RuntimeError(
+            "database contains unknown schema migrations: "
+            + ", ".join(str(version) for version in unknown_versions)
+        )
+    package = files("cc_search_chats.storage.postgresql")
+    pending: list[Migration] = []
+    for migration in _MIGRATIONS:
+        checksum = hashlib.sha256(
+            package.joinpath(migration.resource_name).read_bytes()
+        ).hexdigest()
+        existing = applied.get(migration.version)
+        if existing is None:
+            pending.append(migration)
+        elif existing != (migration.resource_name, checksum):
+            raise RuntimeError(
+                f"schema migration {migration.version} checksum mismatch"
+            )
+    return tuple(pending)
+
+
+def require_current_schema(connection: psycopg.Connection) -> None:
+    """Fail without mutation when explicit migration is still required."""
+    pending = pending_migrations(connection)
+    if pending:
+        raise MaintenanceRequired(pending)
 
 
 @dataclass(frozen=True, slots=True)

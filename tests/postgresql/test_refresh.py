@@ -37,6 +37,11 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
 _INDEX_QUEUE_LOCK = "cc_search_chats.index_queue"
 
 
+@pytest.fixture(autouse=True)
+def _current_schema(postgres_connection: psycopg.Connection) -> None:
+    migrate(postgres_connection)
+
+
 def search_messages(
     connection: psycopg.Connection,
     query: str,
@@ -726,9 +731,34 @@ def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(
     assert failed_coverage["read_files"] == 0
     assert failed_coverage["unreadable_files"] == 1
     assert failed_coverage["completeness"] == "partial"
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT failure_class = 'transient' AND retry_after > now()
+            FROM cc_search_chats.source_failure_current
+            """
+        )
+    )[0]
 
     monkeypatch.setattr(refresh_module, "read_bounded_jsonl", original_reader)
-    refresh_native_sources(postgres_connection, source_roots=roots)
+    deferred = refresh_native_sources(postgres_connection, source_roots=roots)
+
+    assert deferred.attempted_source_count == 0
+    assert deferred.transient_failure_source_count == 1
+    assert (
+        search_messages(
+            postgres_connection,
+            "unreadable append sentinel",
+            include_agents=True,
+        )
+        == ()
+    )
+
+    refresh_native_sources(
+        postgres_connection,
+        source_roots=roots,
+        force_retry=True,
+    )
 
     assert (
         len(
@@ -844,6 +874,7 @@ def test_source_stat_failure_cannot_be_mistaken_for_deletion(
 def test_unsupported_appended_shape_does_not_advance_checkpoint(
     postgres_connection: psycopg.Connection,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     claude_root = tmp_path / "claude"
     claude_root.mkdir()
@@ -867,15 +898,21 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
             "content": "future shape must not disappear behind a checkpoint",
         },
     }
+    future_bytes = (
+        json.dumps(future_record, separators=(",", ":")).encode("utf-8") + b"\n"
+    )
     with source.open("ab") as handle:
-        handle.write(
-            json.dumps(future_record, separators=(",", ":")).encode("utf-8") + b"\n"
-        )
+        handle.write(future_bytes)
 
     failed = refresh_native_sources(postgres_connection, source_roots=roots)
 
     assert failed.revision_id == first.revision_id
     assert failed.failed_source_count == 1
+    assert failed.metadata_checked_source_count == 1
+    assert failed.attempted_source_count == 1
+    assert failed.attempted_content_bytes == len(future_bytes)
+    assert failed.blocked_source_count == 1
+    assert failed.transient_failure_source_count == 0
     assert (
         next(
             postgres_connection.execute(
@@ -899,12 +936,81 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
     )[0]
     assert diagnostics[0]["code"] == "source_refresh_failed"
     assert "unknown_conversation_record" in diagnostics[0]["detail"]
+    failure = next(
+        postgres_connection.execute(
+            """
+            SELECT failure_class, failure_code, file_device, file_inode,
+                   observed_size, observed_mtime_ns, parser_state_version,
+                   failure_record_ordinal, attempted_content_bytes,
+                   consecutive_failures
+            FROM cc_search_chats.source_failure_current
+            """
+        )
+    )
+    assert failure[0:2] == ("deterministic", "unknown_conversation_record")
+    assert failure[2:7] == (
+        source.stat().st_dev,
+        source.stat().st_ino,
+        source.stat().st_size,
+        source.stat().st_mtime_ns,
+        refresh_module._PARSER_STATE_VERSIONS[Provider.CLAUDE],
+    )
+    assert failure[7:] == (checkpoint[2], len(future_bytes), 1)
     failed_coverage = cast(
         dict[str, object],
         _postgres_envelope(postgres_connection, "index")["coverage"],
     )
     assert failed_coverage["unrecognized_conversation_records"] == 1
     assert failed_coverage["completeness"] == "partial"
+
+    run_count = next(
+        postgres_connection.execute("SELECT count(*) FROM cc_search_chats.refresh_run")
+    )[0]
+    read_starts: list[int] = []
+    original_reader = refresh_module.read_bounded_jsonl
+
+    def recording_reader(path: Path, **kwargs):
+        read_starts.append(kwargs.get("start_byte_offset", 0))
+        return original_reader(path, **kwargs)
+
+    monkeypatch.setattr(refresh_module, "read_bounded_jsonl", recording_reader)
+
+    unchanged = refresh_native_sources(postgres_connection, source_roots=roots)
+
+    assert unchanged.revision_id == first.revision_id
+    assert unchanged.changed_source_count == 0
+    assert unchanged.metadata_checked_source_count == 1
+    assert unchanged.attempted_source_count == 0
+    assert unchanged.attempted_content_bytes == 0
+    assert unchanged.blocked_source_count == 1
+    assert read_starts == []
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.refresh_run"
+            )
+        )[0]
+        == run_count
+    )
+
+    forced = refresh_native_sources(
+        postgres_connection,
+        source_roots=roots,
+        force_retry=True,
+    )
+
+    assert forced.failed_source_count == 1
+    assert forced.attempted_content_bytes == len(future_bytes)
+    assert read_starts == [checkpoint[1]]
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT consecutive_failures "
+                "FROM cc_search_chats.source_failure_current"
+            )
+        )[0]
+        == 2
+    )
 
 
 def test_failed_publication_keeps_checkpoint_and_corpus_then_retry_cleans_stage(

@@ -78,6 +78,122 @@ def parse_fixture(
 
 
 class TestClaudeRecognizedShapes:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "type": "progress",
+                "cwd": "/synthetic",
+                "data": {},
+                "gitBranch": "main",
+                "isSidechain": False,
+                "parentToolUseID": None,
+                "parentUuid": None,
+                "sessionId": "session",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "toolUseID": "tool",
+                "userType": "external",
+                "uuid": "progress",
+                "version": "1",
+            },
+            {
+                "type": "attachment",
+                "agentId": "agent",
+                "attachment": {},
+                "cwd": "/synthetic",
+                "entrypoint": "cli",
+                "gitBranch": "main",
+                "isSidechain": True,
+                "parentUuid": None,
+                "sessionId": "session",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "userType": "external",
+                "uuid": "attachment",
+                "version": "1",
+            },
+            {"type": "last-prompt", "leafUuid": "leaf", "sessionId": "session"},
+            {
+                "type": "file-history-snapshot",
+                "isSnapshotUpdate": False,
+                "messageId": "message",
+                "snapshot": {},
+            },
+            {"type": "agent-setting", "agentSetting": "agent", "sessionId": "session"},
+            {
+                "type": "permission-mode",
+                "permissionMode": "default",
+                "sessionId": "session",
+            },
+            {"type": "mode", "mode": "default", "sessionId": "session"},
+            {"type": "custom-title", "customTitle": "title", "sessionId": "session"},
+            {
+                "type": "fork-context-ref",
+                "agentId": "agent",
+                "contextLength": 1,
+                "parentLastUuid": "parent-message",
+                "parentSessionId": "parent-session",
+            },
+            {
+                "type": "queue-operation",
+                "content": "queued",
+                "operation": "enqueue",
+                "sessionId": "session",
+                "timestamp": "2026-08-29T00:00:00Z",
+            },
+            {"type": "started", "agentId": "agent", "key": "key"},
+            {"type": "ai-title", "aiTitle": "title", "sessionId": "session"},
+        ],
+    )
+    def test_observed_ui_metadata_families_are_explicitly_excluded(
+        self, payload: dict[str, object]
+    ) -> None:
+        result = parse_claude_session(
+            (envelope(payload),),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EXCLUDED_METADATA
+        ]
+
+    def test_non_text_tool_result_is_explicitly_excluded(self) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "type": "user",
+                        "uuid": "image-result",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "tool",
+                                    "content": [
+                                        {
+                                            "type": "image",
+                                            "source": {
+                                                "type": "base64",
+                                                "media_type": "image/png",
+                                                "data": "synthetic",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EXCLUDED_NON_TEXT_TOOL_RESULT
+        ]
+
     def test_resumes_conversation_epoch_from_explicit_state(self) -> None:
         boundary_payload = {
             "type": "system",
@@ -289,6 +405,16 @@ class TestClaudeRecognizedShapes:
 
 
 class TestClaudeFailClosedDiagnostics:
+    def test_known_metadata_type_with_unobserved_shape_stays_unknown(self) -> None:
+        result = parse_claude_session(
+            (envelope({"type": "custom-title", "unexpected": "value"}),),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD
+        ]
+
     def test_unsupported_fixture_distinguishes_named_exclusions(self) -> None:
         result = parse_fixture(
             "claude_unsupported_shapes.jsonl",

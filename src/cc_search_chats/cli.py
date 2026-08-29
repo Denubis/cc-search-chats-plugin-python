@@ -8,10 +8,14 @@ import json
 import os
 import shlex
 import sqlite3
+import subprocess
 import sys
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from math import ceil
+from multiprocessing import get_context
+from multiprocessing.connection import Connection
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -74,6 +78,7 @@ from cc_search_chats.storage.postgresql import (
     exhaustive_search_page,
     export_human_message_events,
     index_embeddings,
+    migrate,
     refresh_native_sources,
     resolve_exact_messages,
     search_messages,
@@ -90,17 +95,180 @@ from cc_search_chats.storage.postgresql import (
 from cc_search_chats.storage.postgresql import (
     resolve_messages as pg_resolve_messages,
 )
-from cc_search_chats.storage.postgresql.guardrails import acquire_index_session
-from cc_search_chats.storage.postgresql.semantic import hybrid_search
+from cc_search_chats.storage.postgresql.auto_refresh import (
+    AutoRefreshStatus,
+    admit_auto_refresh,
+    auto_refresh_status,
+    claim_auto_refresh_launch,
+    mark_auto_refresh_complete,
+    mark_auto_refresh_launch_failed,
+    mark_auto_refresh_launched,
+    mark_auto_refresh_run_failed,
+    mark_auto_refresh_running,
+)
+from cc_search_chats.storage.postgresql.guardrails import (
+    ReadDeadlineExceeded,
+    acquire_index_session,
+    read_deadline,
+)
+from cc_search_chats.storage.postgresql.migrations import (
+    MaintenanceRequired,
+    require_current_schema,
+)
+from cc_search_chats.storage.postgresql.semantic import fuse_hybrid, semantic_search
 
 _DEFAULT_POSTGRES_DSN = "service=cc_search_chats"
+_SEARCH_DEADLINE_SECONDS = 5.0
+_SEARCH_RENDER_RESERVE_SECONDS = 0.1
+_AUTO_REFRESH_LAUNCH_MAX_SECONDS = 0.5
+_AUTO_REFRESH_SERVICE = "cc-search-chats-refresh.service"
+
+
+class SearchDeadlineExceeded(TimeoutError):
+    """The ranked search request no longer has a safe answer budget."""
+
+
+def _remaining_search_seconds(args: argparse.Namespace) -> float:
+    return args.request_started + _SEARCH_DEADLINE_SECONDS - monotonic()
+
+
+def _query_embedding_child(pipe: Connection) -> None:
+    """Run one query embedding in an isolated process without argv disclosure."""
+    try:
+        query = pipe.recv()
+
+        def progress(phase: str, state: str) -> None:
+            pipe.send(("progress", (phase, state)))
+
+        pipe.send(("result", embed_query(query, progress=progress)))
+    except ModelUnavailable as error:
+        pipe.send(
+            (
+                "model_unavailable",
+                {
+                    "message": str(error),
+                    "code": error.code,
+                    "phase": error.phase,
+                    "available_vram_bytes": error.available_vram_bytes,
+                    "required_vram_bytes": error.required_vram_bytes,
+                    "total_vram_bytes": error.total_vram_bytes,
+                },
+            )
+        )
+    except Exception as error:
+        pipe.send(("error", f"{type(error).__name__}: {error}"))
+    finally:
+        pipe.close()
+
+
+def _bounded_query_embedding(
+    query: str,
+    *,
+    timeout_seconds: float,
+    progress: Callable[[str, str], None],
+) -> Sequence[float]:
+    """Return one embedding or stop and reap its child at the deadline."""
+    if timeout_seconds <= 0:
+        raise TimeoutError("no request budget remains for semantic query work")
+    context = get_context("spawn")
+    parent, child = context.Pipe(duplex=True)
+    process = context.Process(
+        target=_query_embedding_child,
+        args=(child,),
+        name="cc-search-query-embedding",
+    )
+    process.start()
+    child.close()
+    deadline = monotonic() + timeout_seconds
+    try:
+        parent.send(query)
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0 or not parent.poll(remaining):
+                raise TimeoutError("semantic query embedding exceeded its deadline")
+            try:
+                kind, payload = parent.recv()
+            except EOFError as error:
+                raise RuntimeError(
+                    "semantic query child exited without a result"
+                ) from error
+            if kind == "progress":
+                progress(*payload)
+            elif kind == "result":
+                return payload
+            elif kind == "model_unavailable":
+                raise ModelUnavailable(
+                    payload["message"],
+                    code=payload["code"],
+                    phase=payload["phase"],
+                    available_vram_bytes=payload["available_vram_bytes"],
+                    required_vram_bytes=payload["required_vram_bytes"],
+                    total_vram_bytes=payload["total_vram_bytes"],
+                )
+            else:
+                raise RuntimeError(payload)
+    finally:
+        parent.close()
+        if process.is_alive():
+            process.terminate()
+        process.join(timeout=0.2)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=0.2)
+
+
+def _start_systemd_refresh(timeout_seconds: float) -> None:
+    """Ask user systemd to own the refresh, bounded by the caller's budget."""
+    if timeout_seconds <= 0:
+        raise TimeoutError("no request budget remains for background refresh launch")
+    completed = subprocess.run(
+        (
+            "systemctl",
+            "--user",
+            "start",
+            "--no-block",
+            _AUTO_REFRESH_SERVICE,
+        ),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(
+            detail or f"systemctl exited with status {completed.returncode}"
+        )
+
+
+def _request_auto_refresh(
+    connection: psycopg.Connection,
+    *,
+    timeout_seconds: float,
+) -> AutoRefreshStatus:
+    """Admit or retry one durable request and launch its systemd owner."""
+    request = admit_auto_refresh(connection)
+    if not claim_auto_refresh_launch(connection, request.request_id):
+        return auto_refresh_status(connection)
+    try:
+        _start_systemd_refresh(timeout_seconds)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, TimeoutError) as error:
+        mark_auto_refresh_launch_failed(
+            connection,
+            request.request_id,
+            f"{type(error).__name__}: {error}",
+        )
+    else:
+        mark_auto_refresh_launched(connection, request.request_id)
+    return auto_refresh_status(connection)
 
 
 class _ProgressStream:
     """Render one ordered progress stream without contaminating stdout."""
 
     def __init__(self, args: argparse.Namespace) -> None:
-        self._started = monotonic()
+        self._started = getattr(args, "request_started", monotonic())
         self._sequence = 0
         self._terminal = False
         self._emit_lock = Lock()
@@ -124,6 +292,11 @@ class _ProgressStream:
         fts_revision: int | None = None,
         semantic_revision: int | None = None,
         source_watermark: object = None,
+        deadline_ms: int | None = None,
+        retrieval_mode: str | None = None,
+        indexed_at: str | None = None,
+        stale_reasons: object = None,
+        background_refresh: object = None,
         warning: object = None,
         error: object = None,
         coverage: object = None,
@@ -146,6 +319,11 @@ class _ProgressStream:
                 "fts_revision": fts_revision,
                 "semantic_revision": semantic_revision,
                 "source_watermark": source_watermark,
+                "deadline_ms": deadline_ms,
+                "retrieval_mode": retrieval_mode,
+                "indexed_at": indexed_at,
+                "stale_reasons": stale_reasons,
+                "background_refresh": background_refresh,
                 "warning": warning,
                 "error": error,
                 "coverage": coverage,
@@ -239,6 +417,11 @@ class _ProgressStream:
                 semantic.get("semantic_revision"),
             ),
             source_watermark=coverage.get("source_watermarks"),
+            deadline_ms=cast(int | None, envelope.get("deadline_ms")),
+            retrieval_mode=cast(str | None, envelope.get("retrieval_mode")),
+            indexed_at=cast(str | None, envelope.get("indexed_at")),
+            stale_reasons=envelope.get("stale_reasons"),
+            background_refresh=envelope.get("background_refresh"),
             warning=envelope.get("warnings"),
             error=envelope.get("error"),
             coverage=coverage,
@@ -277,8 +460,14 @@ def _error_envelope(
             "roots": [],
             "repositories": [],
             "discovered_files": 0,
+            "metadata_checked_files": 0,
+            "unchanged_files": 0,
+            "content_read_files": 0,
+            "content_read_bytes": 0,
             "read_files": 0,
             "removed_files": 0,
+            "blocked_files": 0,
+            "transient_failure_files": 0,
             "indexed_files": 0,
             "skipped_files": 0,
             "excluded_files": 0,
@@ -293,6 +482,10 @@ def _error_envelope(
             "run_id": None,
             "state": "unavailable",
             "failed_sources": 0,
+            "attempted_sources": 0,
+            "attempted_content_bytes": 0,
+            "blocked_sources": 0,
+            "transient_failure_sources": 0,
             "advanced_sources": 0,
             "pending_bytes": 0,
         },
@@ -353,6 +546,7 @@ def _postgres_envelope(
     command: str,
     *,
     status: str = "complete",
+    additional_warnings: Sequence[object] = (),
     **payload: object,
 ) -> dict[str, object]:
     roots = [
@@ -387,6 +581,11 @@ def _postgres_envelope(
                    run.source_count, run.changed_source_count,
                    run.failed_source_count, run.read_source_count,
                    run.removed_source_count, run.advanced_source_count,
+                   run.metadata_checked_source_count,
+                   run.attempted_source_count,
+                   run.attempted_content_bytes,
+                   run.blocked_source_count,
+                   run.transient_failure_source_count,
                    run.diagnostics,
                    COALESCE((
                        SELECT sum(source.pending_bytes)
@@ -478,7 +677,7 @@ def _postgres_envelope(
             """
         )
     )
-    diagnostics = refresh_row[9] or []
+    diagnostics = refresh_row[14] or []
     current_discovered = sum(int(root["discovered_files"]) for root in roots)
     discovered_files = (
         int(refresh_row[3]) if refresh_row[3] is not None else current_discovered
@@ -488,7 +687,12 @@ def _postgres_envelope(
     read_files = int(refresh_row[6] or 0)
     removed_files = int(refresh_row[7] or 0)
     advanced_files = int(refresh_row[8] or 0)
-    pending_bytes = int(refresh_row[10] or 0)
+    metadata_checked_files = int(refresh_row[9] or 0)
+    attempted_files = int(refresh_row[10] or 0)
+    attempted_content_bytes = int(refresh_row[11] or 0)
+    blocked_files = int(refresh_row[12] or 0)
+    transient_failure_files = int(refresh_row[13] or 0)
+    pending_bytes = int(refresh_row[15] or 0)
     unrecognized_records = sum(
         1
         for diagnostic in diagnostics
@@ -501,12 +705,24 @@ def _postgres_envelope(
         "roots": roots,
         "repositories": repositories,
         "discovered_files": discovered_files,
+        "metadata_checked_files": metadata_checked_files,
+        "unchanged_files": max(
+            0,
+            metadata_checked_files
+            - attempted_files
+            - blocked_files
+            - transient_failure_files,
+        ),
+        "content_read_files": attempted_files,
+        "content_read_bytes": attempted_content_bytes,
         "read_files": read_files,
         "removed_files": removed_files,
+        "blocked_files": blocked_files,
+        "transient_failure_files": transient_failure_files,
         "indexed_files": sum(int(root["indexed_files"]) for root in roots),
         "skipped_files": max(0, discovered_files - changed_files),
         "excluded_files": sum(int(root["excluded_files"]) for root in roots),
-        "unreadable_files": failed_files,
+        "unreadable_files": transient_failure_files,
         "unknown_sessions": unknown_sessions,
         "unrecognized_conversation_records": unrecognized_records,
         "source_watermarks": source_watermarks,
@@ -521,6 +737,10 @@ def _postgres_envelope(
         "run_id": refresh_row[1],
         "state": refresh_row[2] or "unchanged",
         "failed_sources": failed_files,
+        "attempted_sources": attempted_files,
+        "attempted_content_bytes": attempted_content_bytes,
+        "blocked_sources": blocked_files,
+        "transient_failure_sources": transient_failure_files,
         "advanced_sources": advanced_files,
         "pending_bytes": pending_bytes,
     }
@@ -533,6 +753,18 @@ def _postgres_envelope(
         "total_units": semantic_row[5] or 0,
         "fresh": semantic_row[6] is True,
     }
+    indexed_at = next(
+        connection.execute(
+            """
+            SELECT revision.completed_at
+            FROM cc_search_chats.corpus_state AS state
+            LEFT JOIN cc_search_chats.corpus_revision AS revision
+              ON revision.revision_id = state.current_revision_id
+            WHERE state.singleton
+            """
+        )
+    )[0]
+    background = auto_refresh_status(connection)
     return {
         "schema_version": 2,
         "command": command,
@@ -540,7 +772,14 @@ def _postgres_envelope(
         "coverage": coverage,
         "refresh": refresh,
         "semantic": semantic,
-        "warnings": diagnostics,
+        "indexed_at": indexed_at.isoformat() if indexed_at is not None else None,
+        "background_refresh": {
+            "request_id": background.request_id,
+            "state": background.state,
+            "refresh_run_id": background.refresh_run_id,
+            "last_error": background.last_error,
+        },
+        "warnings": [*diagnostics, *additional_warnings],
         **payload,
     }
 
@@ -615,18 +854,81 @@ def _handle_postgres(
     progress_stream: _ProgressStream,
 ) -> int:
     """Run the migrated index/search surface against PostgreSQL."""
-    with psycopg.connect(dsn, autocommit=True) as connection:
+    if args.command == "search" and not args.exhaustive:
+        remaining = _remaining_search_seconds(args)
+        if remaining <= _SEARCH_RENDER_RESERVE_SECONDS:
+            raise SearchDeadlineExceeded("search deadline expired before connection")
+        connection_context = psycopg.connect(
+            dsn,
+            autocommit=True,
+            connect_timeout=max(1, ceil(remaining)),
+        )
+    else:
+        connection_context = psycopg.connect(dsn, autocommit=True)
+    with connection_context as connection:
+        if args.command == "search" and not args.exhaustive:
+            remaining = _remaining_search_seconds(args)
+            if remaining <= _SEARCH_RENDER_RESERVE_SECONDS:
+                raise SearchDeadlineExceeded(
+                    "search deadline expired while connecting to PostgreSQL"
+                )
+            timeout_ms = max(
+                1,
+                int((remaining - _SEARCH_RENDER_RESERVE_SECONDS) * 1000),
+            )
+            connection.execute(
+                """
+                SELECT set_config('lock_timeout', %s, false),
+                       set_config('statement_timeout', %s, false)
+                """,
+                (f"{timeout_ms}ms", f"{timeout_ms}ms"),
+            )
+
+        if args.command == "index" and args.migrate:
+            migrate(connection)
+            envelope = _postgres_envelope(
+                connection,
+                "index",
+                applied_schema_version=6,
+            )
+            progress_stream.terminal(envelope)
+            if args.json:
+                print(json.dumps(envelope, sort_keys=True))
+            else:
+                print("Applied PostgreSQL schema migration 6")
+            return 0
+
+        require_current_schema(connection)
 
         def finish(
             command: str,
             *,
             status: str = "complete",
+            additional_warnings: Sequence[object] = (),
             **payload: object,
         ) -> dict[str, object]:
+            if args.command == "search" and not args.exhaustive:
+                remaining = _remaining_search_seconds(args)
+                if remaining <= _SEARCH_RENDER_RESERVE_SECONDS:
+                    raise SearchDeadlineExceeded(
+                        "search deadline expired before result serialization"
+                    )
+                timeout_ms = max(
+                    1,
+                    int((remaining - _SEARCH_RENDER_RESERVE_SECONDS) * 1000),
+                )
+                connection.execute(
+                    """
+                    SELECT set_config('lock_timeout', %s, false),
+                           set_config('statement_timeout', %s, false)
+                    """,
+                    (f"{timeout_ms}ms", f"{timeout_ms}ms"),
+                )
             envelope = _postgres_envelope(
                 connection,
                 command,
                 status=status,
+                additional_warnings=additional_warnings,
                 **payload,
             )
             progress_stream.terminal(envelope)
@@ -681,6 +983,16 @@ def _handle_postgres(
                     print(f"Semantic index: {completed}/{total} passages")
                 return 0
 
+            background_request_id = (
+                mark_auto_refresh_running(connection)
+                if args.background_refresh
+                else None
+            )
+            if args.background_refresh and background_request_id is None:
+                envelope = finish("index", background_noop=True)
+                if args.json:
+                    print(json.dumps(envelope, sort_keys=True))
+                return 0
             acquire_index_session(connection)
 
             scan_complete = False
@@ -727,10 +1039,26 @@ def _handle_postgres(
                 progress_stream.emit("scan", "running")
                 with progress_stream.heartbeat("scan") as heartbeat_update:
                     refresh_heartbeat = heartbeat_update
-                    result = refresh_native_sources(
+                    try:
+                        result = refresh_native_sources(
+                            connection,
+                            source_roots=configured_source_roots(),
+                            progress=progress,
+                            force_retry=args.force_retry,
+                        )
+                    except Exception as error:
+                        if background_request_id is not None:
+                            mark_auto_refresh_run_failed(
+                                connection,
+                                background_request_id,
+                                f"{type(error).__name__}: {error}",
+                            )
+                        raise
+                if background_request_id is not None:
+                    mark_auto_refresh_complete(
                         connection,
-                        source_roots=configured_source_roots(),
-                        progress=progress,
+                        background_request_id,
+                        refresh_run_id=result.run_id,
                     )
                 revision_id = result.revision_id
                 source_count = result.source_count
@@ -1019,64 +1347,16 @@ def _handle_postgres(
                 return 2
             return 3
 
-        acquire_index_session(connection)
-        search_scan_complete = False
-        search_parse_seen = False
-        search_refresh_heartbeat: (
-            Callable[[str, int | None, int | None, int | None], None] | None
-        ) = None
-
-        def search_refresh_progress(event: RefreshProgress) -> None:
-            nonlocal search_parse_seen, search_scan_complete
-            if search_refresh_heartbeat is not None:
-                search_refresh_heartbeat(
-                    event.phase,
-                    event.run_id,
-                    event.completed_units,
-                    event.total_units,
-                )
-            if event.phase == "parse" and not search_scan_complete:
-                progress_stream.emit("scan", "complete")
-                search_scan_complete = True
-            search_parse_seen = search_parse_seen or event.phase == "parse"
-            progress_stream.emit(
-                event.phase,
-                event.state,
-                run_id=event.run_id,
-                completed_units=event.completed_units,
-                total_units=event.total_units,
-                owner=event.owner_pid,
-            )
-
-        progress_stream.emit("scan", "running")
-        with progress_stream.heartbeat("scan") as heartbeat_update:
-            search_refresh_heartbeat = heartbeat_update
-            refresh_result = refresh_native_sources(
-                connection,
-                source_roots=configured_source_roots(),
-                progress=search_refresh_progress,
-            )
-        if not search_scan_complete:
-            progress_stream.emit("scan", "complete")
-        if not search_parse_seen:
-            progress_stream.emit(
-                "parse",
-                "complete",
-                completed_units=refresh_result.read_source_count,
-                total_units=refresh_result.changed_source_count,
-            )
-        progress_stream.emit(
-            "fts_commit",
-            "complete",
-            completed_units=refresh_result.changed_source_count
-            - refresh_result.failed_source_count,
-            total_units=refresh_result.changed_source_count,
-            fts_revision=refresh_result.revision_id,
+        connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        deadline = (
+            None if args.exhaustive else args.request_started + _SEARCH_DEADLINE_SECONDS
         )
         project = args.project
         hybrid_rankings = {}
+        search_warnings: list[dict[str, str]] = []
+        retrieval_mode = "exhaustive_literal" if args.exhaustive else "literal"
+        progress_stream.emit("retrieve", "running")
         if args.exhaustive:
-            progress_stream.emit("retrieve", "running")
             exhaustive_hits = []
             cursor = None
             while True:
@@ -1098,12 +1378,14 @@ def _handle_postgres(
                     break
                 cursor = page.next_cursor
             hits = tuple(exhaustive_hits)
-        elif args.literal:
-            progress_stream.emit("retrieve", "running")
-            hits = search_messages(
+        else:
+            component_depth = (
+                args.limit if args.literal else min(1000, max(100, 5 * args.limit))
+            )
+            literal_hits = search_messages(
                 connection,
                 args.query,
-                limit=args.limit,
+                limit=component_depth,
                 provider=args.provider,
                 role=args.role,
                 project=project,
@@ -1112,75 +1394,66 @@ def _handle_postgres(
                 include_agents=args.agents,
                 include_tools=args.tools,
             )
-        else:
-            active_search_heartbeat: (
-                Callable[[str, int | None, int | None, int | None], None] | None
-            ) = None
-            resume_search_phase = "semantic_embed"
+            hits = literal_hits[: args.limit]
+
+        if not args.literal and not args.exhaustive:
+            assert deadline is not None
 
             def search_model_progress(phase: str, state: str) -> None:
-                if active_search_heartbeat is not None:
-                    active_search_heartbeat(phase, None, None, None)
                 progress_stream.emit(phase, state)
-                if (
-                    active_search_heartbeat is not None
-                    and phase == "model_load"
-                    and state == "complete"
-                ):
-                    active_search_heartbeat(resume_search_phase, None, None, None)
 
-            def search_passage_embed(texts):
-                return embed_passages(texts, progress=search_model_progress)
-
-            def search_embedding_progress(completed: int, total: int) -> None:
-                progress_stream.emit(
-                    "semantic_embed",
-                    "running" if completed < total else "complete",
-                    completed_units=completed,
-                    total_units=total,
-                )
-
-            progress_stream.emit("semantic_embed", "running")
-            with progress_stream.heartbeat("semantic_embed") as heartbeat_update:
-                active_search_heartbeat = heartbeat_update
-                embedded_count = index_embeddings(
-                    connection,
-                    search_passage_embed,
-                    chunker=chunk_passages,
-                    progress=search_embedding_progress,
-                )
-            progress_stream.emit(
-                "semantic_commit",
-                "complete",
-                completed_units=embedded_count,
-                total_units=embedded_count,
-            )
+            semantic_budget = deadline - monotonic() - _SEARCH_RENDER_RESERVE_SECONDS
             progress_stream.emit("query_embed", "running")
-            resume_search_phase = "query_embed"
-            with progress_stream.heartbeat("query_embed") as heartbeat_update:
-                active_search_heartbeat = heartbeat_update
-                query_embedding = embed_query(
+            try:
+                query_embedding = _bounded_query_embedding(
                     args.query,
+                    timeout_seconds=semantic_budget,
                     progress=search_model_progress,
                 )
-            progress_stream.emit("query_embed", "complete")
-            progress_stream.emit("retrieve", "running")
-            hybrid_hits = hybrid_search(
-                connection,
-                args.query,
-                query_embedding,
-                limit=args.limit,
-                provider=args.provider,
-                role=args.role,
-                project=project,
-                since=_since_days(args.days),
-                epoch=args.epoch,
-                include_agents=args.agents,
-            )
-            hits = tuple(value.message for value in hybrid_hits)
-            hybrid_rankings = {
-                value.message.canonical_locator: value for value in hybrid_hits
-            }
+                progress_stream.emit("query_embed", "complete")
+                semantic_hits = semantic_search(
+                    connection,
+                    query_embedding,
+                    limit=component_depth,
+                    provider=args.provider,
+                    role=args.role,
+                    project=project,
+                    since=_since_days(args.days),
+                    epoch=args.epoch,
+                    include_agents=args.agents,
+                    allow_partial=True,
+                )
+                hybrid_hits = fuse_hybrid(
+                    literal_hits,
+                    semantic_hits,
+                    limit=args.limit,
+                    rank_constant=60,
+                    component_depth=component_depth,
+                )
+                hits = tuple(value.message for value in hybrid_hits)
+                hybrid_rankings = {
+                    value.message.canonical_locator: value for value in hybrid_hits
+                }
+                retrieval_mode = "hybrid"
+            except (
+                ModelUnavailable,
+                TimeoutError,
+                psycopg.Error,
+                RuntimeError,
+                ValueError,
+            ) as error:
+                retrieval_mode = "literal_fallback"
+                search_warnings.append(
+                    {
+                        "code": "semantic_search_degraded",
+                        "detail": f"{type(error).__name__}: {error}",
+                    }
+                )
+                progress_stream.emit(
+                    "query_embed",
+                    "degraded",
+                    warning=search_warnings[-1],
+                )
         progress_stream.emit(
             "retrieve",
             "complete",
@@ -1256,12 +1529,58 @@ def _handle_postgres(
                     "ranking": ranking,
                 }
             )
-        envelope = finish(
+        envelope = _postgres_envelope(
+            connection,
             "search",
             exhaustive=args.exhaustive,
             result_limit=None if args.exhaustive else args.limit,
+            deadline_ms=(
+                None if args.exhaustive else round(_SEARCH_DEADLINE_SECONDS * 1000)
+            ),
+            elapsed_ms=round((monotonic() - args.request_started) * 1000),
+            retrieval_mode=retrieval_mode,
+            stale_reasons=["native_sources_not_checked"],
+            additional_warnings=search_warnings,
             results=results,
         )
+        semantic_state = cast(dict[str, object], envelope["semantic"])
+        stale_reasons = cast(list[str], envelope["stale_reasons"])
+        if semantic_state["fresh"] is not True:
+            stale_reasons.append("semantic_revision_stale")
+            if retrieval_mode == "hybrid":
+                envelope["retrieval_mode"] = "partial_hybrid"
+        connection.execute("COMMIT")
+
+        launch_budget = (
+            _AUTO_REFRESH_LAUNCH_MAX_SECONDS
+            if deadline is None
+            else min(
+                _AUTO_REFRESH_LAUNCH_MAX_SECONDS,
+                deadline - monotonic() - _SEARCH_RENDER_RESERVE_SECONDS,
+            )
+        )
+        background = (
+            _request_auto_refresh(connection, timeout_seconds=launch_budget)
+            if launch_budget > 0
+            else auto_refresh_status(connection)
+        )
+        envelope["background_refresh"] = {
+            "request_id": background.request_id,
+            "state": background.state,
+            "refresh_run_id": background.refresh_run_id,
+            "last_error": background.last_error,
+        }
+        if background.state == "failed":
+            stale_reasons.append("background_refresh_failed")
+            warnings = cast(list[object], envelope["warnings"])
+            warnings.append(
+                {
+                    "code": "auto_refresh_unavailable",
+                    "detail": background.last_error,
+                }
+            )
+        envelope["elapsed_ms"] = round((monotonic() - args.request_started) * 1000)
+        progress_stream.terminal(envelope)
         if args.json:
             print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
         else:
@@ -1754,7 +2073,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="index every project under ~/.claude/projects (incremental)",
     )
+    index_parser.add_argument(
+        "--force-retry",
+        action="store_true",
+        help="retry unchanged failed source observations during explicit maintenance",
+    )
+    index_parser.add_argument(
+        "--background-refresh",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     index_mode = index_parser.add_mutually_exclusive_group()
+    index_mode.add_argument(
+        "--migrate",
+        action="store_true",
+        help="explicitly apply pending PostgreSQL schema migrations",
+    )
     index_mode.add_argument(
         "--literal-only",
         action="store_true",
@@ -1820,10 +2154,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def main(*, request_started: float | None = None) -> None:
     """Entry point for cc-search-chats CLI."""
+    if request_started is None:
+        request_started = monotonic()
     parser = build_parser()
     args = parser.parse_args()
+    args.request_started = request_started
 
     if args.command is None:
         parser.print_help()
@@ -1842,6 +2179,8 @@ def main() -> None:
             parser.error("--exhaustive requires --literal")
         if not args.exhaustive and not 1 <= args.limit <= 200:
             parser.error("--limit must be between 1 and 200 for ranked search")
+    if args.command == "index" and args.background_refresh and not args.literal_only:
+        parser.error("--background-refresh requires --literal-only")
 
     postgres_commands = {
         "index",
@@ -1862,28 +2201,68 @@ def main() -> None:
     if postgres:
         progress_stream = _ProgressStream(args)
         try:
+            if args.command == "search" and not args.exhaustive:
+                remaining = _remaining_search_seconds(args)
+                if remaining <= _SEARCH_RENDER_RESERVE_SECONDS:
+                    raise SearchDeadlineExceeded(
+                        "search deadline expired before PostgreSQL admission"
+                    )
+                read_scope = read_deadline(
+                    max(
+                        1,
+                        int((remaining - _SEARCH_RENDER_RESERVE_SECONDS) * 1000),
+                    )
+                )
+            else:
+                read_scope = nullcontext()
             _contain_semantic_index(args)
             admission_name = (
                 None
                 if args.command == "index" and args.status
+                else None
+                if args.command == "search"
                 else "index"
-                if args.command in {"index", "search"}
+                if args.command == "index"
                 else "read"
             )
-            if admission_name is None:
-                exit_code = _handle_postgres(
-                    args,
-                    "" if standard_connection else _DEFAULT_POSTGRES_DSN,
-                    progress_stream,
-                )
-            else:
-                with client_admission(admission_name):
+            with read_scope:
+                if admission_name is None:
                     exit_code = _handle_postgres(
                         args,
                         "" if standard_connection else _DEFAULT_POSTGRES_DSN,
                         progress_stream,
                     )
+                else:
+                    with client_admission(admission_name):
+                        exit_code = _handle_postgres(
+                            args,
+                            "" if standard_connection else _DEFAULT_POSTGRES_DSN,
+                            progress_stream,
+                        )
             sys.exit(exit_code)
+        except (ReadDeadlineExceeded, SearchDeadlineExceeded) as exc:
+            error = {
+                "code": "search_deadline_exceeded",
+                "phase": "retrieve",
+                "message": str(exc),
+            }
+            envelope = _error_envelope(args.command, "deadline_exceeded", error)
+            progress_stream.terminal(envelope)
+            if args.json:
+                print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
+            sys.exit(7)
+        except MaintenanceRequired as exc:
+            error = {
+                "code": "maintenance_required",
+                "phase": "migration",
+                "message": str(exc),
+                "pending_versions": [migration.version for migration in exc.pending],
+            }
+            envelope = _error_envelope(args.command, "maintenance_required", error)
+            progress_stream.terminal(envelope)
+            if args.json:
+                print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
+            sys.exit(6)
         except ModelUnavailable as exc:
             error = {
                 "code": exc.code,
@@ -1920,6 +2299,24 @@ def main() -> None:
                 if isinstance(exc, psycopg.Error) and exc.diag.message_primary
                 else str(exc)
             )
+            if args.command == "search" and isinstance(
+                exc,
+                (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled),
+            ):
+                error = {
+                    "code": "search_deadline_exceeded",
+                    "phase": "retrieve",
+                    "message": detail,
+                }
+                envelope = _error_envelope(
+                    args.command,
+                    "deadline_exceeded",
+                    error,
+                )
+                progress_stream.terminal(envelope)
+                if args.json:
+                    print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
+                sys.exit(7)
             error = {
                 "code": "postgresql_operation_failed",
                 "phase": "done",

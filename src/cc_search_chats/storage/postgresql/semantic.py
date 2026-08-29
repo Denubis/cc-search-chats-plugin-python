@@ -661,6 +661,7 @@ def semantic_search(
     since: str | None = None,
     epoch: int | None = None,
     include_agents: bool = False,
+    allow_partial: bool = False,
 ) -> tuple[SearchHit, ...]:
     """Return one best-chunk exact inner-product hit per logical message."""
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
@@ -669,9 +670,9 @@ def semantic_search(
     state = next(
         connection.execute(
             """
-            SELECT revision.corpus_revision_id = corpus.current_revision_id
-                   AND revision.status = 'complete'
-                   AND revision.profile_id = %s
+            SELECT revision.status = 'complete'
+                   AND revision.profile_id = %s,
+                   revision.corpus_revision_id = corpus.current_revision_id
             FROM cc_search_chats.semantic_state AS state
             JOIN cc_search_chats.semantic_revision AS revision
               ON revision.semantic_revision_id = state.current_semantic_revision_id
@@ -684,7 +685,9 @@ def semantic_search(
     )
     if state is None or state[0] is not True:
         raise ValueError("semantic revision is unavailable or stale")
-    if not _semantic_chunks_complete(connection):
+    if not allow_partial and state[1] is not True:
+        raise ValueError("semantic revision is unavailable or stale")
+    if not allow_partial and not _semantic_chunks_complete(connection):
         raise ValueError("semantic chunks are unavailable or stale")
     filters = [
         "message.session_kind IN ('primary', 'agent', 'unknown')"
@@ -808,6 +811,9 @@ def _fuse_hybrid(
             fused, key=lambda value: (-value.score, value.message.canonical_locator)
         )[:limit]
     )
+
+
+fuse_hybrid = _fuse_hybrid
 
 
 def _hybrid_search(

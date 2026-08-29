@@ -13,6 +13,11 @@
 | Proceed with the reconciled storage, freshness, Ponytail, UAT, and documentation work. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a022a9-3b5a-70d1-ab14-b7b2a363589c` | `sed -n '927p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` says `do it`. |
 | Accept this reconciled design as matching the intended outcome. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a02398-fc3a-7670-8f76-e267cfe92208` | `sed -n '1338p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` accepts the rendered design. |
 | Treat same-inode growth as append-only so refresh reads only the new suffix. | `ccchat:v1:codex:01a0222a-8cf2-7a12-ac38-2c0f471f81b2:id:msg_01a026ca-e241-7722-b606-ab5429dc3c86` | `sed -n '2295p' /home/brian/.codex/sessions/2026/08/21/rollout-2026-08-21T12-33-29-01a0222a-8cf2-7a12-ac38-2c0f471f81b2.jsonl` | Exactly one native user `response_item` says `yes` to the immediately preceding explicit fast-append-only question. |
+| Treat PostgreSQL as a rebuildable projection of authoritative native chats rather than a separately backed-up content authority. | `ccchat:v1:codex:01a0324d-aec0-7991-88b0-3ad1baedf614:id:msg_01a03609-cf3b-7831-94dd-c63629653925` | `sed -n '670p' /home/brian/.codex/sessions/2026/08/24/rollout-2026-08-24T15-45-46-01a0324d-aec0-7991-88b0-3ad1baedf614.jsonl` | Exactly one native user `response_item` states that the database is a copy of system chats. |
+| Replace the blocking search-time refresh with one background incremental refresh and return an answer with explicit staleness. | `ccchat:v1:codex:01a0324d-aec0-7991-88b0-3ad1baedf614:id:msg_01a036fa-9e3f-7ad3-acd8-f2b2973cdafc` | `sed -n '860p' /home/brian/.codex/sessions/2026/08/24/rollout-2026-08-24T15-45-46-01a0324d-aec0-7991-88b0-3ad1baedf614.jsonl` | Exactly one native user `response_item` accepts the background-refresh boundary and requires a stale answer rather than blocking. |
+| Admit at most one automatic refresh per five-minute cooldown while live logs continue growing. | `ccchat:v1:codex:01a0324d-aec0-7991-88b0-3ad1baedf614:id:msg_01a036fb-2e06-7981-8e05-5b5d4b006967` | `sed -n '868p' /home/brian/.codex/sessions/2026/08/24/rollout-2026-08-24T15-45-46-01a0324d-aec0-7991-88b0-3ad1baedf614.jsonl` | Exactly one native user `response_item` requests a five-minute interval between automatic reindexes. |
+| Use five seconds provisionally as the total interval from search request to returned answer, then tune it from measured spin-up costs. | `ccchat:v1:codex:01a0324d-aec0-7991-88b0-3ad1baedf614:id:msg_01a03821-f0f6-7540-8182-a7405fdfce82` | `sed -n '885p' /home/brian/.codex/sessions/2026/08/24/rollout-2026-08-24T15-45-46-01a0324d-aec0-7991-88b0-3ad1baedf614.jsonl` | Exactly one native user `response_item` defines five seconds as request-to-return and makes later tuning conditional on measurements. |
+| Finish the cleanup and release only a version that satisfies the repaired behavior, while the human holds off using the broken search path. | `ccchat:v1:codex:01a0324d-aec0-7991-88b0-3ad1baedf614:id:msg_01a04cdd-2dd8-7491-9a1d-eba2472fb46a` | `sed -n '1579p' /home/brian/.codex/sessions/2026/08/24/rollout-2026-08-24T15-45-46-01a0324d-aec0-7991-88b0-3ad1baedf614.jsonl` | Exactly one native user `response_item` requests proper cleanup and a working release, and says they will hold off meanwhile. |
 
 ## Summary
 
@@ -22,19 +27,27 @@ logs. A dedicated PostgreSQL 18 database is the derived search authority for
 normalized metadata, PostgreSQL full-text search, and pgvector
 embeddings. Large search relations and indexes live in a dedicated tablespace
 on configured external storage; PostgreSQL data and WAL remain operator-managed.
-Search refreshes appended native records before retrieval, exposes live progress
-and freshness watermarks, and never locks the vendor logs that supervisors are
-writing. If semantic refresh or the GPU is unavailable, hybrid search fails
-explicitly while the last committed literal generation remains usable.
+Search reads one committed PostgreSQL snapshot immediately and never waits for
+maintenance ownership. At most once per five-minute automatic-refresh cooldown,
+it requests one low-priority background incremental refresh that may continue
+after the request returns. Search has a provisional five-second end-to-end
+deadline and always attempts literal retrieval first. It fuses only row-valid
+semantic candidates that finish inside the remaining deadline; otherwise it
+returns literal results with explicit corpus and semantic staleness. Refresh
+never locks or writes the vendor logs that supervisors are writing.
 Corpus and semantic generations are small publication and recovery records;
 they never own full copies of messages, physical aliases, or embeddings.
 
 ## Definition of Done
 
-- Natural-language and exact-term queries search native Claude and Codex chats using hybrid semantic and FTS ranking. Agy and the transport archive are out of scope as searchable corpora.
+- Ranked natural-language and exact-term queries search native Claude and Codex
+  chats from literal candidates. Digest-valid semantic candidates are fused when
+  they finish within the request deadline; otherwise the same request succeeds
+  with literal results and explicit semantic degradation. Agy and the transport
+  archive are out of scope as searchable corpora.
 - Default results include only visible user/assistant prose from primary sessions. `--agents` includes Claude subagent and Codex child-agent conversations. `--tools` adds lexical-only tool names, inputs, and results. Reasoning and developer/system instructions remain excluded.
 - Embedding and retrieval run locally. Once the model is installed, searches work offline and transmit no chat content.
-- An overnight bulk job maintains the baseline index. Searches detect and index appended records before retrieval and emit machine-readable phase, progress, elapsed-time, coverage, and freshness state rather than appearing hung, including when on-demand indexing takes roughly 30 seconds.
+- An overnight bulk job maintains literal and semantic baselines. Search requests never run migrations or baseline maintenance: they may request one background literal refresh per five-minute cooldown, return within a provisional five-second end-to-end deadline, and report the exact committed revision, age, coverage, and background state used for the answer.
 - Every indexed record has a provider-qualified stable locator. Exact resolution is independent of search ranking and distinguishes unique, missing, ambiguous, stale, unavailable, malformed, and unsupported-schema outcomes.
 - Search, context, extract, list, and reference-only output share one additive JSON identity shape. Results report provider roots, projects or repositories, files searched, skipped or unreadable sources, unrecognised conversation-shaped records, and index freshness.
 - Large indexes and local model data live under a configured external-storage root rather than inside the repository. The tool does not render transcript archives, summarise chats, or write notes, ADRs, plans, or constraints.
@@ -42,14 +55,38 @@ they never own full copies of messages, physical aliases, or embeddings.
   attribution, receipt correlation, and authorship classification are deferred
   comms-plumbing work and are not changed or accepted by this delivery.
 
+## Current implementation defect
+
+Release 2.0.5 satisfies neither the no-op refresh invariant nor the interactive
+request boundary on the production corpus. `cli._handle_postgres` calls
+`refresh_native_sources` synchronously before every search, and
+`refresh_native_sources` clears all staged state for a failed source without
+retaining the failed observation. A source with no prior successful checkpoint
+is therefore reparsed from byte zero on every search. The production audit on
+2026-08-25 observed 8,388 such attempts in one run, dominated by recognized
+provider metadata that the current allowlists do not yet classify. The run
+reported `read_source_count = 0` because that field counts surviving staged
+sources rather than sources whose bytes were actually read.
+
+The same audit found valid native metadata families including Claude progress,
+attachment, prompt/title, permission, server-tool, and tool-reference records;
+Codex task/token lifecycle events; and Codex fork files containing attested
+child and parent session metadata. These observations are compatibility inputs,
+not permission to ignore arbitrary future shapes. The native logs are intact,
+the PostgreSQL projection is rebuildable, legacy snapshot relations remain, and
+the nightly timer is disabled pending this repair and acceptance.
+
 ## Acceptance Criteria
 
 ### cross-vendor-semantic-search.AC1: Native cross-vendor search
 
 - **Success:** One default query can return ranked native Claude and Codex
   prose results, and every result identifies its provider and native session.
-- **Success:** Natural-language search fuses semantic and FTS ranks, while
-  `--literal` performs FTS-only retrieval without loading the embedding model.
+- **Success:** Natural-language search attempts FTS retrieval first. Once those
+  candidates exist, it fuses semantic ranks only when query embedding finishes
+  within the request deadline; otherwise it returns the FTS candidates with
+  `literal_fallback` coverage. `--literal` performs FTS-only retrieval without
+  loading the embedding model.
 - **Failure:** Agy sessions and rendered transport archives never enter the
   searchable corpus, even when their files are reachable from a configured
   source root.
@@ -61,9 +98,11 @@ they never own full copies of messages, physical aliases, or embeddings.
 - **Success:** `--agents` additionally includes sessions classified as agent or
   unknown, and reports the retained classification. `--tools` additionally
   searches persisted tool names, inputs, and results through FTS only.
-- **Success:** `--literal --tools --exhaustive` returns every matching tool or
-  prose occurrence in deterministic locator order; ranked search never claims
-  to be exhaustive.
+- **Success:** `--literal --tools --exhaustive` pages or streams every matching
+  tool or prose occurrence in deterministic locator order. It is an explicitly
+  selected enumeration operation, not a ranked interactive answer, and is
+  therefore exempt from the five-second ranked-search deadline. Ranked search
+  never claims to be exhaustive.
 - **Failure:** Reasoning, thinking, developer instructions, system instructions,
   injected context, and unrecognised content shapes are not indexed or returned
   by any flag. The existing `--everything` flag is rejected with migration
@@ -78,20 +117,28 @@ they never own full copies of messages, physical aliases, or embeddings.
   cache, indexing and search work with network access disabled and transmit no
   chat content.
 - **Failure:** Missing semantic dependencies or model files produce a nonzero,
-  machine-readable error with installation/remediation state; runtime commands
-  do not download a model implicitly or redirect package/model caches.
+  machine-readable error for explicit model validation and semantic-maintenance
+  commands. Ranked search instead returns its literal answer with named
+  `literal_fallback` degradation and remediation state. No runtime command
+  downloads a model implicitly or redirects package/model caches.
 
 ### cross-vendor-semantic-search.AC4: Scheduled and on-demand freshness
 
-- **Success:** A scheduled `index` command can build and compact the baseline
-  corpus overnight. A later search discovers new files and complete appended
-  records and refreshes them without reparsing unchanged files.
+- **Success:** Explicit maintenance can migrate and build the baseline. The
+  scheduled nightly command refreshes literal and semantic state without
+  applying an unreviewed schema migration. Search itself never migrates or
+  performs a baseline rebuild.
+- **Success:** Search atomically admits at most one automatic literal-refresh
+  request per five-minute cooldown. The low-priority background owner survives
+  the requesting CLI process, and concurrent searches reuse its state rather
+  than launching duplicate work.
 - **Success:** Native Claude/Codex writers are never locked. Each refresh records
   a per-file byte watermark, and a source that advances during refresh is
   reported as advanced rather than falsely described as fully current.
 - **Success:** One cross-process refresh owner serializes index writes. Other
-  callers continue reading committed snapshots or emit `waiting_for_index`
-  progress until the requested freshness is committed.
+  search callers immediately read one committed snapshot; they never wait for
+  the refresh lock or local admission file. Manual maintenance may wait while
+  reporting the active owner.
 - **Failure:** Truncation, rotation, replacement, same-size modification,
   partial final JSONL records, and unsupported parser-state changes cannot be
   mistaken for a clean append. The affected source is reparsed or skipped with
@@ -99,6 +146,12 @@ they never own full copies of messages, physical aliases, or embeddings.
 - **Success:** An unchanged second refresh reads source metadata but no JSONL
   content bytes; a valid append reads only the suffix after the last complete
   record watermark.
+- **Success:** A deterministic parse failure retains the last fully understood
+  byte/parser checkpoint plus a separate fingerprint of the failed observation.
+  An unchanged blocked source is reported as partial coverage without reopening
+  its JSONL. Source metadata or parser-version change invalidates that fingerprint;
+  transient I/O failures use an explicit retry time and manual maintenance can
+  force retry.
 - **Boundary:** Same-device/inode growth is accepted as append-only. Refresh
   does not re-read the committed prefix and therefore does not claim to detect
   an earlier in-place rewrite combined with growth.
@@ -108,17 +161,37 @@ they never own full copies of messages, physical aliases, or embeddings.
 - **Success:** Scan, parse, FTS commit, model preflight/load, embedding, semantic
   commit, query embedding, retrieval, and completion emit structured phase,
   elapsed-time, completed-unit, total-unit when known, and freshness events.
-- **Success:** Human output and NDJSON progress identify the active index owner
-  and continue emitting a heartbeat during a long phase, so a roughly
-  30-second refresh does not appear hung.
+- **Success:** Search measures one monotonic end-to-end deadline from request
+  receipt through rendered output. The initial default is five seconds; output
+  reports the configured deadline, elapsed time, retrieval mode, committed
+  revision/as-of time, staleness reasons, and any background run/request ID.
+- **Success:** A minimal console bootstrap records the request clock before
+  importing command, database, or semantic modules. Acceptance measures the
+  externally visible interval from executable invocation through process exit
+  while draining stdout, so interpreter and import spin-up remain part of the
+  five-second product boundary rather than disappearing from telemetry.
+- **Success:** Search obtains literal candidates before optional semantic work.
+  Semantic query work executes behind a cancellable process boundary and is
+  admitted only while deadline remains. If it cannot finish, the command returns
+  literal results rather than exceeding the deadline.
+- **Success:** Every search-side PostgreSQL statement, automatic-refresh launch
+  attempt, semantic child, cleanup/reap step, serialization step, and rendering
+  reserve derives its budget from that same monotonic deadline. A launch attempt
+  or optional child that exhausts its budget is terminated and reaped without
+  converting an existing literal answer into a failure.
+- **Success:** Human output and NDJSON progress identify the active background
+  index owner. Long maintenance phases continue heartbeating in durable run
+  state and the systemd journal after the requesting search has returned.
 - **Failure:** If semantic refresh fails, staged semantic rows do not become
   current, the last valid semantic generation remains intact, current FTS state
-  is retained, and hybrid/semantic search exits nonzero rather than serving
-  stale vectors.
-- **Failure:** Model-load, query-embedding, or VRAM failure reports the failed
-  phase, available/required VRAM when measurable, semantic freshness, and the
-  literal text `Literal search is required for complete current results`, plus
-  an executable `search --literal ...` form. No alternate model is selected.
+  is retained, and search may fuse only mappings whose chunk profile and source
+  text digest still match the current message row. Missing mappings reduce
+  semantic coverage; they do not make valid mappings stale.
+- **Failure:** Model-load, query-embedding, VRAM, or deadline failure reports the
+  failed/degraded phase and semantic freshness while returning the already
+  computed literal answer. No alternate model is selected. Database
+  unavailability or failure to obtain literal results within the deadline remains
+  a named nonzero failure because no answer can be fabricated safely.
 
 ### cross-vendor-semantic-search.AC6: Stable identity and exact resolution
 
@@ -139,9 +212,11 @@ they never own full copies of messages, physical aliases, or embeddings.
   state, warnings, and a terminal status. Additive fields do not change existing
   field meanings within a schema version.
 - **Success:** Coverage reports configured and resolved provider roots, projects
-  or repositories, discovered/read/indexed/skipped/unreadable file counts,
-  unknown session kinds, unrecognised conversation-shaped records, and source
-  watermarks.
+  or repositories, metadata-checked/unchanged/content-read/indexed/excluded/
+  blocked/transient-failure/removed file counts, bytes read, appended versus
+  replacement work, unknown session kinds, unrecognised conversation-shaped
+  records, and source watermarks. Attempted reads cannot be reported as zero
+  merely because their staged rows were rejected.
 - **Failure:** A partial scan or skipped source cannot produce
   `completeness = "complete"`. Progress uses stderr so stdout remains one valid
   final JSON document.
@@ -150,7 +225,7 @@ they never own full copies of messages, physical aliases, or embeddings.
 
 - **Success:** The dedicated database stores all large search tables and indexes,
   including staged and current vectors, in a PostgreSQL tablespace below a
-  configured external data root. Search migrations, refresh, and maintenance
+  configured external data root. Search-schema migrations, refresh, and maintenance
   are confined to rebuildable search relations. Refresh ownership, status, and
   generation state are transactional PostgreSQL state rather than ad hoc
   lock/status files.
@@ -482,13 +557,14 @@ quarantined and read-only through acceptance. Only a separate verified prune
 step drops them; it never addresses the existing message-attribution quarantine
 schema or native logs.
 
-Production currently selects corpus generation 14 while its selected semantic
-generation 9 targets corpus generation 13; incomplete semantic generation 10
-targets 14 and contains no vectors. Migration therefore joins the selected old
-vectors to their generation-13 text, validates the pairing, and imports them
-only into the reusable profile/input-digest pool. It does not declare semantic
-state current until every eligible message in the normalized current corpus
-resolves to a validated vector and the missing current inputs have been embedded.
+The 2026-08-21 production audit found corpus generation 14 selected while its
+selected semantic generation 9 targeted corpus generation 13; incomplete
+semantic generation 10 targeted 14 and contained no vectors. Migration therefore
+joins the selected old vectors to their generation-13 text, validates the
+pairing, and imports them only into the reusable profile/input-digest pool. It
+does not declare semantic state current until every eligible message in the
+normalized current corpus resolves to a validated vector and the missing current
+inputs have been embedded.
 
 ### Transactions, generations, and refresh ownership
 
@@ -510,36 +586,53 @@ selected profile, then records the selected semantic generation. Failed work
 may leave validated reusable vectors but cannot make an incomplete generation
 current; unreachable vectors are reclaimed after a later successful publication.
 
-A session-level PostgreSQL advisory lock admits one refresh owner. The owner
+A session-level PostgreSQL advisory lock admits one maintenance owner. The owner
 publishes heartbeat, phase, progress, and requested/committed freshness in
-`index_generation`; it does not hold a write transaction while scanning, parsing,
-loading a model, or embedding. Search/index callers that requested freshness wait
-without a transaction while reporting `waiting_for_index`; they do not silently
-satisfy that request from an older committed generation. Read-only status and an
-exact native resolution whose locator already names its source may inspect
-committed state without requesting refresh. Advisory-lock ownership is released
-automatically if the database session dies, so stale PID-file recovery is
-unnecessary.
+`refresh_run`; it does not hold a write transaction while scanning, parsing,
+loading a model, or embedding. Manual and nightly maintenance callers may wait
+while reporting that owner. Search never waits for this lock or for the local
+maintenance `flock`; it reads one already committed snapshot.
 
-After on-demand refresh, search opens a read-only `REPEATABLE READ` transaction,
-reads the committed corpus and semantic generation metadata once, and performs
-metadata, lexical, and vector queries in that snapshot. Literal search requires
-only a committed corpus generation. Hybrid search requires the selected
-semantic generation's target corpus generation to equal the committed corpus
-generation; mismatch is explicit semantic staleness, not permission to serve
-old vectors.
+One `auto_refresh_state` singleton owns automatic admission, not the corpus.
+Search attempts a short atomic compare-and-set only when no request is pending
+and the last accepted automatic request is at least five minutes old. The winning
+transaction commits a unique pending request before any external launch attempt.
+Search then asks the packaged low-priority
+`cc-search-chats-refresh.service` to start with
+`systemctl --user start --no-block`; the invocation is itself a bounded,
+terminable, reaped child and cannot consume the rendering reserve. Systemd
+deduplicates an already active oneshot and owns the refresh lifecycle after the
+CLI exits. The service claims pending requests transactionally and checks again
+before exit. Launch attempts, claim state, and the resulting refresh run ID are
+durable status. If launch fails or times out, the request records a bounded
+retry-at/backoff; a later eligible search may retry launching that same pending
+request without admitting another request or advancing the cooldown again. A
+missing or unavailable user systemd instance never causes an orphaned
+refresh-process fallback or a launch attempt on every query: search reports
+`auto_refresh_unavailable` and continues with the committed snapshot.
 
-Before a PostgreSQL CLI command opens a connection, it makes one blocking
-`flock` request for its work-class single-flight gate. The file is only an
-OS-owned admission primitive: contenders sleep until release, process death
-releases ownership, and it is neither durable status nor a lease. Database
-reads then make one blocking request for a transaction-scoped advisory lock
-with local `lock_timeout`, `statement_timeout`, and temporary-file limits; the
-transaction releases that lock on every exit path. This two-layer admission
-prevents local process fan-out while still protecting the database from callers
-on another host. A PostgreSQL queue table is deliberately excluded: without a
-resident worker it would turn reads into writes and require lease expiry,
-claiming, stale-row recovery, and another scheduler.
+A minimal console bootstrap records the monotonic request clock before loading
+command, database, or semantic modules; heavyweight semantic imports remain lazy
+until literal candidates already exist. Search opens a read-only `REPEATABLE
+READ` transaction immediately, reads corpus, semantic, coverage, and refresh
+metadata once, and obtains literal candidates before optional semantic or launch
+work. PostgreSQL connection establishment, `statement_timeout`, and
+`lock_timeout` are bounded from the remaining monotonic request budget. After
+literal retrieval, optional semantic and background-launch paths may use only the
+budget left before the measured serialization, child-termination, reap, and
+output reserves. Semantic retrieval admits only current message rows joined to
+chunks with the requested profile/chunker and an exact source-text digest match.
+Foreign-key cascade removes mappings for deleted messages, and the digest
+predicate rejects mappings for changed text. Semantic coverage may therefore be
+incomplete after a literal publication without any served vector being stale.
+Output distinguishes complete hybrid, partial hybrid, and literal fallback.
+
+Schema migration is explicit operator maintenance. Search and both scheduled
+services check the migration ledger and report `maintenance_required` rather
+than applying new DDL. The explicit migration command owns checksum validation
+and schema change; routine `index` owns only refresh against a current schema.
+This prevents package installation or the first subsequent search/timer run from
+silently changing production schema.
 
 Exact locator resolution accepts an ordered locator array. Canonical and
 physical-alias branches use identity indexes, union only narrow logical
@@ -552,10 +645,25 @@ subprocess per locator.
 ### Failure and recovery
 
 A failed candidate migration leaves the deployed snapshot schema selected and
-searchable. A failed changed-source refresh leaves canonical rows and checkpoints
-unchanged. A failed semantic refresh leaves literal search current and does not
-select incomplete semantic metadata. Every failure records the owning
-generation, phase, and diagnostic without manufacturing a successful watermark.
+searchable. Each source has a last fully understood committed checkpoint and,
+when applicable, a separate failed-observation fingerprint containing provider,
+root/relative path, device/inode, target size, mtime, parser version, failing
+coordinate, diagnostic detail, retry class, and next retry time. A deterministic
+unknown record does not advance over that record; an unchanged observation is
+not reread. The successfully understood prefix may remain committed and
+searchable with partial coverage. A changed source or parser version invalidates
+the deterministic fingerprint. Transient failures retry after their recorded
+backoff, and explicit maintenance may force a retry without altering native
+logs.
+
+Recognized non-searchable provider metadata advances the successful checkpoint
+only through exact allowlisted adapters. Claude UI/runtime records, nested tool
+references, Codex lifecycle events, and fork-lineage metadata each require a
+positive fixture and named exclusion/classification. A generic unknown record
+remains blocked and diagnostic. A failed semantic refresh leaves literal search
+current and does not select incomplete semantic metadata. Every failure records
+the owner, phase, attempted bytes, and original provider diagnostic rather than
+manufacturing a successful watermark or discarding its useful detail.
 
 Cutover and prune are distinct operations. Cutover atomically selects the
 normalized relations while retaining schema-qualified snapshot tables. Prune
@@ -630,6 +738,12 @@ retains its last committed observation and content, records the failed current
 attempt separately, and reports partial coverage; absence of a successful read
 never authorizes silent deletion.
 
+A source-local failure does not discard the fact that bytes were attempted. The
+refresh result separately counts metadata observations, attempted content reads,
+successfully staged sources, blocked sources, transient failures, and bytes read.
+The failed-observation fingerprint is published independently of changed-message
+staging, so it remains available even when no source content can be committed.
+
 At refresh start, each file receives a target size. Parsing stops at the last
 complete newline-delimited record at or below that size. Native writers may
 continue appending. A final stat records whether the file advanced and how many
@@ -638,15 +752,16 @@ that an actively changing corpus was frozen.
 
 One refresh owner holds the session-level advisory lock described above. Its
 short heartbeat updates name the database session and run, while PostgreSQL
-itself releases ownership if that session ends. A second refresh caller emits
-`waiting_for_index` and waits for or reuses the committed generation rather than
-starting duplicate parsing or model work.
+itself releases ownership if that session ends. A second maintenance caller may
+wait; search only reports the active owner and continues querying its committed
+snapshot.
 
 The FTS generation commits independently so current literal search survives a
-semantic failure. Semantic search requires the current semantic generation to
-target the selected current FTS generation for the corpus. A mismatch is explicit
-semantic staleness, never an invitation to serve the previous semantic generation
-silently.
+semantic failure. A selected semantic generation matching the FTS generation
+proves complete coverage. A mismatched generation proves semantic coverage is
+incomplete, but row-level foreign keys, profile/chunker identity, and source-text
+digest matching still permit safe partial semantic candidates for unchanged
+current messages. Output never labels that partial set complete.
 
 The opt-in overnight unit invokes `index`. That composed
 operation refreshes FTS and semantic state in order. It reports success only
@@ -656,12 +771,14 @@ Semantic failure leaves the newly committed FTS generation
 literal-searchable, returns a nonzero partial terminal state, and does not let the
 timer or status claim a fresh hybrid baseline.
 
-The packaged user service is a low-priority oneshot rather than a resident
-application service. Its persistent timer runs nightly at 03:00 with randomized
-delay. Both the unit and CLI containment apply `Nice=10`, idle I/O scheduling,
-low CPU/I/O weights, and memory/task bounds. The composed command holds one
-session-scoped advisory lock across literal refresh and embedding, so separate
-phase locks cannot admit an overlapping rebuild.
+The packaged nightly service remains a low-priority composed literal-plus-
+semantic oneshot with a persistent 03:00 timer and randomized delay. A separate
+low-priority literal-only oneshot is the automatic search-triggered consumer;
+it has no timer and never loads the embedding model. Both units apply `Nice=10`,
+idle I/O scheduling, low CPU/I/O weights, and memory/task bounds. Explicit manual
+maintenance ignores the five-minute automatic cooldown. The nightly composed
+command holds one session-scoped advisory lock across literal refresh and
+embedding, so separate phase locks cannot admit overlapping rebuilds.
 
 ### Semantic chunks and vectors
 
@@ -723,15 +840,28 @@ availability and best-effort total/free/estimated-required VRAM. Allocation is
 still attempted defensively because preflight cannot predict fragmentation or a
 racing external allocation.
 
+Interactive query embedding runs in an ephemeral child process connected by a
+private pipe; query text is never placed in argv, a systemd unit name, or durable
+refresh state. The parent already owns literal results and terminates the child
+when the monotonic request deadline leaves only the measured cleanup and
+rendering reserve. Termination escalates from a bounded graceful signal to a
+forced kill and always reaps the child before rendering the answer.
+The initial five-second deadline is provisional. Production acceptance records
+cold and warm import, model-load, query-embedding, retrieval, and cleanup costs
+before deciding whether to raise it. A resident model worker remains outside
+this delivery unless those measurements justify reopening its GPU-residency and
+lifecycle costs explicitly.
+
 Embedding writes only missing reusable vectors and advances semantic generation
 metadata only after every expected chunk and text/vector invariant validates.
 OOM, interruption, incompatibility, or validation failure leaves the previous
-semantic generation selected. Query embedding failure follows the same loud
-literal-search boundary even when the stored semantic generation itself is
-current. Because model loading and query embedding occur outside a database
-transaction, retrieval rechecks the selected FTS generation, semantic
+semantic generation selected. Query embedding failure degrades ranked search to
+its already computed literal answer even when the stored semantic generation
+itself is current. Because model loading and query embedding occur outside a
+database transaction, retrieval rechecks the selected FTS generation, semantic
 generation, and complete embedding profile in its read-only repeatable-read
-snapshot and retries or fails if they changed during embedding.
+snapshot. If they changed during embedding, it discards the semantic candidates
+and returns the literal answer rather than retrying past the deadline.
 
 ### Search modes and ranking
 
@@ -739,9 +869,23 @@ snapshot and retries or fails if they changed during embedding.
 
 | Mode | Behaviour | Completeness claim |
 |---|---|---|
-| default | Natural-language FTS candidates plus semantic candidates, fused by reciprocal-rank fusion | Ranked top results only |
+| default | Query literal candidates first; fuse any digest-valid semantic candidates completed before the request deadline by reciprocal-rank fusion | Ranked top results with `complete`, `partial`, or `literal_fallback` semantic coverage |
 | `--literal` | Prose FTS only; add tool FTS with `--tools` | Ranked literal results |
-| `--literal --exhaustive` | Stream/page every deterministic FTS occurrence; add tool occurrences with `--tools` | Exhaustive through reported source watermarks |
+| `--literal --exhaustive` | Explicitly stream/page every deterministic FTS occurrence; add tool occurrences with `--tools`; exempt from the ranked-search deadline | Exhaustive through reported source watermarks after the final page |
+
+For default and ranked `--literal` search, the request clock starts before
+database admission and stops only after output is rendered. Search does not spend
+the deadline waiting for refresh. It reads the current revision, obtains literal
+candidates, and may then request the cooldown-governed background refresh while
+optional semantic work proceeds. If semantic work finishes in time, its
+row-valid candidates are fused; otherwise the literal result is returned. A
+refresh that publishes during the
+request is intentionally visible only to a later transaction unless it committed
+before the selected repeatable-read snapshot. Each answer therefore names the
+exact revision it actually queried rather than implying it waited for the newest
+possible bytes. Explicit `--literal --exhaustive` enumeration instead reports
+elapsed time and fixed page/stream boundaries; it never presents itself as the
+five-second interactive answer path.
 
 `--all` retains its current meaning of all indexed projects/providers and is not
 repurposed to mean every result. `--everything` is removed because no supported
@@ -861,24 +1005,31 @@ these stable fields:
 ```text
 schema_version, sequence, event, run_id, phase, state, elapsed_ms,
 completed_units, total_units, owner, fts_revision, semantic_revision,
-source_watermark, warning, error, coverage, refresh, semantic
+source_watermark, deadline_ms, retrieval_mode, indexed_at, stale_reasons,
+refresh_requested, warning, error, coverage, refresh, semantic
 ```
 
 Phases are `scan`, `parse`, `fts_commit`, `model_preflight`, `model_load`,
 `semantic_embed`, `semantic_commit`, `query_embed`, `retrieve`, and `done`.
-Long phases emit a heartbeat at least every five seconds. Refresh waiters use
-database notifications only as wakeups and re-read transactional run/lock state;
-session advisory-lock ownership, not heartbeat age, decides ownership. Every
-command emits exactly one terminal event. In JSON result mode it precedes one
-final JSON object, and their terminal status, revisions, coverage, and semantic
-state agree so a caller does not need retained stderr to interpret results.
-Human result mode derives its final presentation from the same terminal state.
+Long maintenance phases emit a heartbeat at least every five seconds. Search
+does not become a refresh waiter; it reports the durable active owner/request and
+continues. Session advisory-lock ownership, not heartbeat age, decides ownership.
+Every command emits exactly one terminal event. In JSON result mode it precedes
+one final JSON object, and their terminal status, revisions, coverage, semantic
+state, deadline, retrieval mode, and staleness agree so a caller does not need
+retained stderr to interpret results. Human result mode derives its final
+presentation from the same terminal state.
 
 Errors have stable names in JSON and distinct nonzero process outcomes where a
-caller must branch: invalid invocation/locator, source unavailable, no match,
-multiple matches, stale state, unsupported schema, semantic unavailable, and
-internal failure. Literal success after a prior semantic failure is an ordinary
-success whose diagnostics still report semantic state.
+caller's command contract cannot be fulfilled: invalid invocation/locator, no
+match, multiple matches, unsupported schema, database unavailable, source
+unavailable for exact resolution, stale exact locator, and internal failure.
+Ranked search over a queryable committed snapshot remains successful when source
+coverage is partial or stale; its diagnostics name that state. Likewise,
+`semantic_unavailable` is nonzero for explicit model-validation and
+semantic-maintenance commands that require semantic output, but ranked search
+returns a successful `literal_fallback` result with the semantic failure and
+remediation state.
 
 ## Existing Patterns Preserved and Changed
 
@@ -947,6 +1098,28 @@ weight footprint on the shared 4090 and interfere with other work. Rejected for
 the initial design. Per-command loading exposes progress and releases VRAM on
 exit.
 
+### Synchronous search-time refresh — rejected
+
+Waiting for discovery, parsing, publication, or another refresh owner makes an
+ordinary query inherit unbounded maintenance latency. A nominal timeout around
+that call also abandons work when the CLI exits. Search therefore queries a
+committed snapshot immediately and delegates refresh to a separately owned
+oneshot.
+
+### Detached child refresh process — rejected
+
+`Popen`, double-fork, or shell-background launch would leave containment,
+deduplication, logs, environment, and crash ownership dependent on the caller.
+The installed systemd user oneshot already supplies those boundaries. When it is
+unavailable, explicit stale output is safer than an unmanaged fallback.
+
+### Search-triggered semantic maintenance — rejected
+
+Loading the 8B model every five minutes during an active conversation would
+replace JSONL thrash with GPU thrash. Automatic search-triggered refresh is
+literal-only. Nightly and manual maintenance own semantic catch-up; interactive
+search may still use the digest-valid subset of existing semantic mappings.
+
 ### Retained full snapshots — rejected
 
 Full snapshots make staging simple, but every successful refresh permanently
@@ -969,23 +1142,29 @@ policy.
    reclaimed allocation.
 2. **Incremental multi-root refresh.** Add failing unchanged, append,
    partial-tail, truncation, replacement, conflict, unreadable-source, and
-   cross-root collision fixtures. Implement configured source collections,
-   standard and Ponytail defaults, per-file checkpoints, parser-state
-   serialization, suffix reads, changed-source staging, and atomic merge. This
-   phase leaves `index` idempotent without copying unchanged rows.
-3. **Search freshness and semantic reuse.** Make search run the lightweight
-   discovery/refresh boundary before retrieval. Add failure and concurrency
-   tests for one refresh owner, waiters, active writers, literal availability
-   after semantic failure, missing-vector resume, semantic generation matching,
-   and unreachable-vector cleanup. This phase leaves a newly appended known
-   message searchable without a separate manual index command.
+   cross-root collision fixtures, plus production-derived fixtures for every
+   newly allowlisted metadata family. Implement committed-prefix checkpoints,
+   separate deterministic/transient failed-observation state, suffix reads,
+   truthful attempted-byte counters, changed-source staging, and atomic merge.
+   This phase leaves repeated failed and successful no-op refreshes content-byte
+   idempotent without hiding partial coverage.
+3. **Bounded search and background freshness.** Add fake-clock/process/systemd
+   journeys proving the five-minute atomic cooldown, one durable background
+   literal owner, no search lock wait, a five-second total deadline, literal
+   fallback, cancellable semantic work, partial row-valid semantic fusion, and
+   exact stale-revision output. Add the automatic literal oneshot while retaining
+   the nightly composed index unit. This phase leaves every successful literal
+   retrieval with a bounded answer and any admitted refresh independently
+   continuing.
 4. **Cross-vendor consumer contract.** Complete the shared identity and JSON-v2
    shapes for search, resolve, context, extract, list, and reference-only output;
    enforce primary/prose defaults; add `--agents`, `--tools`, and literal
-   `--exhaustive`; reject `--everything`; verify exact resolution against native
-   sources; and emit coverage, progress, freshness, and named failure outcomes.
+   deadline-exempt `--exhaustive`; reject `--everything`; verify exact resolution
+   against native sources; and emit coverage, progress, freshness, and named
+   failure outcomes.
    This phase owns AC1, AC2, AC5, AC6, and AC7 wherever the current provisional
-   CLI remains incomplete.
+   CLI remains incomplete. Add deadline, retrieval-mode, work-count, cooldown,
+   background-owner, and staleness fields additively.
 5. **Operator and project truth.** Rewrite `CLAUDE.md` against the implemented
    PostgreSQL, cross-vendor, semantic, multi-root architecture; update README,
    service configuration, database architecture, migration/prune runbook, and
@@ -993,11 +1172,12 @@ policy.
 6. **Production cutover and acceptance.** Run all mechanical gates and the
    disposable migration suite, then follow the project release gate: accepted
    commit, exact clean `main`, exact non-editable global installation, production
-   candidate migration, count/integrity checks, and positive standard/Ponytail
-   Claude/Codex literal and semantic UAT. Only after those checks and human UAT
-   accept the new behavior may the prune operation drop superseded snapshot
-   tables. Recheck row counts, relation sizes, freshness, and positive searches
-   after pruning.
+   candidate migration, normalized projection rebuild, immediate zero-byte
+   literal rerun, semantic build and no-new-vector rerun, request-stage timing,
+   and positive standard/Ponytail Claude/Codex literal and semantic UAT. Keep the
+   timer disabled until behavior and timing are accepted. This delivery does not
+   prune legacy relations; any later prune still requires its own fresh plan and
+   human authority.
 
 Every phase follows red-green-refactor against provider fixtures and disposable
 PostgreSQL 18 clusters initialized in test temporary directories with the
@@ -1030,5 +1210,9 @@ acceptance-gated operation, not a unit-test side effect.
 - Source freshness is always bounded by reported watermarks. No finite search can
   truthfully include records created after its snapshot while a supervisor keeps
   writing.
+- The five-second request deadline and five-minute automatic cooldown are
+  independently configurable product values with those initial defaults. Tuning
+  requires recorded production-stage measurements and repeated UAT; it is not a
+  reason to weaken byte-work, staleness, or single-flight evidence.
 - The tool reports classifications and evidence; it does not infer intent,
   summarize conversations, or decide which agent statements are trustworthy.
