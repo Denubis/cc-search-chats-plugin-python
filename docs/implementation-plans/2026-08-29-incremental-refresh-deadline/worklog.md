@@ -145,3 +145,42 @@
   reporting correction is not yet committed or installed. Semantic refresh and
   four-corpus UAT remain unperformed. The timer stays disabled; no prune, push,
   merge, or timer enablement has occurred.
+
+## 2026-08-29 — installed reporting repair and semantic normalization failure
+
+- Reporting candidate `55381b9f7eaf1f0de5c7ad02f2abb288a155346f`
+  was installed offline from that exact Git commit. `direct_url.json`, the
+  launcher target, installed package bytes, and CLI version identify the
+  candidate. uv updated the tool environment but could not recreate the
+  already-correct launcher symlink because `/home/brian/.local/bin` was outside
+  this sandbox's writable roots; the existing launcher remained valid and
+  resolves into the updated environment.
+- A literal catch-up under run 31 read three changed sources and selected
+  revision 30. The immediate repeat created no run or revision and now reports
+  zero attempted files/bytes, no run ID, `state = "unchanged"`, and partial
+  coverage for exactly 39 blocked sources. The production reporting defect is
+  therefore repaired.
+- An installed ranked literal search for a newly appended standard-Codex user
+  message returned the older snapshot in 774 ms, omitted the sentinel, and
+  durably launched background refresh request 1. Background run 32 inspected
+  11,089 source metadata entries, read only four changed files (4,124,547
+  bytes), selected revision 31, and completed with 39 deterministic blocks and
+  zero transient failures. The next search found the exact Codex native
+  identity. A current standard-Claude user message was also found and both
+  locators resolved to physical aliases under their standard roots. Ponytail
+  traffic was not made an acceptance prerequisite; later native changes remain
+  ordinary incremental work.
+- The final installed `index --json` job performed one last literal increment:
+  run 33 read three files (259,385 bytes) and selected revision 32. Semantic
+  candidate 20 then built the complete 482,249-passage chunk map and failed on
+  the first model result with `embedding must be normalized`; selected semantic
+  revision 17 remained unchanged. A host model probe demonstrated the mechanism:
+  normalization executed in BF16 produced a 1,024-dimensional vector with norm
+  `0.9979867365`, outside the intentionally strict storage invariant.
+- Red unit evidence now requires pooled BF16 values to be converted to float32
+  before normalization. The model boundary performs that conversion; the same
+  host probe produces norm `1.0000000308`, so storage validation remains strict.
+  Fresh verification reports 693 non-PostgreSQL tests and 66 PostgreSQL tests
+  passing, plus repository-wide Ruff lint/format, ty, and diff hygiene. A new
+  exact commit/install is required before the single final semantic retry. The
+  timer remains disabled; no prune, push, merge, or timer enablement occurred.

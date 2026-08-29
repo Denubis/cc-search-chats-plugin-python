@@ -164,6 +164,13 @@ def _runtime():
     return torch, tokenizer, model
 
 
+def _normalize_pooled_embeddings(torch, pooled):
+    return torch.nn.functional.normalize(
+        pooled[:, :DIMENSIONS].float(),
+        dim=1,
+    )
+
+
 def _embed_batch(texts: Sequence[str], prefix: str) -> list[list[float]]:
     torch, tokenizer, model = _runtime()
     inputs = tokenizer(
@@ -177,7 +184,7 @@ def _embed_batch(texts: Sequence[str], prefix: str) -> list[list[float]]:
         hidden = model(**inputs, use_cache=False).last_hidden_state
         mask = inputs["attention_mask"].unsqueeze(-1)
         pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1)
-        vector = torch.nn.functional.normalize(pooled[:, :DIMENSIONS], dim=1)
+        vector = _normalize_pooled_embeddings(torch, pooled)
     return vector.float().cpu().tolist()
 
 

@@ -8,6 +8,38 @@ from cc_search_chats.semantic import ModelUnavailable, embed_passages, embed_que
 from cc_search_chats.semantic import model as semantic_model
 
 
+def test_pooled_embeddings_are_normalized_in_float32() -> None:
+    class Float32Values:
+        pass
+
+    class BFloat16Values:
+        def float(self) -> Float32Values:
+            return Float32Values()
+
+    class PooledValues:
+        def __getitem__(self, key: object) -> BFloat16Values:
+            assert key == (slice(None), slice(None, semantic_model.DIMENSIONS))
+            return BFloat16Values()
+
+    class Functional:
+        @staticmethod
+        def normalize(values: object, *, dim: int) -> str:
+            assert isinstance(values, Float32Values)
+            assert dim == 1
+            return "normalized"
+
+    class NeuralNetwork:
+        functional = Functional()
+
+    class FakeTorch:
+        nn = NeuralNetwork()
+
+    assert (
+        semantic_model._normalize_pooled_embeddings(FakeTorch(), PooledValues())
+        == "normalized"
+    )
+
+
 def test_query_embedding_requires_local_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
