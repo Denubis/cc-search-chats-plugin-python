@@ -73,6 +73,7 @@ from cc_search_chats.storage.index import (
 )
 from cc_search_chats.storage.postgresql import (
     RefreshProgress,
+    RefreshResult,
     StoredAlias,
     StoredMessage,
     exhaustive_search_page,
@@ -547,6 +548,7 @@ def _postgres_envelope(
     *,
     status: str = "complete",
     additional_warnings: Sequence[object] = (),
+    refresh_result: RefreshResult | None = None,
     **payload: object,
 ) -> dict[str, object]:
     roots = [
@@ -693,6 +695,29 @@ def _postgres_envelope(
     blocked_files = int(refresh_row[12] or 0)
     transient_failure_files = int(refresh_row[13] or 0)
     pending_bytes = int(refresh_row[15] or 0)
+    refresh_run_id = refresh_row[1]
+    refresh_state = refresh_row[2] or "unchanged"
+    refresh_revision = refresh_row[0]
+    if refresh_result is not None:
+        discovered_files = refresh_result.source_count
+        changed_files = refresh_result.changed_source_count
+        failed_files = refresh_result.failed_source_count
+        read_files = refresh_result.read_source_count
+        removed_files = refresh_result.removed_source_count
+        advanced_files = refresh_result.advanced_source_count
+        metadata_checked_files = refresh_result.metadata_checked_source_count
+        attempted_files = refresh_result.attempted_source_count
+        attempted_content_bytes = refresh_result.attempted_content_bytes
+        blocked_files = refresh_result.blocked_source_count
+        transient_failure_files = refresh_result.transient_failure_source_count
+        refresh_run_id = refresh_result.run_id
+        refresh_state = (
+            refresh_row[2]
+            if refresh_result.run_id is not None
+            and refresh_result.run_id == refresh_row[1]
+            else "unchanged"
+        )
+        refresh_revision = refresh_result.revision_id
     unrecognized_records = sum(
         1
         for diagnostic in diagnostics
@@ -728,14 +753,18 @@ def _postgres_envelope(
         "source_watermarks": source_watermarks,
         "completeness": (
             "partial"
-            if refresh_row[2] in {"partial", "failed"} or failed_files or pending_bytes
+            if refresh_state in {"partial", "failed"}
+            or failed_files
+            or blocked_files
+            or transient_failure_files
+            or pending_bytes
             else "complete"
         ),
     }
     refresh = {
-        "fts_revision": refresh_row[0],
-        "run_id": refresh_row[1],
-        "state": refresh_row[2] or "unchanged",
+        "fts_revision": refresh_revision,
+        "run_id": refresh_run_id,
+        "state": refresh_state,
         "failed_sources": failed_files,
         "attempted_sources": attempted_files,
         "attempted_content_bytes": attempted_content_bytes,
@@ -905,6 +934,7 @@ def _handle_postgres(
             *,
             status: str = "complete",
             additional_warnings: Sequence[object] = (),
+            refresh_result: RefreshResult | None = None,
             **payload: object,
         ) -> dict[str, object]:
             if args.command == "search" and not args.exhaustive:
@@ -929,6 +959,7 @@ def _handle_postgres(
                 command,
                 status=status,
                 additional_warnings=additional_warnings,
+                refresh_result=refresh_result,
                 **payload,
             )
             progress_stream.terminal(envelope)
@@ -1023,6 +1054,7 @@ def _handle_postgres(
                     owner=event.owner_pid,
                 )
 
+            current_refresh_result: RefreshResult | None = None
             if args.semantic_only:
                 revision_id, source_count, message_count = next(
                     connection.execute(
@@ -1046,6 +1078,7 @@ def _handle_postgres(
                             progress=progress,
                             force_retry=args.force_retry,
                         )
+                        current_refresh_result = result
                     except Exception as error:
                         if background_request_id is not None:
                             mark_auto_refresh_run_failed(
@@ -1126,6 +1159,7 @@ def _handle_postgres(
                 )
             envelope = finish(
                 "index",
+                refresh_result=current_refresh_result,
                 revision_id=revision_id,
                 sources=source_count,
                 messages=message_count,

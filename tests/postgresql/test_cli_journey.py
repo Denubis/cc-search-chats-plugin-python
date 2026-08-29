@@ -208,6 +208,26 @@ def test_postgresql_cli_journey_with_events(
     assert index_progress[-1]["refresh"] == indexed_payload["refresh"]
     assert index_progress[-1]["semantic"] == indexed_payload["semantic"]
 
+    code, unchanged = _run(monkeypatch, capsys, "index", "--literal-only", "--json")
+    assert code == 0
+    unchanged_payload = json.loads(unchanged.out)
+    _assert_v2_envelope(unchanged_payload, "index")
+    unchanged_coverage = unchanged_payload["coverage"]
+    unchanged_refresh = unchanged_payload["refresh"]
+    assert unchanged_payload["revision_id"] == indexed_payload["revision_id"]
+    assert unchanged_coverage["metadata_checked_files"] == 4
+    assert unchanged_coverage["content_read_files"] == 0
+    assert unchanged_coverage["content_read_bytes"] == 0
+    assert unchanged_coverage["read_files"] == 0
+    assert unchanged_coverage["completeness"] == "complete"
+    assert unchanged_refresh["run_id"] is None
+    assert unchanged_refresh["state"] == "unchanged"
+    assert unchanged_refresh["attempted_sources"] == 0
+    assert unchanged_refresh["attempted_content_bytes"] == 0
+    unchanged_progress = _progress_events(unchanged.err)
+    assert unchanged_progress[-1]["coverage"] == unchanged_coverage
+    assert unchanged_progress[-1]["refresh"] == unchanged_refresh
+
     code, exported = _run(
         monkeypatch,
         capsys,

@@ -115,3 +115,33 @@
   this final repair. A new exact commit/install and literal production refresh
   are required before semantic refresh or four-corpus UAT. The timer stays
   disabled; no prune, push, merge, or timer enablement has occurred.
+
+## 2026-08-29 — literal production catch-up and reporting correction
+
+- Exact canonicalization candidate
+  `5187b2abdc20ff378e4185b01ab76b884a8261b2` was built, installed offline from
+  that Git commit, and verified through direct-URL and packaged-resource hashes.
+  The production timer and both index services remained disabled/inactive.
+- Literal run 29 completed and selected corpus revision 28. It discovered
+  11,088 sources, read and indexed 11,049, retained the 39 reviewed
+  deterministic failures, and reported no transient or unrecognized parser
+  failures. Semantic state remained untouched and stale.
+- A chained catch-up/no-op check then selected revision 29 in run 30 after five
+  changed sources. The immediately repeated command created neither a refresh
+  run nor a corpus revision, proving the database no-op behavior. It also
+  exposed two CLI serialization defects: the no-op envelope reused run 30's
+  five-source read counters, and both envelopes called coverage complete despite
+  39 blocked sources.
+- Red tests reproduce both defects through the PostgreSQL CLI journey and an
+  unchanged durable blocked observation. Index serialization now consumes the
+  current `RefreshResult`: the no-op reports zero attempted sources/content
+  bytes, no run ID, and `state = "unchanged"`. Coverage remains partial whenever
+  blocked or transient failures exist; durable pending bytes still come from
+  current database state. This corrects the documented schema-v2 meanings and
+  does not add a schema or migration.
+- Fresh verification after the reporting correction: 692 non-PostgreSQL tests
+  and 66 PostgreSQL tests pass; repository-wide Ruff lint/format and ty pass;
+  `git diff --check` passes. Production remains installed at `5187b2a...`; the
+  reporting correction is not yet committed or installed. Semantic refresh and
+  four-corpus UAT remain unperformed. The timer stays disabled; no prune, push,
+  merge, or timer enablement has occurred.

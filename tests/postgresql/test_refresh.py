@@ -1041,6 +1041,29 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
     assert unchanged.attempted_source_count == 0
     assert unchanged.attempted_content_bytes == 0
     assert unchanged.blocked_source_count == 1
+    unchanged_envelope = _postgres_envelope(
+        postgres_connection,
+        "index",
+        refresh_result=unchanged,
+    )
+    unchanged_coverage = cast(
+        dict[str, object],
+        unchanged_envelope["coverage"],
+    )
+    unchanged_refresh = cast(
+        dict[str, object],
+        unchanged_envelope["refresh"],
+    )
+    assert unchanged_coverage["metadata_checked_files"] == 1
+    assert unchanged_coverage["content_read_files"] == 0
+    assert unchanged_coverage["content_read_bytes"] == 0
+    assert unchanged_coverage["read_files"] == 0
+    assert unchanged_coverage["blocked_files"] == 1
+    assert unchanged_coverage["completeness"] == "partial"
+    assert unchanged_refresh["run_id"] is None
+    assert unchanged_refresh["state"] == "unchanged"
+    assert unchanged_refresh["attempted_sources"] == 0
+    assert unchanged_refresh["blocked_sources"] == 1
     assert read_starts == []
     assert (
         next(
