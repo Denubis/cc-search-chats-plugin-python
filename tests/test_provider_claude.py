@@ -142,11 +142,256 @@ class TestClaudeRecognizedShapes:
             },
             {"type": "started", "agentId": "agent", "key": "key"},
             {"type": "ai-title", "aiTitle": "title", "sessionId": "session"},
+            {
+                "type": "attachment",
+                "attachment": {},
+                "cwd": "/synthetic",
+                "entrypoint": "cli",
+                "gitBranch": "main",
+                "isSidechain": False,
+                "parentUuid": None,
+                "sessionId": "session",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "userType": "external",
+                "uuid": "attachment-without-agent",
+                "version": "1",
+            },
+            {
+                "type": "attachment",
+                "agentName": "researcher",
+                "attachment": {},
+                "cwd": "/synthetic",
+                "entrypoint": "cli",
+                "gitBranch": "main",
+                "isSidechain": False,
+                "parentUuid": None,
+                "sessionId": "session",
+                "teamName": "team",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "userType": "external",
+                "uuid": "team-attachment",
+                "version": "1",
+            },
+            {
+                "type": "attachment",
+                "attachment": {},
+                "cwd": "/synthetic",
+                "entrypoint": "cli",
+                "gitBranch": "main",
+                "isSidechain": False,
+                "parentUuid": None,
+                "sessionId": "session",
+                "sessionKind": "primary",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "userType": "external",
+                "uuid": "kind-attachment",
+                "version": "1",
+            },
+            {
+                "type": "progress",
+                "cwd": "/synthetic",
+                "data": {},
+                "gitBranch": "main",
+                "isSidechain": False,
+                "parentToolUseID": None,
+                "parentUuid": None,
+                "sessionId": "session",
+                "slug": "slug",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "toolUseID": "tool",
+                "userType": "external",
+                "uuid": "slug-progress",
+                "version": "1",
+            },
+            {
+                "type": "progress",
+                "cwd": "/synthetic",
+                "data": {},
+                "entrypoint": "cli",
+                "gitBranch": "main",
+                "isSidechain": False,
+                "parentToolUseID": None,
+                "parentUuid": None,
+                "sessionId": "session",
+                "slug": "slug",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "toolUseID": "tool",
+                "userType": "external",
+                "uuid": "entrypoint-progress",
+                "version": "1",
+            },
+            {
+                "type": "progress",
+                "agentName": "researcher",
+                "cwd": "/synthetic",
+                "data": {},
+                "gitBranch": "main",
+                "isSidechain": False,
+                "parentToolUseID": None,
+                "parentUuid": None,
+                "sessionId": "session",
+                "slug": "slug",
+                "teamName": "team",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "toolUseID": "tool",
+                "userType": "external",
+                "uuid": "team-progress",
+                "version": "1",
+            },
+            {
+                "type": "progress",
+                "cwd": "/synthetic",
+                "data": {},
+                "gitBranch": "main",
+                "isSidechain": False,
+                "parentToolUseID": None,
+                "parentUuid": None,
+                "sessionId": "session",
+                "teamName": "team",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "toolUseID": "tool",
+                "userType": "external",
+                "uuid": "team-only-progress",
+                "version": "1",
+            },
+            {
+                "type": "queue-operation",
+                "operation": "dequeue",
+                "sessionId": "session",
+                "timestamp": "2026-08-29T00:00:00Z",
+            },
+            {"type": "atis-latch", "atis": {}, "sessionId": "session"},
+            {"type": "last-prompt", "lastPrompt": "prompt", "sessionId": "session"},
+            {"type": "agent-name", "agentName": "researcher", "sessionId": "session"},
+            {"type": "result", "agentId": "agent", "key": "key", "result": {}},
+            {
+                "type": "pr-link",
+                "prNumber": 1,
+                "prRepository": "owner/repository",
+                "prUrl": "https://example.invalid/pr/1",
+                "sessionId": "session",
+                "timestamp": "2026-08-29T00:00:00Z",
+            },
+            {
+                "type": "worktree-state",
+                "sessionId": "session",
+                "worktreeSession": {},
+            },
+            {
+                "type": "bridge-session",
+                "bridgeSessionId": "bridge",
+                "lastSequenceNum": 1,
+                "sessionId": "session",
+            },
         ],
     )
     def test_observed_ui_metadata_families_are_explicitly_excluded(
         self, payload: dict[str, object]
     ) -> None:
+        result = parse_claude_session(
+            (envelope(payload),),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EXCLUDED_METADATA
+        ]
+
+    @pytest.mark.parametrize(
+        ("record_type", "keys"),
+        [
+            ("agent-color", {"type", "agentColor", "sessionId"}),
+            (
+                "file-history-delta",
+                {
+                    "type",
+                    "backup",
+                    "messageId",
+                    "snapshotMessageId",
+                    "timestamp",
+                    "trackingPath",
+                },
+            ),
+            (
+                "bridge-session",
+                {
+                    "type",
+                    "bridgeSessionId",
+                    "lastSequenceNum",
+                    "ownerAccountUuid",
+                    "ownerOrganizationUuid",
+                    "sessionId",
+                },
+            ),
+            (
+                "frame-link",
+                {"type", "frameUrl", "path", "sessionId", "timestamp", "title"},
+            ),
+            (
+                "last-prompt",
+                {"type", "lastPrompt", "leafUuid", "sessionId"},
+            ),
+            ("relocated", {"type", "relocatedCwd", "sessionId"}),
+            (
+                "progress",
+                {
+                    "type",
+                    "cwd",
+                    "data",
+                    "gitBranch",
+                    "isSidechain",
+                    "parentToolUseID",
+                    "parentUuid",
+                    "sessionId",
+                    "slug",
+                    "teamName",
+                    "timestamp",
+                    "toolUseID",
+                    "userType",
+                    "uuid",
+                    "version",
+                },
+            ),
+            *[
+                (
+                    "attachment",
+                    {
+                        "type",
+                        "attachment",
+                        "cwd",
+                        "entrypoint",
+                        "gitBranch",
+                        "isSidechain",
+                        "parentUuid",
+                        "sessionId",
+                        "timestamp",
+                        "userType",
+                        "uuid",
+                        "version",
+                        *extras,
+                    },
+                )
+                for extras in (
+                    {"agentName", "session_id", "slug", "teamName"},
+                    {"agentName", "session_id", "teamName"},
+                    {"agentName", "slug", "teamName"},
+                    {"sessionKind", "session_id", "slug"},
+                    {"sessionKind", "session_id"},
+                    {"sessionKind", "slug"},
+                    {"session_id", "slug"},
+                    {"session_id"},
+                    {"slug"},
+                )
+            ],
+        ],
+    )
+    def test_deeply_observed_ui_metadata_keysets_are_explicitly_excluded(
+        self, record_type: str, keys: set[str]
+    ) -> None:
+        payload: dict[str, object] = {key: None for key in keys}
+        payload["type"] = record_type
+
         result = parse_claude_session(
             (envelope(payload),),
             context=ClaudeSessionContext(source_session_id="session"),
@@ -193,6 +438,109 @@ class TestClaudeRecognizedShapes:
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
             ClaudeDiagnosticCode.EXCLUDED_NON_TEXT_TOOL_RESULT
         ]
+
+    @pytest.mark.parametrize(
+        ("block", "expected_code"),
+        [
+            (
+                {
+                    "type": "advisor_tool_result",
+                    "tool_use_id": "advisor",
+                    "content": {"type": "advisor_result", "text": "private"},
+                },
+                ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA,
+            ),
+            (
+                {
+                    "type": "advisor_tool_result",
+                    "tool_use_id": "advisor",
+                    "content": {
+                        "type": "advisor_tool_result_error",
+                        "error_code": "synthetic",
+                    },
+                },
+                ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA,
+            ),
+            (
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "synthetic",
+                    },
+                },
+                ClaudeDiagnosticCode.EXCLUDED_NON_TEXT_TOOL_RESULT,
+            ),
+            (
+                {"type": "fallback", "from": {}, "to": {}},
+                ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA,
+            ),
+        ],
+    )
+    def test_observed_nonsearchable_blocks_are_explicitly_excluded(
+        self,
+        block: dict[str, object],
+        expected_code: ClaudeDiagnosticCode,
+    ) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "type": "assistant",
+                        "uuid": "nonsearchable-block",
+                        "message": {"role": "assistant", "content": [block]},
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [expected_code]
+
+    def test_legacy_flat_user_record_is_visible(self) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "role": "user",
+                        "text": "legacy visible user",
+                        "ts": "2026-08-29T00:00:00Z",
+                        "uuid": "legacy-user",
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert len(result.messages) == 1
+        assert result.messages[0].role == "user"
+        assert result.messages[0].text == "legacy visible user"
+        assert result.messages[0].timestamp == "2026-08-29T00:00:00Z"
+        assert result.messages[0].identity.logical_message_id == "legacy-user"
+        assert result.diagnostics == ()
+
+    def test_legacy_flat_assistant_record_is_visible(self) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "role": "assistant",
+                        "text": "legacy visible assistant",
+                        "ts": "2026-08-29T00:00:00Z",
+                        "uuid": "legacy-assistant",
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert len(result.messages) == 1
+        assert result.messages[0].role == "assistant"
+        assert result.messages[0].text == "legacy visible assistant"
+        assert result.messages[0].timestamp == "2026-08-29T00:00:00Z"
+        assert result.diagnostics == ()
 
     def test_resumes_conversation_epoch_from_explicit_state(self) -> None:
         boundary_payload = {

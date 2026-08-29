@@ -74,8 +74,12 @@ idempotent. Routine search/index commands must have reported
 
 Capture each stdout/stderr separately. Stdout must parse as one schema-v2 object.
 Stderr must parse as ordered schema-v2 NDJSON ending in exactly one terminal
-event. Require positive root/file counts and
-`coverage.completeness == "complete"`; zero resolved roots is not passing.
+event. Require positive root/file counts; zero resolved roots is not passing.
+Complete coverage passes directly. Partial coverage may proceed only when every
+current failure is reconciled to a reviewed deterministic native-source defect,
+the exact expected blocked-source count is recorded in the UAT evidence, and
+transient failures are zero. Never coerce malformed native bytes or mark the
+coverage complete manually.
 
 Repeat the literal command. An unchanged run must report no changed source and
 create no corpus generation or current-row version changes. Then run the

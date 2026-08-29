@@ -61,8 +61,8 @@ from cc_search_chats.storage.postgresql.guardrails import (
 from cc_search_chats.storage.postgresql.migrations import require_current_schema
 
 _PARSER_STATE_VERSIONS = {
-    Provider.CLAUDE: 1,
-    Provider.CODEX: 1,
+    Provider.CLAUDE: 2,
+    Provider.CODEX: 2,
 }
 _RETAINED_REFRESH_RUNS = 100
 _WAIT_HEARTBEAT_SECONDS = 5.0

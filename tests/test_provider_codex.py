@@ -138,6 +138,195 @@ class TestCodexSchemaFamilies:
             diagnostic.code for diagnostic in result.diagnostics
         }
 
+    def test_forked_child_uses_owner_metadata_before_copied_parent_metadata(
+        self,
+    ) -> None:
+        result = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "child-session",
+                        "session_id": "parent-session",
+                        "parent_thread_id": "parent-session",
+                        "forked_from_id": "parent-session",
+                        "thread_source": "subagent",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": "parent-session",
+                                    "depth": 1,
+                                    "agent_nickname": "researcher",
+                                    "agent_path": "researcher",
+                                    "agent_role": None,
+                                }
+                            }
+                        },
+                    },
+                },
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "parent-session",
+                        "session_id": "parent-session",
+                        "source": "cli",
+                        "thread_source": "user",
+                    },
+                },
+                {
+                    "timestamp": "2026-08-29T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "visible"}],
+                    },
+                },
+            ),
+            context=CodexSessionContext(),
+        )
+
+        assert result.source_session_id == "child-session"
+        assert result.session_kind is SessionKind.AGENT
+        assert [message.text for message in result.messages] == ["visible"]
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY not in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
+    def test_primary_fork_uses_owner_metadata_before_copied_parent_metadata(
+        self,
+    ) -> None:
+        result = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "child-session",
+                        "session_id": "child-session",
+                        "forked_from_id": "parent-session",
+                        "source": "cli",
+                        "thread_source": "user",
+                    },
+                },
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "parent-session",
+                        "session_id": "parent-session",
+                        "source": "cli",
+                        "thread_source": "user",
+                    },
+                },
+                {
+                    "timestamp": "2026-08-29T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "visible"},
+                },
+            ),
+            context=CodexSessionContext(),
+        )
+
+        assert result.source_session_id == "child-session"
+        assert result.session_kind is SessionKind.PRIMARY
+        assert [message.text for message in result.messages] == ["visible"]
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY not in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
+    def test_child_identity_uses_thread_spawn_when_legacy_lineage_fields_vary(
+        self,
+    ) -> None:
+        result = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "child-session",
+                        "session_id": "legacy-session",
+                        "forked_from_id": "older-parent",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": "parent-session",
+                                    "depth": 1,
+                                    "agent_nickname": "researcher",
+                                    "agent_path": None,
+                                    "agent_role": None,
+                                }
+                            }
+                        },
+                    },
+                },
+                {
+                    "timestamp": "2026-08-29T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "visible"}],
+                    },
+                },
+            ),
+            context=CodexSessionContext(),
+        )
+
+        assert result.source_session_id == "child-session"
+        assert result.session_kind is SessionKind.AGENT
+        assert [message.text for message in result.messages] == ["visible"]
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY not in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
+    def test_copied_lineage_metadata_can_form_an_attested_parent_chain(self) -> None:
+        metadata = []
+        for identity, parent in (
+            ("child", "parent"),
+            ("parent", "grandparent"),
+            ("grandparent", "root"),
+        ):
+            metadata.append(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": identity,
+                        "session_id": "root",
+                        "parent_thread_id": parent,
+                        "forked_from_id": parent,
+                        "thread_source": "subagent",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": parent,
+                                    "depth": 1,
+                                }
+                            }
+                        },
+                    },
+                }
+            )
+        metadata.append(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "root",
+                    "session_id": "root",
+                    "thread_source": "user",
+                    "source": "cli",
+                },
+            }
+        )
+
+        result = parse_codex_session(
+            sequential_envelopes(*metadata),
+            context=CodexSessionContext(),
+        )
+
+        assert result.source_session_id == "child"
+        assert result.session_kind is SessionKind.AGENT
+        assert CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY not in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
     @pytest.mark.parametrize(
         "payload",
         [
@@ -154,6 +343,212 @@ class TestCodexSchemaFamilies:
                 "user_facing_hint": "review",
             },
             {"type": "token_count", "info": {}, "rate_limits": {}},
+            {
+                "type": "patch_apply_end",
+                "call_id": "call",
+                "changes": {},
+                "status": "complete",
+                "stderr": "",
+                "stdout": "",
+                "success": True,
+                "turn_id": "turn",
+            },
+            {"type": "task_complete", "last_agent_message": "", "turn_id": "turn"},
+            {
+                "type": "task_complete",
+                "completed_at": 1,
+                "duration_ms": 1,
+                "last_agent_message": "",
+                "time_to_first_token_ms": 1,
+                "turn_id": "turn",
+            },
+            {
+                "type": "task_complete",
+                "completed_at": 1,
+                "duration_ms": 1,
+                "last_agent_message": "",
+                "started_at": 0,
+                "time_to_first_token_ms": 1,
+                "turn_id": "turn",
+            },
+            {
+                "type": "task_complete",
+                "completed_at": 1,
+                "duration_ms": 1,
+                "last_agent_message": "",
+                "turn_id": "turn",
+            },
+            {
+                "type": "sub_agent_activity",
+                "agent_path": "agent",
+                "agent_thread_id": "thread",
+                "event_id": "event",
+                "kind": "running",
+                "occurred_at_ms": 1,
+            },
+            {
+                "type": "item_completed",
+                "completed_at_ms": 1,
+                "item": {},
+                "started_at_ms": 0,
+                "thread_id": "thread",
+                "turn_id": "turn",
+            },
+            {
+                "type": "exec_command_end",
+                "aggregated_output": "",
+                "call_id": "call",
+                "command": "true",
+                "cwd": "/synthetic",
+                "duration": 1,
+                "exit_code": 0,
+                "formatted_output": "",
+                "parsed_cmd": [],
+                "process_id": 1,
+                "source": "tool",
+                "status": "complete",
+                "stderr": "",
+                "stdout": "",
+                "turn_id": "turn",
+            },
+            {"type": "turn_aborted", "reason": "cancelled", "turn_id": "turn"},
+            {
+                "type": "turn_aborted",
+                "completed_at": 1,
+                "duration_ms": 1,
+                "reason": "cancelled",
+                "turn_id": "turn",
+            },
+            {
+                "type": "turn_aborted",
+                "completed_at": 1,
+                "duration_ms": 1,
+                "reason": "cancelled",
+                "started_at": 0,
+                "turn_id": "turn",
+            },
+            {
+                "type": "mcp_tool_call_end",
+                "call_id": "call",
+                "duration": 1,
+                "invocation": {},
+                "result": {},
+            },
+            {
+                "type": "mcp_tool_call_end",
+                "action_name": "action",
+                "app_name": "app",
+                "call_id": "call",
+                "connector_id": "connector",
+                "duration": 1,
+                "invocation": {},
+                "link_id": "link",
+                "result": {},
+            },
+            {
+                "type": "web_search_end",
+                "action": {},
+                "call_id": "call",
+                "query": "query",
+            },
+            {
+                "type": "web_search_end",
+                "action": {},
+                "call_id": "call",
+                "query": "query",
+                "results": [],
+            },
+            {"type": "context_compacted"},
+            {"type": "agent_reasoning", "text": "private reasoning"},
+            {"type": "exited_review_mode", "review_output": "private review"},
+            {
+                "type": "mcp_tool_call_end",
+                "call_id": "call",
+                "duration": 1,
+                "invocation": {},
+                "read_only_hint": True,
+                "result": {},
+            },
+            {
+                "type": "mcp_tool_call_end",
+                "call_id": "call",
+                "connector_id": "connector",
+                "duration": 1,
+                "invocation": {},
+                "link_id": "link",
+                "result": {},
+            },
+            {
+                "type": "mcp_tool_call_end",
+                "action_name": "action",
+                "app_name": "app",
+                "call_id": "call",
+                "connector_id": "connector",
+                "duration": 1,
+                "invocation": {},
+                "link_id": "link",
+                "read_only_hint": True,
+                "result": {},
+            },
+            {
+                "type": "collab_agent_spawn_end",
+                "call_id": "call",
+                "model": "model",
+                "new_agent_nickname": "agent",
+                "new_thread_id": "thread",
+                "prompt": "private prompt",
+                "reasoning_effort": "medium",
+                "sender_thread_id": "sender",
+                "status": "complete",
+            },
+            {
+                "type": "collab_agent_spawn_end",
+                "call_id": "call",
+                "model": "model",
+                "new_agent_nickname": "agent",
+                "new_agent_role": "researcher",
+                "new_thread_id": "thread",
+                "prompt": "private prompt",
+                "reasoning_effort": "medium",
+                "sender_thread_id": "sender",
+                "status": "complete",
+            },
+            {
+                "type": "collab_close_end",
+                "call_id": "call",
+                "receiver_agent_nickname": "agent",
+                "receiver_agent_role": "researcher",
+                "receiver_thread_id": "thread",
+                "sender_thread_id": "sender",
+                "status": "complete",
+            },
+            {
+                "type": "collab_waiting_end",
+                "call_id": "call",
+                "sender_thread_id": "sender",
+                "statuses": {},
+            },
+            {"type": "error", "codex_error_info": {}, "message": "error"},
+            {
+                "type": "task_complete",
+                "completed_at": 1,
+                "duration_ms": 1,
+                "error": {},
+                "last_agent_message": "",
+                "started_at": 0,
+                "turn_id": "turn",
+            },
+            {
+                "type": "task_complete",
+                "completed_at": 1,
+                "duration_ms": 1,
+                "last_agent_message": "",
+                "started_at": 0,
+                "turn_id": "turn",
+            },
+            {"type": "thread_goal_updated", "goal": {}, "threadId": "thread"},
+            {"type": "thread_rolled_back", "num_turns": 1},
+            {"type": "thread_settings_applied", "thread_settings": {}},
         ],
     )
     def test_observed_lifecycle_events_are_explicitly_excluded(
@@ -168,6 +563,119 @@ class TestCodexSchemaFamilies:
         assert result.messages == ()
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
             CodexDiagnosticCode.EXCLUDED_LIFECYCLE_EVENT
+        ]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "type": "agent_message",
+                "author": "agent",
+                "content": [
+                    {"type": "input_text", "text": "private"},
+                    {"type": "encrypted_content", "encrypted_content": "opaque"},
+                ],
+                "internal_chat_message_metadata_passthrough": {},
+                "recipient": "agent",
+            },
+            {
+                "type": "agent_message",
+                "author": "agent",
+                "content": [
+                    {"type": "input_text", "text": "private"},
+                    {"type": "encrypted_content", "encrypted_content": "opaque"},
+                ],
+                "id": "message",
+                "internal_chat_message_metadata_passthrough": {},
+                "recipient": "agent",
+            },
+            {
+                "type": "tool_search_call",
+                "arguments": {},
+                "call_id": "call",
+                "execution": "complete",
+                "id": "item",
+                "internal_chat_message_metadata_passthrough": {},
+                "status": "complete",
+            },
+            {
+                "type": "tool_search_call",
+                "arguments": {},
+                "call_id": "call",
+                "execution": "complete",
+                "status": "complete",
+            },
+            {"type": "web_search_call", "action": {}, "status": "complete"},
+            {
+                "type": "web_search_call",
+                "action": {},
+                "id": "item",
+                "internal_chat_message_metadata_passthrough": {},
+                "status": "complete",
+            },
+            {"type": "web_search_call", "status": "complete"},
+            {
+                "type": "tool_search_output",
+                "call_id": "call",
+                "execution": "complete",
+                "internal_chat_message_metadata_passthrough": {},
+                "status": "complete",
+                "tools": [],
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call",
+                "execution": "complete",
+                "status": "complete",
+                "tools": [],
+            },
+        ],
+    )
+    def test_observed_internal_response_items_are_explicitly_excluded(
+        self, payload: dict[str, object]
+    ) -> None:
+        result = parse_codex_session(
+            (envelope({"type": "response_item", "payload": payload}),),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.EXCLUDED_INTER_AGENT_METADATA
+        ]
+
+    def test_observed_input_image_is_excluded_while_visible_text_is_retained(
+        self,
+    ) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "internal_chat_message_metadata_passthrough": {},
+                            "content": [
+                                {"type": "input_text", "text": "visible"},
+                                {
+                                    "type": "input_image",
+                                    "detail": "auto",
+                                    "image_url": "data:image/png;base64,opaque",
+                                },
+                            ],
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("session"),
+        )
+
+        assert [message.text for message in result.messages] == ["visible"]
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.EXCLUDED_NON_TEXT_CONTENT
         ]
 
     def test_known_lifecycle_type_with_unobserved_shape_stays_unknown(self) -> None:

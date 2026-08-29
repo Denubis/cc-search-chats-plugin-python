@@ -20,6 +20,10 @@ authorizes and performs UAT.
   `~/.codex-ponytail/sessions`.
 - A previous `index --literal-only` and `index --semantic-only` completed before
   the append actions below. Record that baseline's corpus/semantic IDs.
+- The reviewed baseline has exactly 39 deterministic blocked native sources:
+  36 contain non-scalar Unicode and 3 contain malformed JSON. Coverage must
+  remain partial with zero transient failures; a different count requires a new
+  structural reconciliation before UAT continues.
 - `cc-search-chats-refresh.service` is installed, while
   `cc-search-chats-index.timer` is disabled and inactive. Keep the timer in that
   state through human acceptance.
@@ -57,6 +61,7 @@ set -x UAT_CODEX_STANDARD_SESSION 'REPLACE'
 set -x UAT_CODEX_STANDARD_QUERY 'REPLACE UNIQUE SENTINEL PHRASE'
 set -x UAT_CODEX_PONYTAIL_SESSION 'REPLACE'
 set -x UAT_CODEX_PONYTAIL_QUERY 'REPLACE UNIQUE SENTINEL PHRASE'
+set -x UAT_EXPECTED_BLOCKED_SOURCES 39
 ```
 
 The explicit plural roots are part of the test. They include only session
@@ -68,13 +73,17 @@ This script keeps stdout JSON and stderr NDJSON separate. It first proves the
 stale-first bounded answer and durable systemd handoff, waits for the oneshot,
 then positively locates all four appended messages. Semantic maintenance is
 explicitly run only after literal publication; the final cases verify exact
-native resolution and complete hybrid ranking.
+native resolution and fresh hybrid ranking over the partial-coverage corpus.
 
 ```fish
 set -g uat_dir (mktemp -d)
 
 function assert_progress --argument-names path
     python -c 'import json,sys; e=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]; assert e; assert [x["sequence"] for x in e]==list(range(1,len(e)+1)); assert sum(x["event"]=="terminal" for x in e)==1; assert e[-1]["event"]=="terminal"' "$path"
+end
+
+function assert_reviewed_partial_coverage --argument-names path
+    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); expected=int(sys.argv[2]); c=d["coverage"]; r=d["refresh"]; assert c["completeness"]=="partial" and c["blocked_files"]==expected and c["transient_failure_files"]==0; assert r["blocked_sources"]==expected and r["transient_failure_sources"]==0' "$path" "$UAT_EXPECTED_BLOCKED_SOURCES"
 end
 
 function probe_background_refresh
@@ -91,6 +100,8 @@ function probe_background_refresh
     test "$elapsed_ms" -lt 5000
     or return 1
     assert_progress "$probe_progress"
+    or return 1
+    assert_reviewed_partial_coverage "$probe"
     or return 1
     python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["status"]=="complete" and d["deadline_ms"]==5000 and d["retrieval_mode"]=="literal"; assert "native_sources_not_checked" in d["stale_reasons"]; assert all(sys.argv[2] not in r["text"] for r in d["results"]); b=d["background_refresh"]; assert b["request_id"]>0 and b["state"] in {"launching","launched","running","complete"}' "$probe" "$UAT_CLAUDE_STANDARD_QUERY"
     or return 1
@@ -111,7 +122,9 @@ function run_case --argument-names label provider expected_root session query
     assert_progress "$literal_progress"
     or return 1
 
-    set -l locator (python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["schema_version"]==2 and d["command"]=="search" and d["status"]=="complete"; assert d["coverage"]["completeness"]=="complete"; m=[r for r in d["results"] if r["identity"]["provider"]==sys.argv[2] and r["identity"]["source_session_id"]==sys.argv[3] and sys.argv[4] in r["text"]]; assert m; print(m[0]["identity"]["canonical_locator"])' "$literal" "$provider" "$session" "$query")
+    assert_reviewed_partial_coverage "$literal"
+    or return 1
+    set -l locator (python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["schema_version"]==2 and d["command"]=="search" and d["status"]=="complete"; m=[r for r in d["results"] if r["identity"]["provider"]==sys.argv[2] and r["identity"]["source_session_id"]==sys.argv[3] and sys.argv[4] in r["text"]]; assert m; print(m[0]["identity"]["canonical_locator"])' "$literal" "$provider" "$session" "$query")
     or return 1
 
     set -l resolved "$uat_dir/$label.resolve.json"
@@ -133,6 +146,8 @@ function run_case --argument-names label provider expected_root session query
     cc-search-chats search "$query" --provider "$provider" --limit 200 --json >$hybrid 2>$hybrid_progress
     or return 1
     assert_progress "$hybrid_progress"
+    or return 1
+    assert_reviewed_partial_coverage "$hybrid"
     or return 1
     python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["status"]=="complete" and d["semantic"]["fresh"] is True; m=[r for r in d["results"] if r["identity"]["canonical_locator"]==sys.argv[2]]; assert m; rank=m[0]["ranking"]; assert rank["method"]=="rrf" and rank["semantic_rank"] is not None and rank["semantic_chunk_ordinal"] is not None' "$hybrid" "$locator"
     or return 1
@@ -162,7 +177,9 @@ function execute_uat
     or return 1
     assert_progress "$uat_dir/final-status.ndjson"
     or return 1
-    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["schema_version"]==2 and d["status"]=="complete"; assert d["selected"] is True and d["completed"]==d["total"]; assert d["semantic"]["fresh"] is True; assert d["coverage"]["configured_root_count"]==4 and d["coverage"]["resolved_root_count"]==4 and d["coverage"]["completeness"]=="complete"' "$uat_dir/final-status.json"
+    assert_reviewed_partial_coverage "$uat_dir/final-status.json"
+    or return 1
+    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["schema_version"]==2 and d["status"]=="complete"; assert d["selected"] is True and d["completed"]==d["total"]; assert d["semantic"]["fresh"] is True; assert d["coverage"]["configured_root_count"]==4 and d["coverage"]["resolved_root_count"]==4' "$uat_dir/final-status.json"
     or return 1
 
     test (systemctl --user is-enabled cc-search-chats-index.timer 2>/dev/null) = disabled

@@ -58,3 +58,43 @@
 - Installation, production migration, production smoke checks, four-corpus UAT,
   human acceptance, timer enablement, release normalization, and pruning remain
   unperformed. The timer must stay disabled.
+
+## 2026-08-29 — production migration and parser-compatibility repair
+
+- Candidate `1b7a67107c29e6c8803d1863000ea8a30e073855` passed the complete
+  pre-install gate, was installed non-editably from that exact local Git commit
+  with the semantic extra, and was verified through `direct_url.json`, import
+  path, packaged-resource hashes, and CLI version. The static refresh service
+  was installed without enabling or starting it; the nightly timer remains
+  disabled and inactive.
+- A schema-only production backup was captured before explicit migration 6.
+  `index --migrate --json` applied the checksummed migration and an immediate
+  repeat proved it idempotent. The live migration ledger is now version 6; no
+  prune was requested or run.
+- The first literal refresh published revision 26 but truthfully ended partial:
+  run 27 discovered 11,082 sources and retained 3,508 deterministic failed
+  observations. This exposed provider-compatibility gaps that the synthetic
+  fixtures had not represented. Semantic refresh and four-corpus UAT stopped at
+  that boundary.
+- Red tests now cover the complete set of observed Claude UI metadata and
+  legacy flat user/assistant records, Codex lifecycle/inter-agent/non-text
+  projections, and native owner identity followed by directly attested copied
+  lineage chains. Exact-key allowlists preserve the fail-closed behavior for
+  unobserved variants. Parser-state versions advance from 1 to 2 so durable
+  checkpoints and failed observations are reparsed from byte zero.
+- A read-only structural replay of the complete currently discovered production
+  corpus inspected 11,084 native sources and 10,234,600,033 bytes without
+  invoking `search` or `index` or writing the database. It found no remaining
+  unknown record, content, event, response-item, source-shape, or session-
+  identity diagnostic. Its positive controls retained 36 sources containing
+  non-scalar Unicode and 3 containing malformed JSON; those 39 sources must
+  remain explicit partial coverage rather than be coerced into searchable text.
+  Discovery also positively excluded 6,056 non-native transport archives.
+- Fresh verification after the repair:
+  - `uv run --frozen pytest -q -m 'not postgresql'`: 692 passed, 64 deselected;
+  - `uv run --frozen pytest -q -m postgresql`: 64 passed, 692 deselected;
+  - Ruff lint/format, ty, `git diff --check`, and packaged CLI help passed.
+- The installed tool still resolves to candidate `1b7a671...`, not the repaired
+  working tree. A new exact commit/install and a literal production refresh are
+  required before semantic refresh or four-corpus UAT. The timer stays disabled;
+  no prune, push, merge, or timer enablement has occurred.

@@ -77,6 +77,330 @@ _TURN_CONTEXT_FIELDS = (
     | _TURN_CONTEXT_LIST_FIELDS
 )
 
+_LIFECYCLE_EVENT_KEYSETS = {
+    "task_started": {
+        frozenset(
+            {
+                "type",
+                "collaboration_mode_kind",
+                "model_context_window",
+                "started_at",
+                "turn_id",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "collaboration_mode_kind",
+                "model_context_window",
+                "turn_id",
+            }
+        ),
+    },
+    "entered_review_mode": {frozenset({"type", "target", "user_facing_hint"})},
+    "token_count": {frozenset({"type", "info", "rate_limits"})},
+    "patch_apply_end": {
+        frozenset(
+            {
+                "type",
+                "call_id",
+                "changes",
+                "status",
+                "stderr",
+                "stdout",
+                "success",
+                "turn_id",
+            }
+        )
+    },
+    "task_complete": {
+        frozenset({"type", "last_agent_message", "turn_id"}),
+        frozenset(
+            {
+                "type",
+                "completed_at",
+                "duration_ms",
+                "last_agent_message",
+                "time_to_first_token_ms",
+                "turn_id",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "completed_at",
+                "duration_ms",
+                "last_agent_message",
+                "started_at",
+                "time_to_first_token_ms",
+                "turn_id",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "completed_at",
+                "duration_ms",
+                "last_agent_message",
+                "turn_id",
+            }
+        ),
+    },
+    "sub_agent_activity": {
+        frozenset(
+            {
+                "type",
+                "agent_path",
+                "agent_thread_id",
+                "event_id",
+                "kind",
+                "occurred_at_ms",
+            }
+        )
+    },
+    "item_completed": {
+        frozenset(
+            {
+                "type",
+                "completed_at_ms",
+                "item",
+                "started_at_ms",
+                "thread_id",
+                "turn_id",
+            }
+        )
+    },
+    "exec_command_end": {
+        frozenset(
+            {
+                "type",
+                "aggregated_output",
+                "call_id",
+                "command",
+                "cwd",
+                "duration",
+                "exit_code",
+                "formatted_output",
+                "parsed_cmd",
+                "process_id",
+                "source",
+                "status",
+                "stderr",
+                "stdout",
+                "turn_id",
+            }
+        )
+    },
+    "turn_aborted": {
+        frozenset({"type", "reason", "turn_id"}),
+        frozenset({"type", "completed_at", "duration_ms", "reason", "turn_id"}),
+        frozenset(
+            {"type", "completed_at", "duration_ms", "reason", "started_at", "turn_id"}
+        ),
+    },
+    "mcp_tool_call_end": {
+        frozenset({"type", "call_id", "duration", "invocation", "result"}),
+        frozenset(
+            {
+                "type",
+                "action_name",
+                "app_name",
+                "call_id",
+                "connector_id",
+                "duration",
+                "invocation",
+                "link_id",
+                "result",
+            }
+        ),
+    },
+    "web_search_end": {
+        frozenset({"type", "action", "call_id", "query"}),
+        frozenset({"type", "action", "call_id", "query", "results"}),
+    },
+    "context_compacted": {frozenset({"type"})},
+    "agent_reasoning": {frozenset({"type", "text"})},
+    "exited_review_mode": {frozenset({"type", "review_output"})},
+}
+
+_LIFECYCLE_EVENT_KEYSETS["mcp_tool_call_end"].update(
+    {
+        frozenset(
+            {"type", "call_id", "duration", "invocation", "read_only_hint", "result"}
+        ),
+        frozenset(
+            {
+                "type",
+                "call_id",
+                "connector_id",
+                "duration",
+                "invocation",
+                "link_id",
+                "result",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "action_name",
+                "app_name",
+                "call_id",
+                "connector_id",
+                "duration",
+                "invocation",
+                "link_id",
+                "read_only_hint",
+                "result",
+            }
+        ),
+    }
+)
+_LIFECYCLE_EVENT_KEYSETS["task_complete"].update(
+    {
+        frozenset(
+            {
+                "type",
+                "completed_at",
+                "duration_ms",
+                "error",
+                "last_agent_message",
+                "started_at",
+                "turn_id",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "completed_at",
+                "duration_ms",
+                "last_agent_message",
+                "started_at",
+                "turn_id",
+            }
+        ),
+    }
+)
+_LIFECYCLE_EVENT_KEYSETS.update(
+    {
+        "collab_agent_spawn_end": {
+            frozenset(
+                {
+                    "type",
+                    "call_id",
+                    "model",
+                    "new_agent_nickname",
+                    "new_thread_id",
+                    "prompt",
+                    "reasoning_effort",
+                    "sender_thread_id",
+                    "status",
+                }
+            ),
+            frozenset(
+                {
+                    "type",
+                    "call_id",
+                    "model",
+                    "new_agent_nickname",
+                    "new_agent_role",
+                    "new_thread_id",
+                    "prompt",
+                    "reasoning_effort",
+                    "sender_thread_id",
+                    "status",
+                }
+            ),
+        },
+        "collab_close_end": {
+            frozenset(
+                {
+                    "type",
+                    "call_id",
+                    "receiver_agent_nickname",
+                    "receiver_agent_role",
+                    "receiver_thread_id",
+                    "sender_thread_id",
+                    "status",
+                }
+            )
+        },
+        "collab_waiting_end": {
+            frozenset({"type", "call_id", "sender_thread_id", "statuses"})
+        },
+        "error": {frozenset({"type", "codex_error_info", "message"})},
+        "thread_goal_updated": {frozenset({"type", "goal", "threadId"})},
+        "thread_rolled_back": {frozenset({"type", "num_turns"})},
+        "thread_settings_applied": {frozenset({"type", "thread_settings"})},
+    }
+)
+
+_INTER_AGENT_RESPONSE_KEYSETS = {
+    "agent_message": {
+        frozenset(
+            {
+                "type",
+                "author",
+                "content",
+                "internal_chat_message_metadata_passthrough",
+                "recipient",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "author",
+                "content",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "recipient",
+            }
+        ),
+    },
+    "tool_search_call": {
+        frozenset(
+            {
+                "type",
+                "arguments",
+                "call_id",
+                "execution",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "status",
+            }
+        ),
+        frozenset({"type", "arguments", "call_id", "execution", "status"}),
+    },
+    "web_search_call": {frozenset({"type", "action", "status"})},
+}
+
+_INTER_AGENT_RESPONSE_KEYSETS["web_search_call"].update(
+    {
+        frozenset(
+            {
+                "type",
+                "action",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "status",
+            }
+        ),
+        frozenset({"type", "status"}),
+    }
+)
+_INTER_AGENT_RESPONSE_KEYSETS["tool_search_output"] = {
+    frozenset(
+        {
+            "type",
+            "call_id",
+            "execution",
+            "internal_chat_message_metadata_passthrough",
+            "status",
+            "tools",
+        }
+    ),
+    frozenset({"type", "call_id", "execution", "status", "tools"}),
+}
+
 
 class CodexDiagnosticCode(StrEnum):
     """Closed Codex parse and exclusion classifications."""
@@ -93,6 +417,7 @@ class CodexDiagnosticCode(StrEnum):
     UNKNOWN_COMPACTION = "unknown_compaction"
     DUPLICATE_COMPACTION = "duplicate_compaction"
     EXCLUDED_INTER_AGENT_METADATA = "excluded_inter_agent_metadata"
+    EXCLUDED_NON_TEXT_CONTENT = "excluded_non_text_content"
     EXCLUDED_LIFECYCLE_EVENT = "excluded_lifecycle_event"
     PARTIAL_TAIL = "partial_tail"
     INVALID_PAYLOAD = "invalid_payload"
@@ -323,15 +648,12 @@ def _child_lineage_identity(payload: dict[str, object]) -> str | None:
     if not _is_json_object(spawn):
         return None
     identity = _locator_safe_id(payload.get("id"))
-    parent = _locator_safe_id(payload.get("parent_thread_id"))
-    legacy_parent = _locator_safe_id(payload.get("session_id"))
     spawn_parent = _locator_safe_id(spawn.get("parent_thread_id"))
     if (
-        payload.get("thread_source") == "subagent"
+        payload.get("thread_source") in {None, "subagent"}
         and identity is not None
-        and parent is not None
-        and legacy_parent == parent == spawn_parent
-        and identity != parent
+        and spawn_parent is not None
+        and identity != spawn_parent
     ):
         return identity
     return None
@@ -340,36 +662,32 @@ def _child_lineage_identity(payload: dict[str, object]) -> str | None:
 def _session_kind(
     records: tuple[_DecodedRecord, ...],
 ) -> tuple[SessionKind, tuple[CodexDiagnostic, ...]]:
-    """Classify all session_meta sources independently of their identity."""
-    kinds: list[SessionKind] = []
-    diagnostics: list[CodexDiagnostic] = []
-    for record in records:
-        if record.payload.get("type") != "session_meta":
-            continue
-        meta = record.payload.get("payload")
-        if not _is_json_object(meta):
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE,
-                    record.envelope,
-                    "session_meta payload is not an object",
-                )
-            )
-            continue
-        kind = _source_kind(meta.get("source"))
-        if kind is None:
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE,
-                    record.envelope,
-                    "session_meta source is unsupported",
-                )
-            )
-            continue
-        kinds.append(kind)
-    if not kinds or len(set(kinds)) != 1 or diagnostics:
-        return SessionKind.UNKNOWN, tuple(diagnostics)
-    return kinds[0], tuple(diagnostics)
+    """Classify the owning, first session_meta without reclassifying copied history."""
+    owner = next(
+        (record for record in records if record.payload.get("type") == "session_meta"),
+        None,
+    )
+    if owner is None:
+        return SessionKind.UNKNOWN, ()
+    meta = owner.payload.get("payload")
+    if not _is_json_object(meta):
+        return SessionKind.UNKNOWN, (
+            _diagnostic(
+                CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE,
+                owner.envelope,
+                "session_meta payload is not an object",
+            ),
+        )
+    kind = _source_kind(meta.get("source"))
+    if kind is None:
+        return SessionKind.UNKNOWN, (
+            _diagnostic(
+                CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE,
+                owner.envelope,
+                "session_meta source is unsupported",
+            ),
+        )
+    return kind, ()
 
 
 def _continued_session_kind(
@@ -420,67 +738,99 @@ def _session_identity_diagnostic(
 def _metadata_session_identity(
     records: tuple[_DecodedRecord, ...],
 ) -> tuple[str | None, bool, tuple[CodexDiagnostic, ...]]:
-    """Read one exact identity from every present Codex session_meta record."""
+    """Resolve the owning metadata identity and validate copied lineage metadata."""
     metadata = tuple(
         record for record in records if record.payload.get("type") == "session_meta"
     )
     if not metadata:
         return None, False, ()
 
-    observed: list[tuple[str, _DecodedRecord]] = []
-    diagnostics: list[CodexDiagnostic] = []
-    for record in metadata:
-        payload = record.payload.get("payload")
-        if not _is_json_object(payload):
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
-                    record.envelope,
-                    "session_meta payload cannot establish a native session identity",
-                )
-            )
-            continue
-        child_identity = _child_lineage_identity(payload)
-        present = (
-            (child_identity,)
-            if child_identity is not None
-            else tuple(payload[key] for key in ("id", "session_id") if key in payload)
-        )
+    def metadata_identity(payload: dict[str, object]) -> str | None:
+        if _modern_subagent(payload.get("source")):
+            return _child_lineage_identity(payload)
+        present = tuple(payload[key] for key in ("id", "session_id") if key in payload)
         validated = tuple(_locator_safe_id(value) for value in present)
         if (
             not present
             or any(value is None for value in validated)
             or len(set(validated)) != 1
         ):
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
-                    record.envelope,
-                    "session_meta id/session_id is missing, malformed, or conflicting",
-                )
-            )
-            continue
-        observed.append(
-            (next(value for value in validated if value is not None), record)
-        )
+            return None
+        return next(value for value in validated if value is not None)
 
-    if diagnostics:
-        return None, True, tuple(diagnostics)
-    identities = {identity for identity, _record in observed}
-    if len(identities) != 1:
+    owner_record = metadata[0]
+    owner_payload = owner_record.payload.get("payload")
+    if not _is_json_object(owner_payload):
         return (
             None,
             True,
-            tuple(
+            (
                 _diagnostic(
                     CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
-                    record.envelope,
-                    "session_meta records disagree on native session identity",
-                )
-                for _identity, record in observed
+                    owner_record.envelope,
+                    "session_meta payload cannot establish a native session identity",
+                ),
             ),
         )
-    return observed[0][0], True, ()
+    owner_identity = metadata_identity(owner_payload)
+    if owner_identity is None:
+        return (
+            None,
+            True,
+            (
+                _diagnostic(
+                    CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
+                    owner_record.envelope,
+                    "session_meta id/session_id is missing, malformed, or conflicting",
+                ),
+            ),
+        )
+
+    def lineage_identities(payload: dict[str, object]) -> set[str]:
+        identities = {
+            value
+            for key in ("forked_from_id", "parent_thread_id", "session_id")
+            if (value := _locator_safe_id(payload.get(key))) is not None
+        }
+        source = payload.get("source")
+        if not _is_json_object(source):
+            return identities
+        subagent = source.get("subagent")
+        if not _is_json_object(subagent):
+            return identities
+        spawn = subagent.get("thread_spawn")
+        if not _is_json_object(spawn):
+            return identities
+        spawn_parent = _locator_safe_id(spawn.get("parent_thread_id"))
+        if spawn_parent is not None:
+            identities.add(spawn_parent)
+        return identities
+
+    allowed_identities = {owner_identity, *lineage_identities(owner_payload)}
+    diagnostics: list[CodexDiagnostic] = []
+    for record in metadata[1:]:
+        payload = record.payload.get("payload")
+        observed = metadata_identity(payload) if _is_json_object(payload) else None
+        if observed is None:
+            detail = "session_meta payload cannot establish a native session identity"
+        elif observed not in allowed_identities:
+            detail = (
+                "session_meta record is not the owner or an attested lineage identity"
+            )
+        else:
+            if _is_json_object(payload):
+                allowed_identities.update(lineage_identities(payload))
+            continue
+        diagnostics.append(
+            _diagnostic(
+                CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
+                record.envelope,
+                detail,
+            )
+        )
+    if diagnostics:
+        return None, True, tuple(diagnostics)
+    return owner_identity, True, ()
 
 
 def _resolved_session_identity(
@@ -656,6 +1006,20 @@ def _message_content(
                 )
             )
             continue
+        if (
+            block_type == "input_image"
+            and frozenset(block) == {"type", "detail", "image_url"}
+            and isinstance(block.get("detail"), str)
+            and isinstance(block.get("image_url"), str)
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    CodexDiagnosticCode.EXCLUDED_NON_TEXT_CONTENT,
+                    envelope,
+                    "image content is deliberately non-searchable",
+                )
+            )
+            continue
         text = block.get("text")
         if block_type != expected or not isinstance(text, str):
             diagnostics.append(
@@ -731,6 +1095,16 @@ def _parse_response_item(
                 CodexDiagnosticCode.EXCLUDED_REASONING,
                 record.envelope,
                 "reasoning item is deliberately non-searchable",
+            ),
+        )
+    if isinstance(item_type, str) and frozenset(payload) in (
+        _INTER_AGENT_RESPONSE_KEYSETS.get(item_type, set())
+    ):
+        return (), (
+            _diagnostic(
+                CodexDiagnosticCode.EXCLUDED_INTER_AGENT_METADATA,
+                record.envelope,
+                f"{item_type} item is deliberately non-searchable",
             ),
         )
     if item_type == "message":
@@ -886,32 +1260,9 @@ def _parse_event(
             "event_msg payload is not an object",
         )
     event_type = payload.get("type")
-    lifecycle_keysets = {
-        "task_started": {
-            frozenset(
-                {
-                    "type",
-                    "collaboration_mode_kind",
-                    "model_context_window",
-                    "started_at",
-                    "turn_id",
-                }
-            ),
-            frozenset(
-                {
-                    "type",
-                    "collaboration_mode_kind",
-                    "model_context_window",
-                    "turn_id",
-                }
-            ),
-        },
-        "entered_review_mode": {frozenset({"type", "target", "user_facing_hint"})},
-        "token_count": {frozenset({"type", "info", "rate_limits"})},
-    }
-    if isinstance(event_type, str) and frozenset(payload) in lifecycle_keysets.get(
-        event_type, set()
-    ):
+    if isinstance(event_type, str) and frozenset(
+        payload
+    ) in _LIFECYCLE_EVENT_KEYSETS.get(event_type, set()):
         return None, _diagnostic(
             CodexDiagnosticCode.EXCLUDED_LIFECYCLE_EVENT,
             record.envelope,

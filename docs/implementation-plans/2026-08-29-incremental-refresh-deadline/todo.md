@@ -18,7 +18,12 @@
 
 - [x] Reconcile living documentation and explicit migration ownership.
 - [x] Pass complete mechanical and falsification-first sanity verification.
-- [ ] Install the exact verified release candidate, migrate production without
-      pruning, and complete positive four-corpus UAT with the timer disabled.
+- [x] Install the initial exact candidate and migrate production to version 6
+      without pruning; keep the timer disabled.
+- [x] Reproduce and repair production provider-compatibility gaps, then replay
+      the repaired parser read-only across the complete four-root corpus.
+- [ ] Commit and install the exact repaired candidate, rerun literal and semantic
+      production refresh, and complete positive four-corpus UAT with the 39
+      corrupt native sources reported as explicit partial coverage.
 - [ ] Obtain human UAT acceptance before final release normalization or timer
       enablement.

@@ -249,6 +249,81 @@ _CLAUDE_METADATA_KEYSETS = {
                 "version",
             }
         ),
+        frozenset(
+            {
+                "type",
+                "cwd",
+                "data",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "slug",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "cwd",
+                "data",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "slug",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "agentName",
+                "cwd",
+                "data",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "slug",
+                "teamName",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "cwd",
+                "data",
+                "gitBranch",
+                "isSidechain",
+                "parentToolUseID",
+                "parentUuid",
+                "sessionId",
+                "teamName",
+                "timestamp",
+                "toolUseID",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
     },
     "attachment": {
         frozenset(
@@ -323,8 +398,62 @@ _CLAUDE_METADATA_KEYSETS = {
                 "version",
             }
         ),
+        frozenset(
+            {
+                "type",
+                "attachment",
+                "cwd",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentUuid",
+                "sessionId",
+                "timestamp",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "attachment",
+                "cwd",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentUuid",
+                "sessionId",
+                "sessionKind",
+                "timestamp",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "agentName",
+                "attachment",
+                "cwd",
+                "entrypoint",
+                "gitBranch",
+                "isSidechain",
+                "parentUuid",
+                "sessionId",
+                "teamName",
+                "timestamp",
+                "userType",
+                "uuid",
+                "version",
+            }
+        ),
     },
-    "last-prompt": {frozenset({"type", "leafUuid", "sessionId"})},
+    "last-prompt": {
+        frozenset({"type", "leafUuid", "sessionId"}),
+        frozenset({"type", "lastPrompt", "sessionId"}),
+    },
     "file-history-snapshot": {
         frozenset({"type", "isSnapshotUpdate", "messageId", "snapshot"})
     },
@@ -338,10 +467,118 @@ _CLAUDE_METADATA_KEYSETS = {
         )
     },
     "queue-operation": {
-        frozenset({"type", "content", "operation", "sessionId", "timestamp"})
+        frozenset({"type", "content", "operation", "sessionId", "timestamp"}),
+        frozenset({"type", "operation", "sessionId", "timestamp"}),
     },
     "started": {frozenset({"type", "agentId", "key"})},
     "ai-title": {frozenset({"type", "aiTitle", "sessionId"})},
+    "atis-latch": {frozenset({"type", "atis", "sessionId"})},
+    "agent-name": {frozenset({"type", "agentName", "sessionId"})},
+    "result": {frozenset({"type", "agentId", "key", "result"})},
+    "pr-link": {
+        frozenset(
+            {
+                "type",
+                "prNumber",
+                "prRepository",
+                "prUrl",
+                "sessionId",
+                "timestamp",
+            }
+        )
+    },
+    "worktree-state": {frozenset({"type", "sessionId", "worktreeSession"})},
+    "bridge-session": {
+        frozenset({"type", "bridgeSessionId", "lastSequenceNum", "sessionId"})
+    },
+}
+
+_CLAUDE_METADATA_KEYSETS["progress"].add(
+    frozenset(
+        {
+            "type",
+            "cwd",
+            "data",
+            "gitBranch",
+            "isSidechain",
+            "parentToolUseID",
+            "parentUuid",
+            "sessionId",
+            "slug",
+            "teamName",
+            "timestamp",
+            "toolUseID",
+            "userType",
+            "uuid",
+            "version",
+        }
+    )
+)
+_ATTACHMENT_BASE_KEYS = frozenset(
+    {
+        "type",
+        "attachment",
+        "cwd",
+        "entrypoint",
+        "gitBranch",
+        "isSidechain",
+        "parentUuid",
+        "sessionId",
+        "timestamp",
+        "userType",
+        "uuid",
+        "version",
+    }
+)
+_CLAUDE_METADATA_KEYSETS["attachment"].update(
+    _ATTACHMENT_BASE_KEYS | frozenset(extras)
+    for extras in (
+        {"agentName", "session_id", "slug", "teamName"},
+        {"agentName", "session_id", "teamName"},
+        {"agentName", "slug", "teamName"},
+        {"sessionKind", "session_id", "slug"},
+        {"sessionKind", "session_id"},
+        {"sessionKind", "slug"},
+        {"session_id", "slug"},
+        {"session_id"},
+        {"slug"},
+    )
+)
+_CLAUDE_METADATA_KEYSETS["agent-color"] = {
+    frozenset({"type", "agentColor", "sessionId"})
+}
+_CLAUDE_METADATA_KEYSETS["file-history-delta"] = {
+    frozenset(
+        {
+            "type",
+            "backup",
+            "messageId",
+            "snapshotMessageId",
+            "timestamp",
+            "trackingPath",
+        }
+    )
+}
+_CLAUDE_METADATA_KEYSETS["bridge-session"].add(
+    frozenset(
+        {
+            "type",
+            "bridgeSessionId",
+            "lastSequenceNum",
+            "ownerAccountUuid",
+            "ownerOrganizationUuid",
+            "sessionId",
+        }
+    )
+)
+_CLAUDE_METADATA_KEYSETS["frame-link"] = {
+    frozenset({"type", "frameUrl", "path", "sessionId", "timestamp", "title"})
+}
+_CLAUDE_METADATA_KEYSETS["last-prompt"].add(
+    frozenset({"type", "lastPrompt", "leafUuid", "sessionId"})
+)
+_CLAUDE_METADATA_KEYSETS["relocated"] = {
+    frozenset({"type", "relocatedCwd", "sessionId"})
 }
 
 
@@ -349,6 +586,17 @@ def _is_known_metadata_record(payload: dict[str, object]) -> bool:
     record_type = payload.get("type")
     return isinstance(record_type, str) and frozenset(payload) in (
         _CLAUDE_METADATA_KEYSETS.get(record_type, set())
+    )
+
+
+def _is_legacy_flat_message_record(payload: dict[str, object]) -> bool:
+    """Recognize the observed legacy visible-message projection exactly."""
+    return (
+        frozenset(payload) == {"role", "text", "ts", "uuid"}
+        and payload.get("role") in {"user", "assistant"}
+        and isinstance(payload.get("text"), str)
+        and isinstance(payload.get("ts"), str)
+        and _message_uuid(payload) is not None
     )
 
 
@@ -502,6 +750,29 @@ def _is_known_non_text_tool_item(value: object) -> bool:
         "media_type",
         "data",
     }
+
+
+def _is_advisor_tool_result(value: object) -> bool:
+    """Recognize only the observed non-searchable advisor result shapes."""
+    if (
+        not _is_json_object(value)
+        or value.get("type") != "advisor_tool_result"
+        or frozenset(value) != {"type", "tool_use_id", "content"}
+        or not isinstance(value.get("tool_use_id"), str)
+    ):
+        return False
+    content = value.get("content")
+    if not _is_json_object(content):
+        return False
+    return (
+        frozenset(content) == {"type", "text"}
+        and content.get("type") == "advisor_result"
+        and isinstance(content.get("text"), str)
+    ) or (
+        frozenset(content) == {"type", "error_code"}
+        and content.get("type") == "advisor_tool_result_error"
+        and isinstance(content.get("error_code"), str)
+    )
 
 
 def _tool_output(value: object) -> tuple[str | None, bool]:
@@ -662,6 +933,35 @@ def _extract_content(
                         "non-text tool result content is deliberately non-searchable",
                     )
                 )
+        elif _is_advisor_tool_result(block):
+            diagnostics.append(
+                _diagnostic(
+                    ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA,
+                    envelope,
+                    "advisor tool metadata is deliberately non-searchable",
+                )
+            )
+        elif _is_known_non_text_tool_item(block):
+            diagnostics.append(
+                _diagnostic(
+                    ClaudeDiagnosticCode.EXCLUDED_NON_TEXT_TOOL_RESULT,
+                    envelope,
+                    "non-text image content is deliberately non-searchable",
+                )
+            )
+        elif (
+            block_type == "fallback"
+            and frozenset(block) == {"type", "from", "to"}
+            and _is_json_object(block.get("from"))
+            and _is_json_object(block.get("to"))
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA,
+                    envelope,
+                    "model fallback metadata is deliberately non-searchable",
+                )
+            )
         elif block_type == "server_tool_use" and frozenset(block) == {
             "type",
             "id",
@@ -846,6 +1146,35 @@ def parse_claude_session(
                     record.envelope,
                     f"{record_type} metadata is deliberately non-searchable",
                 )
+            )
+            continue
+        if _is_legacy_flat_message_record(payload):
+            content_rows, content_diagnostics = _extract_content(
+                payload["text"], record.envelope
+            )
+            diagnostics.extend(content_diagnostics)
+            message_uuid = _message_uuid(payload)
+            if message_uuid is None:
+                raise AssertionError("validated legacy UUID became unavailable")
+            role = payload.get("role")
+            if not isinstance(role, str):
+                raise AssertionError("validated legacy role became unavailable")
+            alias = _physical_alias(
+                record.envelope, context.source_session_id, message_uuid
+            )
+            normalized_payload = {"timestamp": payload["ts"]}
+            messages.extend(
+                _native_message(
+                    alias=alias,
+                    payload=normalized_payload,
+                    role=role,
+                    session_kind=session_kind,
+                    conversation_epoch=conversation_epoch,
+                    content_class=content_class,
+                    text=text,
+                    context=context,
+                )
+                for content_class, text in content_rows
             )
             continue
         if record_type == "system":
