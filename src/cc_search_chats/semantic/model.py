@@ -1,6 +1,7 @@
 """Offline-only adapter for the pinned local Nemotron embedding model."""
 
 import os
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -17,6 +18,16 @@ CHUNK_TARGET_TOKENS = 768
 MAX_MODEL_TOKENS = 1024
 CHUNK_OVERLAP_TOKENS = 96
 CHUNKER_ID = "nemotron-token-chunks-768-1024-96:v1"
+_GPU_HEALTH_PROBE = "semantic GPU performance probe " * MAX_MODEL_TOKENS
+_GPU_TELEMETRY_COMMAND = (
+    "nvidia-smi",
+    "--query-gpu=utilization.gpu,clocks.current.sm,clocks.max.sm,pstate",
+    "--format=csv,noheader,nounits",
+    "--id=0",
+    "--loop-ms=50",
+)
+_GPU_LOADED_UTILIZATION_PERCENT = 50
+_GPU_MINIMUM_LOADED_CLOCK_RATIO = 0.25
 type ModelProgress = Callable[[str, str], None]
 
 
@@ -188,6 +199,76 @@ def _embed_batch(texts: Sequence[str], prefix: str) -> list[list[float]]:
     return vector.float().cpu().tolist()
 
 
+def _gpu_performance_samples(output: str) -> tuple[tuple[int, int, int, str], ...]:
+    samples: list[tuple[int, int, int, str]] = []
+    for line in output.splitlines():
+        fields = tuple(field.strip() for field in line.split(","))
+        if len(fields) != 4:
+            continue
+        try:
+            utilization, current_clock, maximum_clock = map(int, fields[:3])
+        except ValueError:
+            continue
+        if maximum_clock > 0:
+            samples.append((utilization, current_clock, maximum_clock, fields[3]))
+    return tuple(samples)
+
+
+def _gpu_telemetry_unavailable(detail: str) -> ModelUnavailable:
+    return ModelUnavailable(
+        f"loaded GPU performance could not be verified: {detail}",
+        code="gpu_telemetry_unavailable",
+        phase="model_preflight",
+    )
+
+
+@lru_cache(maxsize=1)
+def _verify_loaded_gpu_performance() -> None:
+    try:
+        monitor = subprocess.Popen(
+            list(_GPU_TELEMETRY_COMMAND),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as error:
+        raise _gpu_telemetry_unavailable(str(error)) from error
+    try:
+        _embed_batch((_GPU_HEALTH_PROBE,), PASSAGE_PREFIX)
+    finally:
+        monitor.terminate()
+        try:
+            output, error_output = monitor.communicate(timeout=2)
+        except subprocess.TimeoutExpired as error:
+            monitor.kill()
+            monitor.communicate()
+            raise _gpu_telemetry_unavailable(
+                "nvidia-smi did not stop after the performance probe"
+            ) from error
+
+    if monitor.returncode is not None and monitor.returncode > 0:
+        detail = error_output.strip() or f"nvidia-smi exited {monitor.returncode}"
+        raise _gpu_telemetry_unavailable(detail)
+    samples = _gpu_performance_samples(output)
+    loaded = tuple(
+        sample for sample in samples if sample[0] >= _GPU_LOADED_UTILIZATION_PERCENT
+    )
+    if not loaded:
+        raise _gpu_telemetry_unavailable(
+            "the model probe produced no loaded utilization sample"
+        )
+    best = max(loaded, key=lambda sample: sample[1] / sample[2])
+    clock_ratio = best[1] / best[2]
+    if clock_ratio < _GPU_MINIMUM_LOADED_CLOCK_RATIO:
+        raise ModelUnavailable(
+            f"loaded GPU remained at {best[1]} MHz ({clock_ratio:.1%} of "
+            f"{best[2]} MHz maximum) while utilization reached {best[0]}%; "
+            "refusing semantic indexing",
+            code="gpu_performance_unavailable",
+            phase="model_preflight",
+        )
+
+
 def _vram_unavailable(torch, *, phase: str, error: BaseException) -> ModelUnavailable:
     try:
         available, total = torch.cuda.mem_get_info()
@@ -213,6 +294,8 @@ def _embed(texts: Sequence[str], prefix: str) -> list[list[float]]:
         raise ValueError(f"semantic {prefix.rstrip(': ')} text must not be blank")
     torch, _, _ = _runtime()
     try:
+        if prefix == PASSAGE_PREFIX:
+            _verify_loaded_gpu_performance()
         return _embed_batch(texts, prefix)
     except torch.cuda.OutOfMemoryError as error:
         if len(texts) == 1:
