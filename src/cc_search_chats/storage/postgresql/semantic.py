@@ -152,6 +152,29 @@ def _mapped_count(connection: psycopg.Connection) -> int:
     )[0]
 
 
+def _mapped_count_for_digests(
+    connection: psycopg.Connection,
+    input_digests: Sequence[str],
+) -> int:
+    return next(
+        connection.execute(
+            """
+            SELECT count(*)
+            FROM cc_search_chats.semantic_chunk_current AS chunk
+            JOIN cc_search_chats.message_current AS message
+              USING (provider, source_session_id, logical_message_id, content_class)
+            WHERE chunk.profile_id = %s
+              AND chunk.chunker_id = %s
+              AND chunk.input_digest = ANY(%s)
+              AND chunk.source_text_digest = message.embedding_input_digest
+              AND message.content_class = 'prose'
+              AND message.prose_content ~ '[^[:space:]]'
+            """,
+            (_PROFILE_ID, CHUNKER_ID, list(input_digests)),
+        )
+    )[0]
+
+
 def _semantic_chunks_complete(connection: psycopg.Connection) -> bool:
     eligible_messages = _eligible_message_count(connection)
     eligible_chunks = _eligible_count(connection)
@@ -520,11 +543,19 @@ def _index_embeddings(
         if progress is not None:
             progress(completed, total)
 
+        after_digest: str | None = None
         while completed < total:
+            params: list[object] = [_PROFILE_ID, CHUNKER_ID]
+            keyset = ""
+            if after_digest is not None:
+                keyset = "AND chunk.input_digest > %s"
+                params.append(after_digest)
+            params.append(batch_size)
             rows = tuple(
                 connection.execute(
-                    """
-                    SELECT chunk.provider, chunk.source_session_id,
+                    f"""
+                    SELECT DISTINCT ON (chunk.input_digest)
+                           chunk.provider, chunk.source_session_id,
                            chunk.logical_message_id, chunk.chunk_ordinal,
                            chunk.passage_text, chunk.input_digest
                     FROM cc_search_chats.semantic_chunk_current AS chunk
@@ -541,16 +572,18 @@ def _index_embeddings(
                           WHERE (value.profile_id, value.input_digest) =
                                 (chunk.profile_id, chunk.input_digest)
                       )
-                    ORDER BY chunk.provider, chunk.source_session_id,
-                             chunk.logical_message_id, chunk.content_class,
-                             chunk.chunk_ordinal
+                      {keyset}
+                    ORDER BY chunk.input_digest, chunk.provider,
+                             chunk.source_session_id, chunk.logical_message_id,
+                             chunk.content_class, chunk.chunk_ordinal
                     LIMIT %s
-                    """,
-                    (_PROFILE_ID, CHUNKER_ID, batch_size),
+                    """.encode(),
+                    params,
                 )
             )
             if not rows:
                 raise ValueError("corpus changed while embeddings were being built")
+            after_digest = rows[-1][5]
             try:
                 vectors = embed([row[4] for row in rows])
             except Exception as error:
@@ -616,7 +649,10 @@ def _index_embeddings(
                     """,
                     values,
                 )
-            completed = _mapped_count(connection)
+            completed += _mapped_count_for_digests(
+                connection,
+                [row[5] for row in rows],
+            )
             connection.execute(
                 """
                 UPDATE cc_search_chats.semantic_revision

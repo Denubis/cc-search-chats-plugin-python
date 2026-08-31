@@ -27,6 +27,7 @@ from cc_search_chats.storage.postgresql import (
     search_messages,
     semantic_search,
 )
+from cc_search_chats.storage.postgresql import semantic as semantic_storage
 
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
@@ -303,6 +304,91 @@ def test_semantic_chunks_are_profiled_reused_and_collapsed_to_one_message(
         == eligible_messages + 1
     )
     assert embedded == []
+
+
+def test_semantic_worker_embeds_each_missing_digest_once(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    codex_read = _read("codex_modern_primary_145.jsonl")
+    codex = parse_codex_session(
+        codex_read.envelopes,
+        context=CodexSessionContext(repository="/synthetic/repository"),
+        source_diagnostics=codex_read.diagnostics,
+    )
+    prose = tuple(
+        message
+        for message in codex.messages
+        if message.content_class.value == "prose" and message.text.strip()
+    )
+    assert len(prose) >= 2
+    duplicate_ids = {message.identity.logical_message_id for message in prose[:2]}
+    duplicate_text = "one reusable duplicate passage"
+    messages = tuple(
+        replace(message, text=duplicate_text)
+        if message.identity.logical_message_id in duplicate_ids
+        else message
+        for message in codex.messages
+    )
+    migrate(postgres_connection)
+    replace_messages(postgres_connection, messages)
+
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    embedded: list[str] = []
+    progress: list[tuple[int, int]] = []
+
+    def embed(texts):
+        embedded.extend(texts)
+        return [vector for _ in texts]
+
+    completed = index_embeddings(
+        postgres_connection,
+        embed,
+        chunker=_single_chunks,
+        batch_size=128,
+        progress=lambda done, total: progress.append((done, total)),
+    )
+
+    assert completed == len(prose)
+    assert embedded.count(duplicate_text) == 1
+    assert progress[0] == (0, completed)
+    assert progress[-1] == (completed, completed)
+
+
+def test_semantic_worker_reconciles_full_progress_only_at_boundaries(
+    postgres_connection: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_read = _read("codex_modern_primary_145.jsonl")
+    codex = parse_codex_session(
+        codex_read.envelopes,
+        context=CodexSessionContext(repository="/synthetic/repository"),
+        source_diagnostics=codex_read.diagnostics,
+    )
+    migrate(postgres_connection)
+    replace_messages(postgres_connection, codex.messages)
+
+    mapped_count = semantic_storage._mapped_count
+    mapped_count_calls = 0
+
+    def observed_mapped_count(connection: psycopg.Connection) -> int:
+        nonlocal mapped_count_calls
+        mapped_count_calls += 1
+        return mapped_count(connection)
+
+    monkeypatch.setattr(semantic_storage, "_mapped_count", observed_mapped_count)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    completed = index_embeddings(
+        postgres_connection,
+        lambda texts: [vector for _ in texts],
+        chunker=_single_chunks,
+        batch_size=1,
+    )
+
+    assert completed > 1
+    assert mapped_count_calls == 2
 
 
 def test_search_scope_defaults_to_primary_prose_and_requires_agent_tool_opt_in(
