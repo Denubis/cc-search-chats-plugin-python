@@ -5,6 +5,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
+from time import monotonic
 
 import psycopg
 
@@ -22,6 +23,7 @@ _DIMENSIONS = 1024
 _PROFILE_ID = "nemotron-3-embed-8b-bf16:chunks-v1"
 _EMBEDDABLE_PROSE = "content_class = 'prose' AND prose_content ~ '[^[:space:]]'"
 _RUN_HEARTBEAT_SECONDS = 5.0
+_PROGRESS_CHECKPOINT_SECONDS = 1.0
 type Chunker = Callable[[Sequence[str]], tuple[tuple[SemanticChunk, ...], ...]]
 
 
@@ -148,29 +150,6 @@ def _mapped_count(connection: psycopg.Connection) -> int:
               AND message.prose_content ~ '[^[:space:]]'
             """,
             (_PROFILE_ID, CHUNKER_ID),
-        )
-    )[0]
-
-
-def _mapped_count_for_digests(
-    connection: psycopg.Connection,
-    input_digests: Sequence[str],
-) -> int:
-    return next(
-        connection.execute(
-            """
-            SELECT count(*)
-            FROM cc_search_chats.semantic_chunk_current AS chunk
-            JOIN cc_search_chats.message_current AS message
-              USING (provider, source_session_id, logical_message_id, content_class)
-            WHERE chunk.profile_id = %s
-              AND chunk.chunker_id = %s
-              AND chunk.input_digest = ANY(%s)
-              AND chunk.source_text_digest = message.embedding_input_digest
-              AND message.content_class = 'prose'
-              AND message.prose_content ~ '[^[:space:]]'
-            """,
-            (_PROFILE_ID, CHUNKER_ID, list(input_digests)),
         )
     )[0]
 
@@ -496,6 +475,50 @@ def _partial_revision(
     )[0]
 
 
+def _prepare_embedding_queue(connection: psycopg.Connection) -> int:
+    """Snapshot each missing chunk once and return its mapped-unit count."""
+    connection.execute(
+        """
+        CREATE TEMPORARY TABLE IF NOT EXISTS semantic_embedding_queue (
+            input_digest text PRIMARY KEY,
+            mapped_units bigint NOT NULL CHECK (mapped_units > 0)
+        ) ON COMMIT PRESERVE ROWS
+        """
+    )
+    connection.execute("TRUNCATE pg_temp.semantic_embedding_queue")
+    return next(
+        connection.execute(
+            t"""
+            WITH queued AS (
+                INSERT INTO pg_temp.semantic_embedding_queue (
+                    input_digest, mapped_units
+                )
+                SELECT chunk.input_digest, count(*)
+                FROM cc_search_chats.semantic_chunk_current AS chunk
+                JOIN cc_search_chats.message_current AS message
+                  USING (provider, source_session_id,
+                         logical_message_id, content_class)
+                WHERE chunk.profile_id = {_PROFILE_ID}
+                  AND chunk.chunker_id = {CHUNKER_ID}
+                  AND chunk.source_text_digest = message.embedding_input_digest
+                  AND message.content_class = 'prose'
+                  AND message.prose_content ~ '[^[:space:]]'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM cc_search_chats.embedding_value AS value
+                      WHERE (value.profile_id, value.input_digest) =
+                            (chunk.profile_id, chunk.input_digest)
+                  )
+                GROUP BY chunk.input_digest
+                RETURNING mapped_units
+            )
+            SELECT COALESCE(sum(mapped_units), 0)::bigint
+            FROM queued
+            """
+        )
+    )[0]
+
+
 def _index_embeddings(
     connection: psycopg.Connection,
     embed: Callable[[Sequence[str]], list[list[float]]],
@@ -531,7 +554,10 @@ def _index_embeddings(
     try:
         _sync_chunks(connection, chunker)
         total = _eligible_count(connection)
-        completed = _mapped_count(connection)
+        queued_units = _prepare_embedding_queue(connection)
+        completed = total - queued_units
+        if completed < 0:
+            raise ValueError("semantic embedding queue exceeds the eligible corpus")
         connection.execute(
             """
             UPDATE cc_search_chats.semantic_revision
@@ -543,47 +569,44 @@ def _index_embeddings(
         if progress is not None:
             progress(completed, total)
 
-        after_digest: str | None = None
+        last_checkpoint = monotonic()
         while completed < total:
-            params: list[object] = [_PROFILE_ID, CHUNKER_ID]
-            keyset = ""
-            if after_digest is not None:
-                keyset = "AND chunk.input_digest > %s"
-                params.append(after_digest)
-            params.append(batch_size)
-            rows = tuple(
+            queued_rows = tuple(
                 connection.execute(
-                    f"""
-                    SELECT DISTINCT ON (chunk.input_digest)
-                           chunk.provider, chunk.source_session_id,
-                           chunk.logical_message_id, chunk.chunk_ordinal,
-                           chunk.passage_text, chunk.input_digest
-                    FROM cc_search_chats.semantic_chunk_current AS chunk
-                    JOIN cc_search_chats.message_current AS message
-                      USING (provider, source_session_id,
-                             logical_message_id, content_class)
-                    WHERE chunk.profile_id = %s
-                      AND chunk.source_text_digest =
-                          message.embedding_input_digest
-                      AND chunk.chunker_id = %s
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM cc_search_chats.embedding_value AS value
-                          WHERE (value.profile_id, value.input_digest) =
-                                (chunk.profile_id, chunk.input_digest)
-                      )
-                      {keyset}
-                    ORDER BY chunk.input_digest, chunk.provider,
-                             chunk.source_session_id, chunk.logical_message_id,
-                             chunk.content_class, chunk.chunk_ordinal
-                    LIMIT %s
-                    """.encode(),
-                    params,
+                    t"""
+                    WITH batch AS MATERIALIZED (
+                        SELECT input_digest, mapped_units
+                        FROM pg_temp.semantic_embedding_queue
+                        ORDER BY input_digest
+                        LIMIT {batch_size}
+                    )
+                    SELECT representative.provider,
+                           representative.source_session_id,
+                           representative.logical_message_id,
+                           representative.chunk_ordinal,
+                           representative.passage_text,
+                           batch.input_digest, batch.mapped_units
+                    FROM batch
+                    JOIN LATERAL (
+                        SELECT chunk.provider, chunk.source_session_id,
+                               chunk.logical_message_id, chunk.chunk_ordinal,
+                               chunk.passage_text
+                        FROM cc_search_chats.semantic_chunk_current AS chunk
+                        WHERE chunk.profile_id = {_PROFILE_ID}
+                          AND chunk.input_digest = batch.input_digest
+                        ORDER BY chunk.provider, chunk.source_session_id,
+                                 chunk.logical_message_id,
+                                 chunk.content_class, chunk.chunk_ordinal
+                        LIMIT 1
+                    ) AS representative ON true
+                    ORDER BY batch.input_digest
+                    """,
+                    prepare=True,
                 )
             )
-            if not rows:
+            if not queued_rows:
                 raise ValueError("corpus changed while embeddings were being built")
-            after_digest = rows[-1][5]
+            rows = queued_rows
             try:
                 vectors = embed([row[4] for row in rows])
             except Exception as error:
@@ -649,20 +672,35 @@ def _index_embeddings(
                     """,
                     values,
                 )
-            completed += _mapped_count_for_digests(
-                connection,
-                [row[5] for row in rows],
-            )
-            connection.execute(
-                """
-                UPDATE cc_search_chats.semantic_revision
-                SET completed_units = %s, heartbeat_at = now()
-                WHERE semantic_revision_id = %s AND status = 'building'
-                """,
-                (completed, semantic_revision),
-            )
-            if progress is not None:
-                progress(completed, total)
+                input_digests = [row[5] for row in rows]
+                deleted_digests = connection.execute(
+                    t"""
+                    DELETE FROM pg_temp.semantic_embedding_queue
+                    WHERE input_digest = ANY({input_digests})
+                    """,
+                    prepare=True,
+                ).rowcount
+            if deleted_digests != len(rows):
+                raise ValueError("semantic embedding queue made no progress")
+            mapped_units = sum(row[6] for row in rows)
+            completed += mapped_units
+            checkpoint_at = monotonic()
+            if (
+                completed == total
+                or checkpoint_at - last_checkpoint >= _PROGRESS_CHECKPOINT_SECONDS
+            ):
+                connection.execute(
+                    t"""
+                    UPDATE cc_search_chats.semantic_revision
+                    SET completed_units = {completed}, heartbeat_at = now()
+                    WHERE semantic_revision_id = {semantic_revision}
+                      AND status = 'building'
+                    """,
+                    prepare=True,
+                )
+                if progress is not None:
+                    progress(completed, total)
+                last_checkpoint = checkpoint_at
 
         heartbeat.raise_if_failed()
         connection.execute(

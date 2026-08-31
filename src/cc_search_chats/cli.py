@@ -273,6 +273,8 @@ class _ProgressStream:
         self._sequence = 0
         self._terminal = False
         self._emit_lock = Lock()
+        self._human_active_phase: str | None = None
+        self._human_phase_samples: dict[str, tuple[float, int]] = {}
         selected = getattr(args, "progress", "auto")
         self._ndjson = (
             selected == "ndjson"
@@ -305,6 +307,7 @@ class _ProgressStream:
         semantic: object = None,
     ) -> None:
         with self._emit_lock:
+            emitted_at = monotonic()
             self._sequence += 1
             value = {
                 "schema_version": 2,
@@ -313,7 +316,7 @@ class _ProgressStream:
                 "run_id": run_id,
                 "phase": phase,
                 "state": state,
-                "elapsed_ms": round((monotonic() - self._started) * 1000),
+                "elapsed_ms": round((emitted_at - self._started) * 1000),
                 "completed_units": completed_units,
                 "total_units": total_units,
                 "owner": owner,
@@ -336,13 +339,48 @@ class _ProgressStream:
                     json.dumps(value, ensure_ascii=False, sort_keys=True),
                     file=sys.stderr,
                 )
-            else:
-                units = (
-                    f" {completed_units}/{total_units}"
-                    if completed_units is not None and total_units is not None
-                    else ""
+            elif completed_units is not None and total_units is not None:
+                if (
+                    self._human_active_phase is not None
+                    and self._human_active_phase != phase
+                ):
+                    print(file=sys.stderr)
+                    self._human_phase_samples.pop(self._human_active_phase, None)
+                    self._human_active_phase = None
+                started_at, started_units = self._human_phase_samples.setdefault(
+                    phase,
+                    (emitted_at, completed_units),
                 )
-                print(f"{phase}: {state}{units}", file=sys.stderr)
+                elapsed = emitted_at - started_at
+                advanced = completed_units - started_units
+                rate = advanced / elapsed if elapsed > 0 and advanced > 0 else 0.0
+                percent = (
+                    completed_units / total_units * 100 if total_units > 0 else 100.0
+                )
+                rate_text = f" {rate:.1f} units/s" if rate > 0 else ""
+                eta_text = ""
+                if rate > 0 and completed_units < total_units:
+                    remaining_seconds = round((total_units - completed_units) / rate)
+                    hours, remainder = divmod(remaining_seconds, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    eta_text = f" ETA {hours:d}:{minutes:02d}:{seconds:02d}"
+                end = "" if state == "running" else "\n"
+                print(
+                    f"\x1b[2K\r{phase}: {state} {completed_units}/{total_units} "
+                    f"({percent:.1f}%){rate_text}{eta_text}",
+                    end=end,
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self._human_active_phase = phase if state == "running" else None
+                if self._human_active_phase is None:
+                    self._human_phase_samples.pop(phase, None)
+            else:
+                if self._human_active_phase is not None:
+                    print(file=sys.stderr)
+                    self._human_phase_samples.pop(self._human_active_phase, None)
+                    self._human_active_phase = None
+                print(f"{phase}: {state}", file=sys.stderr)
 
     @contextmanager
     def heartbeat(
@@ -1131,10 +1169,22 @@ def _handle_postgres(
                     ):
                         embedding_heartbeat("semantic_embed", None, None, None)
 
+                report_model_progress = True
+
                 def passage_embed(texts):
-                    return embed_passages(texts, progress=model_progress)
+                    nonlocal report_model_progress
+                    progress = model_progress if report_model_progress else None
+                    report_model_progress = False
+                    return embed_passages(texts, progress=progress)
 
                 def embedding_progress(completed: int, total: int) -> None:
+                    if embedding_heartbeat is not None:
+                        embedding_heartbeat(
+                            "semantic_embed",
+                            None,
+                            completed,
+                            total,
+                        )
                     progress_stream.emit(
                         "semantic_embed",
                         "running" if completed < total else "complete",

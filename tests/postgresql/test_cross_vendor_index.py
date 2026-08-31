@@ -355,7 +355,68 @@ def test_semantic_worker_embeds_each_missing_digest_once(
     assert progress[-1] == (completed, completed)
 
 
-def test_semantic_worker_reconciles_full_progress_only_at_boundaries(
+def test_semantic_worker_materializes_missing_work_before_embedding(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    codex_read = _read("codex_modern_primary_145.jsonl")
+    codex = parse_codex_session(
+        codex_read.envelopes,
+        context=CodexSessionContext(repository="/synthetic/repository"),
+        source_diagnostics=codex_read.diagnostics,
+    )
+    prose_texts = {
+        message.text
+        for message in codex.messages
+        if message.content_class.value == "prose" and message.text.strip()
+    }
+    prose_count = len(prose_texts)
+    assert prose_count > 1
+    migrate(postgres_connection)
+    replace_messages(postgres_connection, codex.messages)
+
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    queued_counts: list[int] = []
+    prepared_batch_query: list[bool] = []
+
+    def embed(texts):
+        queued_counts.append(
+            next(
+                postgres_connection.execute(
+                    "SELECT count(*) FROM pg_temp.semantic_embedding_queue"
+                )
+            )[0]
+        )
+        if not prepared_batch_query:
+            prepared_batch_query.append(
+                next(
+                    postgres_connection.execute(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM pg_prepared_statements
+                            WHERE statement LIKE '%WITH batch AS MATERIALIZED%'
+                              AND statement LIKE '%semantic_embedding_queue%'
+                        )
+                        """
+                    )
+                )[0]
+            )
+        return [vector for _ in texts]
+
+    completed = index_embeddings(
+        postgres_connection,
+        embed,
+        chunker=_single_chunks,
+        batch_size=1,
+    )
+
+    assert completed == prose_count
+    assert queued_counts == list(range(prose_count, 0, -1))
+    assert prepared_batch_query == [True]
+
+
+def test_semantic_worker_reconciles_full_progress_only_at_publication(
     postgres_connection: psycopg.Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -388,7 +449,37 @@ def test_semantic_worker_reconciles_full_progress_only_at_boundaries(
     )
 
     assert completed > 1
-    assert mapped_count_calls == 2
+    assert mapped_count_calls == 1
+
+
+def test_semantic_worker_throttles_progress_checkpoints_between_boundaries(
+    postgres_connection: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_read = _read("codex_modern_primary_145.jsonl")
+    codex = parse_codex_session(
+        codex_read.envelopes,
+        context=CodexSessionContext(repository="/synthetic/repository"),
+        source_diagnostics=codex_read.diagnostics,
+    )
+    migrate(postgres_connection)
+    replace_messages(postgres_connection, codex.messages)
+
+    monkeypatch.setattr(semantic_storage, "monotonic", lambda: 0.0, raising=False)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    progress: list[tuple[int, int]] = []
+
+    completed = index_embeddings(
+        postgres_connection,
+        lambda texts: [vector for _ in texts],
+        chunker=_single_chunks,
+        batch_size=1,
+        progress=lambda done, total: progress.append((done, total)),
+    )
+
+    assert completed > 1
+    assert progress == [(0, completed), (completed, completed)]
 
 
 def test_search_scope_defaults_to_primary_prose_and_requires_agent_tool_opt_in(

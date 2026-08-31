@@ -409,7 +409,7 @@ def test_postgresql_cli_journey_with_events(
         raising=False,
     )
     monkeypatch.setattr("cc_search_chats.cli.chunk_passages", _single_chunks)
-    code, _semantic_index = _run(
+    code, semantic_index = _run(
         monkeypatch,
         capsys,
         "index",
@@ -417,6 +417,17 @@ def test_postgresql_cli_journey_with_events(
         "--json",
     )
     assert code == 0
+    semantic_events = _progress_events(semantic_index.err)
+    assert [
+        event["state"]
+        for event in semantic_events
+        if event["phase"] == "model_preflight" and event["event"] == "progress"
+    ] == ["running", "complete"]
+    assert [
+        event["state"]
+        for event in semantic_events
+        if event["phase"] == "model_load" and event["event"] == "progress"
+    ] == ["running", "complete"]
     embedded_texts.clear()
     code, initial_hybrid = _run(
         monkeypatch,

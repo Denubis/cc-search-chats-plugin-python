@@ -245,6 +245,41 @@ def test_progress_heartbeat_tracks_the_active_phase() -> None:
     assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
 
 
+def test_human_progress_renders_one_live_rate_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = iter((0.0, 1.0, 3.0, 4.0))
+    monkeypatch.setattr("cc_search_chats.cli.monotonic", lambda: next(clock))
+    args = build_parser().parse_args(["list", "--progress", "human"])
+    progress = _ProgressStream(args)
+    stderr = io.StringIO()
+
+    with redirect_stderr(stderr):
+        progress.emit(
+            "semantic_embed",
+            "running",
+            completed_units=20,
+            total_units=100,
+        )
+        progress.emit(
+            "semantic_embed",
+            "running",
+            completed_units=80,
+            total_units=100,
+        )
+        progress.emit(
+            "semantic_embed",
+            "complete",
+            completed_units=100,
+            total_units=100,
+        )
+
+    rendered = stderr.getvalue()
+    assert "\rsemantic_embed: running 80/100 (80.0%) 30.0 units/s" in rendered
+    assert rendered.count("\n") == 1
+    assert rendered.endswith("\n")
+
+
 # ============================================================
 # Helpers
 # ============================================================
