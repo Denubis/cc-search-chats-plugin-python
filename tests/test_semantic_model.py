@@ -1,20 +1,12 @@
 """Semantic runtime failure remains explicit and offline."""
 
 import subprocess
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from cc_search_chats.semantic import ModelUnavailable, embed_passages, embed_query
 from cc_search_chats.semantic import model as semantic_model
-
-
-@pytest.fixture(autouse=True)
-def clear_gpu_performance_verification() -> Iterator[None]:
-    semantic_model._verify_loaded_gpu_performance.cache_clear()
-    yield
-    semantic_model._verify_loaded_gpu_performance.cache_clear()
 
 
 def test_pooled_embeddings_are_normalized_in_float32() -> None:
@@ -49,7 +41,7 @@ def test_pooled_embeddings_are_normalized_in_float32() -> None:
     )
 
 
-def test_passage_embedding_rejects_loaded_gpu_stuck_at_idle_clock(
+def test_passage_embedding_does_not_start_a_synthetic_gpu_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeOutOfMemoryError(RuntimeError):
@@ -61,36 +53,6 @@ def test_passage_embedding_rejects_loaded_gpu_stuck_at_idle_clock(
     class FakeTorch:
         cuda = FakeCuda()
 
-    class FakeTelemetryProcess:
-        returncode = None
-
-        def terminate(self) -> None:
-            self.returncode = -15
-
-        def communicate(self, *, timeout: float) -> tuple[str, str]:
-            assert timeout == 2
-            return "100, 210, 3105, P8\n", ""
-
-    def start_telemetry(
-        args: list[str],
-        *,
-        stdout: int,
-        stderr: int,
-        text: bool,
-    ) -> FakeTelemetryProcess:
-        assert args == [
-            "nvidia-smi",
-            "--query-gpu=utilization.gpu,clocks.current.sm,clocks.max.sm,pstate",
-            "--format=csv,noheader,nounits",
-            "--id=0",
-            "--loop-ms=50",
-        ]
-        assert stdout == subprocess.PIPE
-        assert stderr == subprocess.PIPE
-        assert text is True
-        return FakeTelemetryProcess()
-
-    monkeypatch.setattr(subprocess, "Popen", start_telemetry)
     monkeypatch.setattr(semantic_model, "_prepare_runtime", lambda progress: None)
     monkeypatch.setattr(
         semantic_model,
@@ -102,87 +64,18 @@ def test_passage_embedding_rejects_loaded_gpu_stuck_at_idle_clock(
         "_embed_batch",
         lambda texts, prefix: [[1.0] * semantic_model.DIMENSIONS for _ in texts],
     )
-
-    with pytest.raises(ModelUnavailable, match="loaded GPU") as raised:
-        embed_passages(("one passage",))
-
-    assert raised.value.code == "gpu_performance_unavailable"
-    assert raised.value.phase == "model_preflight"
-
-
-def test_passage_embedding_accepts_loaded_gpu_at_operating_clock(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeOutOfMemoryError(RuntimeError):
-        pass
-
-    class FakeCuda:
-        OutOfMemoryError = FakeOutOfMemoryError
-
-    class FakeTorch:
-        cuda = FakeCuda()
-
-    class FakeTelemetryProcess:
-        returncode = None
-
-        def terminate(self) -> None:
-            self.returncode = -15
-
-        def communicate(self, *, timeout: float) -> tuple[str, str]:
-            assert timeout == 2
-            return "35, 375, 3105, P8\n73, 2500, 3105, P2\n", ""
-
     monkeypatch.setattr(
         subprocess,
         "Popen",
-        lambda *args, **kwargs: FakeTelemetryProcess(),
-    )
-    monkeypatch.setattr(semantic_model, "_prepare_runtime", lambda progress: None)
-    monkeypatch.setattr(
-        semantic_model,
-        "_runtime",
-        lambda: (FakeTorch(), object(), object()),
-    )
-    monkeypatch.setattr(
-        semantic_model,
-        "_embed_batch",
-        lambda texts, prefix: [[1.0] * semantic_model.DIMENSIONS for _ in texts],
+        lambda *args, **kwargs: pytest.fail(
+            "passage embedding started a synthetic GPU probe"
+        ),
     )
 
     vectors = embed_passages(("one passage",))
 
     assert len(vectors) == 1
     assert len(vectors[0]) == semantic_model.DIMENSIONS
-
-
-def test_passage_embedding_requires_gpu_performance_telemetry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeOutOfMemoryError(RuntimeError):
-        pass
-
-    class FakeCuda:
-        OutOfMemoryError = FakeOutOfMemoryError
-
-    class FakeTorch:
-        cuda = FakeCuda()
-
-    def missing_telemetry(*args: object, **kwargs: object) -> None:
-        raise FileNotFoundError("fixture nvidia-smi")
-
-    monkeypatch.setattr(subprocess, "Popen", missing_telemetry)
-    monkeypatch.setattr(semantic_model, "_prepare_runtime", lambda progress: None)
-    monkeypatch.setattr(
-        semantic_model,
-        "_runtime",
-        lambda: (FakeTorch(), object(), object()),
-    )
-
-    with pytest.raises(ModelUnavailable, match="could not be verified") as raised:
-        embed_passages(("one passage",))
-
-    assert raised.value.code == "gpu_telemetry_unavailable"
-    assert raised.value.phase == "model_preflight"
 
 
 def test_query_embedding_does_not_run_index_gpu_performance_probe(
@@ -197,10 +90,13 @@ def test_query_embedding_does_not_run_index_gpu_performance_probe(
     class FakeTorch:
         cuda = FakeCuda()
 
-    def unexpected_telemetry(*args: object, **kwargs: object) -> None:
-        raise AssertionError("query embedding started indexing telemetry")
-
-    monkeypatch.setattr(subprocess, "Popen", unexpected_telemetry)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail(
+            "query embedding started indexing telemetry"
+        ),
+    )
     monkeypatch.setattr(semantic_model, "_prepare_runtime", lambda progress: None)
     monkeypatch.setattr(
         semantic_model,
@@ -285,11 +181,6 @@ def test_terminal_vram_failure_is_named_and_reports_measurable_capacity(
         semantic_model,
         "_runtime",
         lambda: (FakeTorch(), object(), object()),
-    )
-    monkeypatch.setattr(
-        semantic_model,
-        "_verify_loaded_gpu_performance",
-        lambda: None,
     )
     monkeypatch.setattr(
         semantic_model,

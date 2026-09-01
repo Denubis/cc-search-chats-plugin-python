@@ -30,6 +30,7 @@ from typing import Literal
 import pytest
 
 from cc_search_chats import __version__
+from cc_search_chats import cli as cli_module
 from cc_search_chats.cli import (
     _bounded_query_embedding,
     _contain_semantic_index,
@@ -278,6 +279,33 @@ def test_human_progress_renders_one_live_rate_line(
     assert "\rsemantic_embed: running 80/100 (80.0%) 30.0 units/s" in rendered
     assert rendered.count("\n") == 1
     assert rendered.endswith("\n")
+
+
+def test_embedding_rate_alarm_is_disarmed_during_first_five_seconds() -> None:
+    guard = cli_module._EmbeddingRateGuard()
+
+    guard.start(100.0)
+    guard.observe(1, 104.999)
+
+
+def test_embedding_rate_alarm_compares_sustained_rate_with_target() -> None:
+    guard = cli_module._EmbeddingRateGuard()
+    guard.start(100.0)
+
+    with pytest.raises(ModelUnavailable, match="11.8 passages/s") as raised:
+        guard.observe(59, 105.0)
+
+    assert raised.value.code == "gpu_performance_unavailable"
+    assert raised.value.phase == "semantic_embed"
+    assert "desired 16.0 passages/s" in str(raised.value)
+    assert "minimum acceptable 12.0 passages/s" in str(raised.value)
+
+
+def test_embedding_rate_alarm_accepts_the_minimum_sustained_rate() -> None:
+    guard = cli_module._EmbeddingRateGuard()
+    guard.start(100.0)
+
+    guard.observe(60, 105.0)
 
 
 # ============================================================

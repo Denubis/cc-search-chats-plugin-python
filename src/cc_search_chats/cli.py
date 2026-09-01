@@ -123,10 +123,47 @@ _SEARCH_DEADLINE_SECONDS = 5.0
 _SEARCH_RENDER_RESERVE_SECONDS = 0.1
 _AUTO_REFRESH_LAUNCH_MAX_SECONDS = 0.5
 _AUTO_REFRESH_SERVICE = "cc-search-chats-refresh.service"
+_EMBEDDING_RATE_WINDOW_SECONDS = 5.0
+_EMBEDDING_DESIRED_PASSAGES_PER_SECOND = 16.0
+_EMBEDDING_MINIMUM_RATE_RATIO = 0.75
 
 
 class SearchDeadlineExceeded(TimeoutError):
     """The ranked search request no longer has a safe answer budget."""
+
+
+class _EmbeddingRateGuard:
+    """Reject indexing that cannot sustain the benchmarked passage rate."""
+
+    def __init__(self) -> None:
+        self._window_started_at: float | None = None
+        self._completed_passages = 0
+
+    def start(self, now: float) -> None:
+        self._window_started_at = now
+        self._completed_passages = 0
+
+    def observe(self, completed_passages: int, now: float) -> None:
+        if self._window_started_at is None:
+            raise RuntimeError("embedding rate guard was not started")
+        self._completed_passages += completed_passages
+        elapsed = now - self._window_started_at
+        if elapsed < _EMBEDDING_RATE_WINDOW_SECONDS:
+            return
+        current_rate = self._completed_passages / elapsed
+        minimum_rate = (
+            _EMBEDDING_DESIRED_PASSAGES_PER_SECOND * _EMBEDDING_MINIMUM_RATE_RATIO
+        )
+        if current_rate < minimum_rate:
+            raise ModelUnavailable(
+                f"semantic indexing sustained {current_rate:.1f} passages/s "
+                f"for {elapsed:.1f}s; desired "
+                f"{_EMBEDDING_DESIRED_PASSAGES_PER_SECOND:.1f} passages/s; "
+                f"minimum acceptable {minimum_rate:.1f} passages/s",
+                code="gpu_performance_unavailable",
+                phase="semantic_embed",
+            )
+        self.start(now)
 
 
 def _remaining_search_seconds(args: argparse.Namespace) -> float:
@@ -1154,6 +1191,7 @@ def _handle_postgres(
                 )
             vector_count = 0
             if not args.literal_only:
+                embedding_rate = _EmbeddingRateGuard()
                 embedding_heartbeat: (
                     Callable[[str, int | None, int | None, int | None], None] | None
                 ) = None
@@ -1167,6 +1205,7 @@ def _handle_postgres(
                         and phase == "model_load"
                         and state == "complete"
                     ):
+                        embedding_rate.start(monotonic())
                         embedding_heartbeat("semantic_embed", None, None, None)
 
                 report_model_progress = True
@@ -1175,7 +1214,9 @@ def _handle_postgres(
                     nonlocal report_model_progress
                     progress = model_progress if report_model_progress else None
                     report_model_progress = False
-                    return embed_passages(texts, progress=progress)
+                    vectors = embed_passages(texts, progress=progress)
+                    embedding_rate.observe(len(texts), monotonic())
+                    return vectors
 
                 def embedding_progress(completed: int, total: int) -> None:
                     if embedding_heartbeat is not None:
