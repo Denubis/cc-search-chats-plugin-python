@@ -7,7 +7,7 @@ allowed-tools: ["Bash(cc-search-chats:*)"]
 
 **Request:** $ARGUMENTS
 
-Use `cc-search-chats --json` and require `schema_version: 2`. In a sandboxed
+Use `cc-search-chats --json` and require `schema_version: 3`. In a sandboxed
 caller, request the configured host approval route on the first attempt; do not
 infer host PostgreSQL, D-Bus, CUDA, or model-cache state from a sandbox failure,
 and do not invent connection or cache environment variables.
@@ -24,15 +24,18 @@ and do not invent connection or cache environment variables.
 - Explicit maintenance: `cc-search-chats index --json`
 - Semantic checkpoint: `cc-search-chats index --status --json`
 
-Search refreshes changed native records before retrieval. A miss merits alternate
-terms, `--literal`, and filter review before explicit maintenance. Default search
-contains visible primary prose from configured standard and Ponytail roots;
+A stale ranked search admits or joins one full background update before opening its result snapshot. It may wait within the command deadline; a completed update
+starts a five-minute quiet period, while a timeout keeps the previous coherent
+corpus. A miss merits alternate terms, `--literal`, and filter review before
+explicit maintenance. Default search contains visible primary prose from
+configured standard and Ponytail roots;
 `--agents` adds agent/unknown sessions;
 `--literal --tools` adds tool content. Reasoning, instructions, injected context,
 and unrecognized shapes are unavailable.
 
 Read `results`, `sessions`, `messages`, or batched `resolutions` as appropriate.
 Retain provider-qualified native identity and `ccchat:v1:` locators when
-presenting matches. Check `coverage`, `refresh`, `semantic`, `warnings`, and the
-terminal `status`; an empty result is not proof of absence when coverage is
-partial or filters exclude the intended corpus.
+presenting matches. Check `coverage`, `refresh.corpus_generation`,
+`semantic.semantic_build`, `semantic.corpus_generation`, `corpus_age_ms`,
+`warnings`, and terminal `status`; an empty result is not proof of absence when
+coverage is partial or filters exclude the intended corpus.

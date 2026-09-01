@@ -12,6 +12,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from multiprocessing import get_context
@@ -72,13 +73,14 @@ from cc_search_chats.storage.index import (
     search,
 )
 from cc_search_chats.storage.postgresql import (
+    CorpusIndexResult,
     RefreshProgress,
     RefreshResult,
     StoredAlias,
     StoredMessage,
     exhaustive_search_page,
     export_human_message_events,
-    index_embeddings,
+    index_corpus,
     migrate,
     refresh_native_sources,
     resolve_exact_messages,
@@ -97,6 +99,7 @@ from cc_search_chats.storage.postgresql import (
     resolve_messages as pg_resolve_messages,
 )
 from cc_search_chats.storage.postgresql.auto_refresh import (
+    AUTO_REFRESH_COOLDOWN_SECONDS,
     AutoRefreshStatus,
     admit_auto_refresh,
     auto_refresh_status,
@@ -108,6 +111,7 @@ from cc_search_chats.storage.postgresql.auto_refresh import (
     mark_auto_refresh_running,
 )
 from cc_search_chats.storage.postgresql.guardrails import (
+    INDEX_NOTIFY_CHANNEL,
     ReadDeadlineExceeded,
     acquire_index_session,
     read_deadline,
@@ -121,11 +125,29 @@ from cc_search_chats.storage.postgresql.semantic import fuse_hybrid, semantic_se
 _DEFAULT_POSTGRES_DSN = "service=cc_search_chats"
 _SEARCH_DEADLINE_SECONDS = 5.0
 _SEARCH_RENDER_RESERVE_SECONDS = 0.1
+_SEARCH_RETRIEVAL_RESERVE_SECONDS = 1.0
 _AUTO_REFRESH_LAUNCH_MAX_SECONDS = 0.5
 _AUTO_REFRESH_SERVICE = "cc-search-chats-refresh.service"
 _EMBEDDING_RATE_WINDOW_SECONDS = 5.0
 _EMBEDDING_DESIRED_PASSAGES_PER_SECOND = 16.0
 _EMBEDDING_MINIMUM_RATE_RATIO = 0.75
+_ACTIVE_AUTO_REFRESH_STATES = frozenset({"pending", "launching", "launched", "running"})
+
+
+@dataclass(frozen=True, slots=True)
+class _RefreshSnapshot:
+    corpus_generation: int | None
+    indexed_at: datetime | None
+    stale: bool
+    background: AutoRefreshStatus
+
+
+@dataclass(frozen=True, slots=True)
+class _RankedRefreshCoordination:
+    corpus_before: int | None
+    corpus_after: int | None
+    background: AutoRefreshStatus
+    warning: dict[str, str] | None
 
 
 class SearchDeadlineExceeded(TimeoutError):
@@ -302,6 +324,129 @@ def _request_auto_refresh(
     return auto_refresh_status(connection)
 
 
+def _refresh_snapshot(connection: psycopg.Connection) -> _RefreshSnapshot:
+    row = next(
+        connection.execute(
+            """
+            SELECT corpus.current_corpus_generation,
+                   generation.completed_at,
+                   generation.completed_at IS NULL
+                       OR generation.completed_at <= now() - make_interval(
+                           secs => %s
+                       ) AS stale,
+                   automatic.request_id, automatic.state,
+                   automatic.refresh_run_id, automatic.last_error
+            FROM cc_search_chats.corpus_state AS corpus
+            LEFT JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 corpus.current_corpus_generation
+            CROSS JOIN cc_search_chats.auto_refresh_state AS automatic
+            WHERE corpus.singleton AND automatic.singleton
+            """,
+            (AUTO_REFRESH_COOLDOWN_SECONDS,),
+        )
+    )
+    return _RefreshSnapshot(
+        corpus_generation=row[0],
+        indexed_at=row[1],
+        stale=bool(row[2]),
+        background=AutoRefreshStatus(*row[3:]),
+    )
+
+
+def _should_wait_for_ranked_refresh(
+    *,
+    corpus_before: int | None,
+    current: _RefreshSnapshot,
+    remaining_seconds: float,
+) -> bool:
+    return (
+        current.corpus_generation == corpus_before
+        and current.background.state in _ACTIVE_AUTO_REFRESH_STATES
+        and remaining_seconds > _SEARCH_RETRIEVAL_RESERVE_SECONDS
+    )
+
+
+def _wait_for_index_notification(
+    connection: psycopg.Connection,
+    timeout_seconds: float,
+) -> bool:
+    notification = next(
+        connection.notifies(timeout=timeout_seconds, stop_after=1),
+        None,
+    )
+    return notification is not None
+
+
+def _auto_refresh_warning(status: AutoRefreshStatus) -> dict[str, str] | None:
+    if status.state != "failed":
+        return None
+    return {
+        "code": "auto_refresh_unavailable",
+        "detail": status.last_error or "unknown launch failure",
+    }
+
+
+def _coordinate_ranked_refresh(
+    connection: psycopg.Connection,
+    *,
+    remaining_seconds: Callable[[], float],
+    wait_for_notification: Callable[[psycopg.Connection, float], bool] | None = None,
+) -> _RankedRefreshCoordination:
+    """Launch or join stale work, treating notifications only as wake-up hints."""
+    wait = wait_for_notification or _wait_for_index_notification
+    observed = _refresh_snapshot(connection)
+    if not observed.stale:
+        return _RankedRefreshCoordination(
+            corpus_before=observed.corpus_generation,
+            corpus_after=observed.corpus_generation,
+            background=observed.background,
+            warning=_auto_refresh_warning(observed.background),
+        )
+
+    connection.execute(f"LISTEN {INDEX_NOTIFY_CHANNEL}")
+    try:
+        before = _refresh_snapshot(connection)
+        current = before
+        if current.stale:
+            remaining = remaining_seconds()
+            launch_budget = min(
+                _AUTO_REFRESH_LAUNCH_MAX_SECONDS,
+                remaining - _SEARCH_RETRIEVAL_RESERVE_SECONDS,
+            )
+            if launch_budget > 0:
+                _request_auto_refresh(
+                    connection,
+                    timeout_seconds=launch_budget,
+                )
+                current = _refresh_snapshot(connection)
+
+            while True:
+                remaining = remaining_seconds()
+                if not _should_wait_for_ranked_refresh(
+                    corpus_before=before.corpus_generation,
+                    current=current,
+                    remaining_seconds=remaining,
+                ):
+                    break
+                woke = wait(
+                    connection,
+                    remaining - _SEARCH_RETRIEVAL_RESERVE_SECONDS,
+                )
+                current = _refresh_snapshot(connection)
+                if not woke:
+                    break
+
+        return _RankedRefreshCoordination(
+            corpus_before=before.corpus_generation,
+            corpus_after=current.corpus_generation,
+            background=current.background,
+            warning=_auto_refresh_warning(current.background),
+        )
+    finally:
+        connection.execute(f"UNLISTEN {INDEX_NOTIFY_CHANNEL}")
+
+
 class _ProgressStream:
     """Render one ordered progress stream without contaminating stdout."""
 
@@ -329,12 +474,13 @@ class _ProgressStream:
         completed_units: int | None = None,
         total_units: int | None = None,
         owner: int | None = None,
-        fts_revision: int | None = None,
-        semantic_revision: int | None = None,
+        corpus_generation: int | None = None,
+        semantic_build: int | None = None,
         source_watermark: object = None,
         deadline_ms: int | None = None,
         retrieval_mode: str | None = None,
         indexed_at: str | None = None,
+        corpus_age_ms: int | None = None,
         stale_reasons: object = None,
         background_refresh: object = None,
         warning: object = None,
@@ -347,7 +493,7 @@ class _ProgressStream:
             emitted_at = monotonic()
             self._sequence += 1
             value = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "sequence": self._sequence,
                 "event": event,
                 "run_id": run_id,
@@ -357,12 +503,13 @@ class _ProgressStream:
                 "completed_units": completed_units,
                 "total_units": total_units,
                 "owner": owner,
-                "fts_revision": fts_revision,
-                "semantic_revision": semantic_revision,
+                "corpus_generation": corpus_generation,
+                "semantic_build": semantic_build,
                 "source_watermark": source_watermark,
                 "deadline_ms": deadline_ms,
                 "retrieval_mode": retrieval_mode,
                 "indexed_at": indexed_at,
+                "corpus_age_ms": corpus_age_ms,
                 "stale_reasons": stale_reasons,
                 "background_refresh": background_refresh,
                 "warning": warning,
@@ -487,15 +634,16 @@ class _ProgressStream:
             str(envelope["status"]),
             event="terminal",
             run_id=cast(int | None, refresh.get("run_id")),
-            fts_revision=cast(int | None, refresh.get("fts_revision")),
-            semantic_revision=cast(
+            corpus_generation=cast(int | None, refresh.get("corpus_generation")),
+            semantic_build=cast(
                 int | None,
-                semantic.get("semantic_revision"),
+                semantic.get("semantic_build"),
             ),
             source_watermark=coverage.get("source_watermarks"),
             deadline_ms=cast(int | None, envelope.get("deadline_ms")),
             retrieval_mode=cast(str | None, envelope.get("retrieval_mode")),
             indexed_at=cast(str | None, envelope.get("indexed_at")),
+            corpus_age_ms=cast(int | None, envelope.get("corpus_age_ms")),
             stale_reasons=envelope.get("stale_reasons"),
             background_refresh=envelope.get("background_refresh"),
             warning=envelope.get("warnings"),
@@ -527,7 +675,7 @@ def _error_envelope(
     error: dict[str, object],
 ) -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "command": command,
         "status": status,
         "coverage": {
@@ -554,7 +702,7 @@ def _error_envelope(
             "completeness": "unknown",
         },
         "refresh": {
-            "fts_revision": None,
+            "corpus_generation": None,
             "run_id": None,
             "state": "unavailable",
             "failed_sources": 0,
@@ -566,13 +714,21 @@ def _error_envelope(
             "pending_bytes": 0,
         },
         "semantic": {
-            "semantic_revision": None,
-            "fts_revision": None,
+            "semantic_build": None,
+            "corpus_generation": None,
             "state": "unavailable",
             "profile_id": None,
             "completed_units": 0,
             "total_units": 0,
             "fresh": False,
+        },
+        "indexed_at": None,
+        "corpus_age_ms": None,
+        "background_refresh": {
+            "request_id": 0,
+            "state": "unavailable",
+            "refresh_run_id": None,
+            "last_error": None,
         },
         "warnings": [],
         "error": error,
@@ -623,7 +779,7 @@ def _postgres_envelope(
     *,
     status: str = "complete",
     additional_warnings: Sequence[object] = (),
-    refresh_result: RefreshResult | None = None,
+    refresh_result: RefreshResult | CorpusIndexResult | None = None,
     **payload: object,
 ) -> dict[str, object]:
     roots = [
@@ -654,7 +810,7 @@ def _postgres_envelope(
     refresh_row = next(
         connection.execute(
             """
-            SELECT state.current_revision_id, run.run_id, run.status,
+            SELECT state.current_corpus_generation, run.run_id, run.status,
                    run.source_count, run.changed_source_count,
                    run.failed_source_count, run.read_source_count,
                    run.removed_source_count, run.advanced_source_count,
@@ -737,20 +893,23 @@ def _postgres_envelope(
     semantic_row = next(
         connection.execute(
             """
-            SELECT semantic.semantic_revision_id,
-                   semantic.corpus_revision_id,
-                   semantic.status,
-                   semantic.profile_id,
-                   semantic.completed_units,
-                   semantic.total_units,
-                   semantic.corpus_revision_id = corpus.current_revision_id
-                       AND semantic.status = 'complete' AS fresh
-            FROM cc_search_chats.corpus_state AS corpus
-            LEFT JOIN cc_search_chats.semantic_state AS state
-              ON state.singleton
-            LEFT JOIN cc_search_chats.semantic_revision AS semantic
-              ON semantic.semantic_revision_id = state.current_semantic_revision_id
-            WHERE corpus.singleton
+            SELECT build.semantic_build,
+                   build.corpus_generation,
+                   build.status,
+                   build.profile_id,
+                   build.completed_units,
+                   build.total_units,
+                   build.corpus_generation = generation.corpus_generation
+                       AND build.status = 'complete'
+                       AND build.completed_at IS NOT NULL AS fresh
+            FROM cc_search_chats.corpus_state AS state
+            LEFT JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            LEFT JOIN cc_search_chats.semantic_build AS build
+              ON (build.semantic_build, build.corpus_generation) =
+                 (generation.semantic_build, generation.corpus_generation)
+            WHERE state.singleton
             """
         )
     )
@@ -772,7 +931,7 @@ def _postgres_envelope(
     pending_bytes = int(refresh_row[15] or 0)
     refresh_run_id = refresh_row[1]
     refresh_state = refresh_row[2] or "unchanged"
-    refresh_revision = refresh_row[0]
+    corpus_generation = refresh_row[0]
     if refresh_result is not None:
         discovered_files = refresh_result.source_count
         changed_files = refresh_result.changed_source_count
@@ -792,7 +951,7 @@ def _postgres_envelope(
             and refresh_result.run_id == refresh_row[1]
             else "unchanged"
         )
-        refresh_revision = refresh_result.revision_id
+        corpus_generation = refresh_result.corpus_generation
     unrecognized_records = sum(
         1
         for diagnostic in diagnostics
@@ -837,7 +996,7 @@ def _postgres_envelope(
         ),
     }
     refresh = {
-        "fts_revision": refresh_revision,
+        "corpus_generation": corpus_generation,
         "run_id": refresh_run_id,
         "state": refresh_state,
         "failed_sources": failed_files,
@@ -849,34 +1008,45 @@ def _postgres_envelope(
         "pending_bytes": pending_bytes,
     }
     semantic = {
-        "semantic_revision": semantic_row[0],
-        "fts_revision": semantic_row[1],
+        "semantic_build": semantic_row[0],
+        "corpus_generation": semantic_row[1],
         "state": semantic_row[2] or "unavailable",
         "profile_id": semantic_row[3],
         "completed_units": semantic_row[4] or 0,
         "total_units": semantic_row[5] or 0,
         "fresh": semantic_row[6] is True,
     }
-    indexed_at = next(
+    indexed_at, corpus_age_ms = next(
         connection.execute(
             """
-            SELECT revision.completed_at
+            SELECT generation.completed_at,
+                   CASE
+                       WHEN generation.completed_at IS NULL THEN NULL
+                       ELSE GREATEST(
+                           0,
+                           floor(extract(
+                               epoch FROM now() - generation.completed_at
+                           ) * 1000)
+                       )::bigint
+                   END AS corpus_age_ms
             FROM cc_search_chats.corpus_state AS state
-            LEFT JOIN cc_search_chats.corpus_revision AS revision
-              ON revision.revision_id = state.current_revision_id
+            LEFT JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
             WHERE state.singleton
             """
         )
-    )[0]
+    )
     background = auto_refresh_status(connection)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "command": command,
         "status": status,
         "coverage": coverage,
         "refresh": refresh,
         "semantic": semantic,
         "indexed_at": indexed_at.isoformat() if indexed_at is not None else None,
+        "corpus_age_ms": corpus_age_ms,
         "background_refresh": {
             "request_id": background.request_id,
             "state": background.state,
@@ -993,13 +1163,13 @@ def _handle_postgres(
             envelope = _postgres_envelope(
                 connection,
                 "index",
-                applied_schema_version=6,
+                applied_schema_version=7,
             )
             progress_stream.terminal(envelope)
             if args.json:
                 print(json.dumps(envelope, sort_keys=True))
             else:
-                print("Applied PostgreSQL schema migration 6")
+                print("Applied PostgreSQL schema migration 7")
             return 0
 
         require_current_schema(connection)
@@ -1009,7 +1179,7 @@ def _handle_postgres(
             *,
             status: str = "complete",
             additional_warnings: Sequence[object] = (),
-            refresh_result: RefreshResult | None = None,
+            refresh_result: RefreshResult | CorpusIndexResult | None = None,
             **payload: object,
         ) -> dict[str, object]:
             if args.command == "search" and not args.exhaustive:
@@ -1045,40 +1215,38 @@ def _handle_postgres(
                 status = next(
                     connection.execute(
                         """
-                        SELECT cs.current_revision_id, sr.semantic_revision_id,
-                               COALESCE(sr.completed, 0),
-                               COALESCE(sr.total, 0),
-                               COALESCE(sr.selected, false)
-                        FROM cc_search_chats.corpus_state AS cs
-                        LEFT JOIN LATERAL (
-                            SELECT r.semantic_revision_id,
-                                   r.completed_units AS completed,
-                                   r.total_units AS total,
-                                   ss.current_semantic_revision_id =
-                                       r.semantic_revision_id AS selected
-                            FROM cc_search_chats.semantic_revision AS r
-                            LEFT JOIN cc_search_chats.semantic_state AS ss
-                              ON ss.singleton
-                            WHERE r.corpus_revision_id = cs.current_revision_id
-                            ORDER BY r.semantic_revision_id DESC
-                            LIMIT 1
-                        ) AS sr ON true
-                        WHERE cs.singleton
+                        SELECT state.current_corpus_generation,
+                               build.semantic_build,
+                               COALESCE(build.completed_units, 0),
+                               COALESCE(build.total_units, 0),
+                               build.semantic_build IS NOT NULL
+                        FROM cc_search_chats.corpus_state AS state
+                        LEFT JOIN cc_search_chats.corpus_generation AS generation
+                          ON generation.corpus_generation =
+                             state.current_corpus_generation
+                        LEFT JOIN cc_search_chats.semantic_build AS build
+                          ON (build.semantic_build, build.corpus_generation) =
+                             (generation.semantic_build,
+                              generation.corpus_generation)
+                        WHERE state.singleton
                         """
                     ),
                     None,
                 )
-                revision, semantic_revision, completed, total, selected = status or (
-                    None,
-                    None,
-                    0,
-                    0,
-                    False,
+                selected_corpus, selected_build, completed, total, selected = (
+                    status
+                    or (
+                        None,
+                        None,
+                        0,
+                        0,
+                        False,
+                    )
                 )
                 envelope = finish(
                     "index",
-                    revision_id=revision,
-                    semantic_revision_id=semantic_revision,
+                    corpus_generation=selected_corpus,
+                    semantic_build=selected_build,
                     completed=completed,
                     total=total,
                     selected=bool(selected),
@@ -1088,6 +1256,17 @@ def _handle_postgres(
                 else:
                     print(f"Semantic index: {completed}/{total} passages")
                 return 0
+
+            if args.semantic_only:
+                raise ValueError(
+                    "independent semantic publication is unavailable; "
+                    "run `cc-search-chats index` to publish one coherent corpus"
+                )
+            if args.literal_only and args.background_refresh:
+                raise ValueError(
+                    "automatic refresh requires the full coherent index; "
+                    "run `cc-search-chats index --background-refresh`"
+                )
 
             background_request_id = (
                 mark_auto_refresh_running(connection)
@@ -1129,129 +1308,129 @@ def _handle_postgres(
                     owner=event.owner_pid,
                 )
 
-            current_refresh_result: RefreshResult | None = None
-            if args.semantic_only:
-                revision_id, source_count, message_count = next(
-                    connection.execute(
-                        """
-                        SELECT s.current_revision_id, 0, count(*)
-                        FROM cc_search_chats.corpus_state AS s
-                        CROSS JOIN cc_search_chats.message_current AS m
-                        WHERE s.singleton
-                        GROUP BY s.current_revision_id
-                        """
+            embedding_rate = _EmbeddingRateGuard()
+            report_model_progress = True
+
+            def model_progress(phase: str, state: str) -> None:
+                if refresh_heartbeat is not None:
+                    refresh_heartbeat(phase, None, None, None)
+                progress_stream.emit(phase, state)
+                if phase == "model_load" and state == "complete":
+                    embedding_rate.start(monotonic())
+                    if refresh_heartbeat is not None:
+                        refresh_heartbeat("semantic_embed", None, None, None)
+
+            def passage_embed(texts):
+                nonlocal report_model_progress
+                model_callback = model_progress if report_model_progress else None
+                report_model_progress = False
+                vectors = embed_passages(texts, progress=model_callback)
+                embedding_rate.observe(len(texts), monotonic())
+                return vectors
+
+            def embedding_progress(completed: int, total: int) -> None:
+                if refresh_heartbeat is not None:
+                    refresh_heartbeat(
+                        "semantic_embed",
+                        None,
+                        completed,
+                        total,
                     )
+                progress_stream.emit(
+                    "semantic_embed",
+                    "running" if completed < total else "complete",
+                    completed_units=completed,
+                    total_units=total,
                 )
-            else:
-                progress_stream.emit("scan", "running")
-                with progress_stream.heartbeat("scan") as heartbeat_update:
-                    refresh_heartbeat = heartbeat_update
-                    try:
+
+            current_refresh_result: RefreshResult | CorpusIndexResult | None = None
+            progress_stream.emit("scan", "running")
+            with progress_stream.heartbeat("scan") as heartbeat_update:
+                refresh_heartbeat = heartbeat_update
+                try:
+                    if args.literal_only:
                         result = refresh_native_sources(
                             connection,
                             source_roots=configured_source_roots(),
                             progress=progress,
                             force_retry=args.force_retry,
                         )
-                        current_refresh_result = result
-                    except Exception as error:
-                        if background_request_id is not None:
-                            mark_auto_refresh_run_failed(
-                                connection,
-                                background_request_id,
-                                f"{type(error).__name__}: {error}",
-                            )
-                        raise
-                if background_request_id is not None:
-                    mark_auto_refresh_complete(
-                        connection,
-                        background_request_id,
-                        refresh_run_id=result.run_id,
-                    )
-                revision_id = result.revision_id
-                source_count = result.source_count
-                message_count = result.message_count
-                if not scan_complete:
-                    progress_stream.emit("scan", "complete")
-                    scan_complete = True
-                if not parse_seen:
-                    progress_stream.emit(
-                        "parse",
-                        "complete",
-                        completed_units=result.read_source_count,
-                        total_units=result.changed_source_count,
-                    )
+                    else:
+                        result = index_corpus(
+                            connection,
+                            passage_embed,
+                            chunker=chunk_passages,
+                            source_roots=configured_source_roots(),
+                            progress=progress,
+                            embedding_progress=embedding_progress,
+                            force_retry=args.force_retry,
+                            automatic_request_id=background_request_id,
+                        )
+                    current_refresh_result = result
+                except Exception as error:
+                    if background_request_id is not None:
+                        mark_auto_refresh_run_failed(
+                            connection,
+                            background_request_id,
+                            f"{type(error).__name__}: {error}",
+                        )
+                    raise
+            if background_request_id is not None:
+                mark_auto_refresh_complete(
+                    connection,
+                    background_request_id,
+                    refresh_run_id=result.run_id,
+                )
+            corpus_generation = result.corpus_generation
+            source_count = result.source_count
+            message_count = result.message_count
+            if not scan_complete:
+                progress_stream.emit("scan", "complete")
+                scan_complete = True
+            if not parse_seen:
+                progress_stream.emit(
+                    "parse",
+                    "complete",
+                    completed_units=result.read_source_count,
+                    total_units=result.changed_source_count,
+                )
+            vector_count = (
+                result.embedding_count if isinstance(result, CorpusIndexResult) else 0
+            )
+            if args.literal_only:
+                progress_stream.emit(
+                    "literal_diagnostic",
+                    "complete",
+                    completed_units=result.changed_source_count
+                    - result.failed_source_count,
+                    total_units=result.changed_source_count,
+                )
+            else:
+                assert isinstance(result, CorpusIndexResult)
                 progress_stream.emit(
                     "fts_commit",
                     "complete",
                     completed_units=result.changed_source_count
                     - result.failed_source_count,
                     total_units=result.changed_source_count,
-                    fts_revision=result.revision_id,
+                    corpus_generation=result.corpus_generation,
                 )
-            vector_count = 0
-            if not args.literal_only:
-                embedding_rate = _EmbeddingRateGuard()
-                embedding_heartbeat: (
-                    Callable[[str, int | None, int | None, int | None], None] | None
-                ) = None
-
-                def model_progress(phase: str, state: str) -> None:
-                    if embedding_heartbeat is not None:
-                        embedding_heartbeat(phase, None, None, None)
-                    progress_stream.emit(phase, state)
-                    if (
-                        embedding_heartbeat is not None
-                        and phase == "model_load"
-                        and state == "complete"
-                    ):
-                        embedding_rate.start(monotonic())
-                        embedding_heartbeat("semantic_embed", None, None, None)
-
-                report_model_progress = True
-
-                def passage_embed(texts):
-                    nonlocal report_model_progress
-                    progress = model_progress if report_model_progress else None
-                    report_model_progress = False
-                    vectors = embed_passages(texts, progress=progress)
-                    embedding_rate.observe(len(texts), monotonic())
-                    return vectors
-
-                def embedding_progress(completed: int, total: int) -> None:
-                    if embedding_heartbeat is not None:
-                        embedding_heartbeat(
-                            "semantic_embed",
-                            None,
-                            completed,
-                            total,
-                        )
-                    progress_stream.emit(
-                        "semantic_embed",
-                        "running" if completed < total else "complete",
-                        completed_units=completed,
-                        total_units=total,
-                    )
-
-                progress_stream.emit("semantic_embed", "running")
-                with progress_stream.heartbeat("semantic_embed") as heartbeat_update:
-                    embedding_heartbeat = heartbeat_update
-                    vector_count = index_embeddings(
-                        connection,
-                        passage_embed,
-                        chunker=chunk_passages,
-                        progress=embedding_progress,
-                    )
                 progress_stream.emit(
                     "semantic_commit",
                     "complete",
                     completed_units=vector_count,
                     total_units=vector_count,
+                    semantic_build=result.semantic_build,
                 )
             envelope = finish(
                 "index",
                 refresh_result=current_refresh_result,
-                revision_id=revision_id,
+                corpus_generation=corpus_generation,
+                semantic_build=(
+                    result.semantic_build
+                    if isinstance(result, CorpusIndexResult)
+                    else None
+                ),
                 sources=source_count,
                 messages=message_count,
                 embeddings=vector_count,
@@ -1261,7 +1440,7 @@ def _handle_postgres(
             else:
                 print(
                     f"Indexed {message_count} messages from "
-                    f"{source_count} sources into revision {revision_id}",
+                    f"{source_count} sources into corpus {corpus_generation}",
                     file=sys.stderr,
                 )
             return 0
@@ -1276,7 +1455,7 @@ def _handle_postgres(
             envelope = finish(
                 "events",
                 window=payload["window"],
-                source_revision=payload["source_revision"],
+                source_corpus_generation=payload["source_corpus_generation"],
                 population=payload["population"],
                 events=payload["events"],
             )
@@ -1472,13 +1651,37 @@ def _handle_postgres(
                 return 2
             return 3
 
-        connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         deadline = (
             None if args.exhaustive else args.request_started + _SEARCH_DEADLINE_SECONDS
         )
         project = args.project
         hybrid_rankings = {}
         search_warnings: list[dict[str, str]] = []
+        coordination = (
+            _RankedRefreshCoordination(
+                corpus_before=None,
+                corpus_after=None,
+                background=auto_refresh_status(connection),
+                warning=None,
+            )
+            if args.exhaustive
+            else _coordinate_ranked_refresh(
+                connection,
+                remaining_seconds=lambda: _remaining_search_seconds(args),
+            )
+        )
+        if coordination.warning is not None:
+            search_warnings.append(coordination.warning)
+        connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        next(
+            connection.execute(
+                """
+                SELECT current_corpus_generation
+                FROM cc_search_chats.corpus_state
+                WHERE singleton
+                """
+            )
+        )
         retrieval_mode = "exhaustive_literal" if args.exhaustive else "literal"
         progress_stream.emit("retrieve", "running")
         if args.exhaustive:
@@ -1671,24 +1874,12 @@ def _handle_postgres(
         semantic_state = cast(dict[str, object], envelope["semantic"])
         stale_reasons = cast(list[str], envelope["stale_reasons"])
         if semantic_state["fresh"] is not True:
-            stale_reasons.append("semantic_revision_stale")
+            stale_reasons.append("semantic_build_unavailable")
             if retrieval_mode == "hybrid":
-                envelope["retrieval_mode"] = "partial_hybrid"
+                envelope["retrieval_mode"] = "literal_fallback"
         connection.execute("COMMIT")
 
-        launch_budget = (
-            _AUTO_REFRESH_LAUNCH_MAX_SECONDS
-            if deadline is None
-            else min(
-                _AUTO_REFRESH_LAUNCH_MAX_SECONDS,
-                deadline - monotonic() - _SEARCH_RENDER_RESERVE_SECONDS,
-            )
-        )
-        background = (
-            _request_auto_refresh(connection, timeout_seconds=launch_budget)
-            if launch_budget > 0
-            else auto_refresh_status(connection)
-        )
+        background = coordination.background
         envelope["background_refresh"] = {
             "request_id": background.request_id,
             "state": background.state,
@@ -1697,13 +1888,6 @@ def _handle_postgres(
         }
         if background.state == "failed":
             stale_reasons.append("background_refresh_failed")
-            warnings = cast(list[object], envelope["warnings"])
-            warnings.append(
-                {
-                    "code": "auto_refresh_unavailable",
-                    "detail": background.last_error,
-                }
-            )
         envelope["elapsed_ms"] = round((monotonic() - args.request_started) * 1000)
         progress_stream.terminal(envelope)
         if args.json:
@@ -2304,9 +2488,6 @@ def main(*, request_started: float | None = None) -> None:
             parser.error("--exhaustive requires --literal")
         if not args.exhaustive and not 1 <= args.limit <= 200:
             parser.error("--limit must be between 1 and 200 for ranked search")
-    if args.command == "index" and args.background_refresh and not args.literal_only:
-        parser.error("--background-refresh requires --literal-only")
-
     postgres_commands = {
         "index",
         "search",

@@ -25,8 +25,10 @@ from cc_search_chats.storage.postgresql.index import (
     search_messages,
 )
 from cc_search_chats.storage.postgresql.refresh import (
+    CorpusIndexResult,
     RefreshProgress,
     RefreshResult,
+    index_corpus,
     refresh_native_sources,
 )
 from cc_search_chats.storage.postgresql.resolution import (
@@ -46,6 +48,7 @@ __all__ = [
     "ExhaustiveCursor",
     "ExhaustivePage",
     "ExactResolution",
+    "CorpusIndexResult",
     "SearchHit",
     "MessageResolution",
     "RefreshResult",
@@ -61,6 +64,7 @@ __all__ = [
     "exhaustive_search_page",
     "hybrid_search",
     "index_embeddings",
+    "index_corpus",
     "list_sessions",
     "migrate",
     "refresh_native_sources",

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TypeIs
 
 import psycopg
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from cc_search_chats.core.canonicalization import (
@@ -53,12 +54,20 @@ from cc_search_chats.providers.source_discovery import (
     read_bounded_jsonl,
     source_root_id,
 )
+from cc_search_chats.storage.postgresql.auto_refresh import (
+    mark_auto_refresh_complete,
+)
 from cc_search_chats.storage.postgresql.guardrails import (
     INDEX_NOTIFY_CHANNEL,
     INDEX_QUEUE_LOCK,
     DatabaseHeartbeat,
 )
 from cc_search_chats.storage.postgresql.migrations import require_current_schema
+from cc_search_chats.storage.postgresql.semantic import (
+    CandidateSemanticBuild,
+    Chunker,
+    prepare_candidate_semantics,
+)
 
 _PARSER_STATE_VERSIONS = {
     Provider.CLAUDE: 2,
@@ -103,7 +112,7 @@ _UNSUPPORTED_CODEX_DIAGNOSTICS = {
 class RefreshResult:
     """Committed refresh state and bounded current-source observations."""
 
-    revision_id: int
+    corpus_generation: int
     source_count: int
     message_count: int
     changed_source_count: int = 0
@@ -118,6 +127,29 @@ class RefreshResult:
     blocked_source_count: int = 0
     transient_failure_source_count: int = 0
     run_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusIndexResult:
+    """One jointly published literal and semantic corpus."""
+
+    corpus_generation: int
+    semantic_build: int
+    source_count: int
+    message_count: int
+    embedding_count: int
+    changed_source_count: int
+    failed_source_count: int
+    read_source_count: int
+    removed_source_count: int
+    advanced_source_count: int
+    pending_bytes: int
+    metadata_checked_source_count: int
+    attempted_source_count: int
+    attempted_content_bytes: int
+    blocked_source_count: int
+    transient_failure_source_count: int
+    run_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1554,6 +1586,641 @@ def _message_conflict(connection: psycopg.Connection) -> str | None:
     return current[0] if current is not None else None
 
 
+def _create_candidate_projection(connection: psycopg.Connection) -> None:
+    """Materialize affected final rows while leaving unchanged rows by reference."""
+    for relation in (
+        "refresh_candidate_observation",
+        "refresh_candidate_message",
+        "refresh_candidate_alias",
+        "refresh_affected_message",
+    ):
+        connection.execute(
+            sql.SQL("DROP TABLE IF EXISTS pg_temp.{}").format(sql.Identifier(relation))
+        )
+    connection.execute(
+        """
+        CREATE TEMP TABLE refresh_affected_message (
+            provider text NOT NULL,
+            source_session_id text NOT NULL,
+            logical_message_id text NOT NULL,
+            content_class text NOT NULL,
+            PRIMARY KEY (
+                provider, source_session_id, logical_message_id, content_class
+            )
+        ) ON COMMIT PRESERVE ROWS
+        """
+    )
+    _finish_candidate_projection(connection)
+
+
+def _publish_coherent_candidate(
+    connection: psycopg.Connection,
+    *,
+    corpus_generation: int,
+    semantic: CandidateSemanticBuild,
+    run_id: int,
+    roots: tuple[ConfiguredSourceRoot, ...],
+    failed_source_count: int,
+    read_source_count: int,
+    removed_source_count: int,
+    advanced_source_count: int,
+    metadata_checked_source_count: int,
+    attempted_source_count: int,
+    attempted_content_bytes: int,
+    blocked_source_count: int,
+    transient_failure_source_count: int,
+    diagnostics: tuple[dict[str, object], ...],
+    automatic_request_id: int | None,
+) -> None:
+    """Publish the literal delta and prepared semantic build in one transaction."""
+    with connection.transaction():
+        _sync_roots(connection, roots)
+        connection.execute(
+            """
+            DELETE FROM cc_search_chats.physical_alias_current AS alias
+            USING pg_temp.refresh_affected_message AS affected
+            WHERE (alias.provider, alias.source_session_id,
+                   alias.logical_message_id, alias.content_class) =
+                  (affected.provider, affected.source_session_id,
+                   affected.logical_message_id, affected.content_class)
+            """
+        )
+        connection.execute(
+            """
+            DELETE FROM cc_search_chats.message_current AS message
+            USING pg_temp.refresh_affected_message AS affected
+            WHERE (message.provider, message.source_session_id,
+                   message.logical_message_id, message.content_class) =
+                  (affected.provider, affected.source_session_id,
+                   affected.logical_message_id, affected.content_class)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO cc_search_chats.message_current (
+                provider, source_session_id, logical_message_id,
+                canonical_locator, timestamp_text, role, session_kind,
+                conversation_epoch, content_class, prose_content, repository,
+                cwd, submitted_by, embedding_input_digest
+            )
+            SELECT provider, source_session_id, logical_message_id,
+                   canonical_locator, timestamp_text, role, session_kind,
+                   conversation_epoch, content_class, prose_content, repository,
+                   cwd, submitted_by, embedding_input_digest
+            FROM pg_temp.refresh_candidate_message
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO cc_search_chats.physical_alias_current (
+                provider, source_session_id, logical_message_id, content_class,
+                source_root_id, locator, source_file_relative, record_ordinal,
+                source_line, source_byte_offset, raw_byte_length, source_digest
+            )
+            SELECT provider, source_session_id, logical_message_id, content_class,
+                   source_root_id, locator, source_file_relative, record_ordinal,
+                   source_line, source_byte_offset, raw_byte_length, source_digest
+            FROM pg_temp.refresh_candidate_alias
+            """
+        )
+        connection.execute(
+            """
+            DELETE FROM cc_search_chats.source_file_current AS current
+            USING pg_temp.refresh_stage_removed AS removed
+            WHERE (current.source_root_id, current.source_file_relative) =
+                  (removed.source_root_id, removed.source_file_relative)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO cc_search_chats.source_file_current (
+                source_root_id, source_file_relative, file_device, file_inode,
+                observed_size, observed_mtime_ns, complete_byte_offset,
+                next_record_ordinal, next_source_line, parser_state_version,
+                parser_state, source_status, pending_bytes,
+                updated_corpus_generation
+            )
+            SELECT source_root_id, source_file_relative, file_device, file_inode,
+                   observed_size, observed_mtime_ns, complete_byte_offset,
+                   next_record_ordinal, next_source_line, parser_state_version,
+                   parser_state, source_status, pending_bytes, %s
+            FROM pg_temp.refresh_stage_source
+            ON CONFLICT (source_root_id, source_file_relative) DO UPDATE SET
+                file_device = EXCLUDED.file_device,
+                file_inode = EXCLUDED.file_inode,
+                observed_size = EXCLUDED.observed_size,
+                observed_mtime_ns = EXCLUDED.observed_mtime_ns,
+                complete_byte_offset = EXCLUDED.complete_byte_offset,
+                next_record_ordinal = EXCLUDED.next_record_ordinal,
+                next_source_line = EXCLUDED.next_source_line,
+                parser_state_version = EXCLUDED.parser_state_version,
+                parser_state = EXCLUDED.parser_state,
+                source_status = EXCLUDED.source_status,
+                pending_bytes = EXCLUDED.pending_bytes,
+                updated_corpus_generation =
+                    EXCLUDED.updated_corpus_generation
+            """,
+            (corpus_generation,),
+        )
+        connection.execute(
+            """
+            DELETE FROM cc_search_chats.source_failure_current AS failure
+            USING (
+                SELECT source_root_id, source_file_relative
+                FROM pg_temp.refresh_stage_source
+                UNION ALL
+                SELECT source_root_id, source_file_relative
+                FROM pg_temp.refresh_stage_removed
+            ) AS resolved
+            WHERE (failure.source_root_id, failure.source_file_relative) =
+                  (resolved.source_root_id, resolved.source_file_relative)
+            """
+        )
+        connection.execute(
+            """
+            DELETE FROM cc_search_chats.source_root_current
+            WHERE NOT (source_root_id = ANY(%s::text[]))
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM cc_search_chats.source_file_current AS source
+                  WHERE source.source_root_id =
+                        source_root_current.source_root_id
+              )
+            """,
+            ([root.source_root_id for root in roots],),
+        )
+        connection.execute(
+            """
+            DELETE FROM cc_search_chats.semantic_chunk_current AS chunk
+            USING pg_temp.semantic_candidate_message AS replacement
+            WHERE (chunk.provider, chunk.source_session_id,
+                   chunk.logical_message_id, chunk.content_class) =
+                  (replacement.provider, replacement.source_session_id,
+                   replacement.logical_message_id, replacement.content_class)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO cc_search_chats.semantic_chunk_current
+            SELECT * FROM pg_temp.semantic_candidate_chunk
+            """
+        )
+        message_count, alias_count, source_watermarks = next(
+            connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM cc_search_chats.message_current),
+                  (SELECT count(*)
+                   FROM cc_search_chats.physical_alias_current),
+                  COALESCE((
+                    SELECT jsonb_object_agg(
+                        source_root_id || ':' || source_file_relative,
+                        jsonb_build_object(
+                            'observed_size', observed_size,
+                            'complete_byte_offset', complete_byte_offset,
+                            'next_record_ordinal', next_record_ordinal,
+                            'pending_bytes', pending_bytes
+                        )
+                        ORDER BY source_root_id, source_file_relative
+                    )
+                    FROM cc_search_chats.source_file_current
+                  ), '{}'::jsonb)
+                """
+            )
+        )
+        eligible_messages, chunked_messages, eligible_chunks, mapped_chunks = next(
+            connection.execute(
+                """
+                SELECT
+                  (SELECT count(*)
+                   FROM cc_search_chats.message_current
+                   WHERE content_class = 'prose'
+                     AND prose_content ~ '[^[:space:]]'),
+                  (SELECT count(DISTINCT (
+                       chunk.provider, chunk.source_session_id,
+                       chunk.logical_message_id, chunk.content_class
+                   ))
+                   FROM cc_search_chats.semantic_chunk_current AS chunk
+                   JOIN cc_search_chats.message_current AS message
+                     USING (provider, source_session_id,
+                            logical_message_id, content_class)
+                   WHERE chunk.profile_id =
+                         'nemotron-3-embed-8b-bf16:chunks-v1'
+                     AND chunk.chunker_id =
+                         'nemotron-token-chunks-768-1024-96:v1'
+                     AND chunk.source_text_digest =
+                         message.embedding_input_digest),
+                  (SELECT count(*)
+                   FROM cc_search_chats.semantic_chunk_current AS chunk
+                   JOIN cc_search_chats.message_current AS message
+                     USING (provider, source_session_id,
+                            logical_message_id, content_class)
+                   WHERE chunk.profile_id =
+                         'nemotron-3-embed-8b-bf16:chunks-v1'
+                     AND chunk.chunker_id =
+                         'nemotron-token-chunks-768-1024-96:v1'
+                     AND chunk.source_text_digest =
+                         message.embedding_input_digest),
+                  (SELECT count(*)
+                   FROM cc_search_chats.semantic_chunk_current AS chunk
+                   JOIN cc_search_chats.message_current AS message
+                     USING (provider, source_session_id,
+                            logical_message_id, content_class)
+                   JOIN cc_search_chats.embedding_value AS value
+                     ON (value.profile_id, value.input_digest) =
+                        (chunk.profile_id, chunk.input_digest)
+                   WHERE chunk.profile_id =
+                         'nemotron-3-embed-8b-bf16:chunks-v1'
+                     AND chunk.chunker_id =
+                         'nemotron-token-chunks-768-1024-96:v1'
+                     AND chunk.source_text_digest =
+                         message.embedding_input_digest)
+                """
+            )
+        )
+        if (
+            eligible_messages != chunked_messages
+            or eligible_chunks != mapped_chunks
+            or eligible_chunks != semantic.embedded_count
+        ):
+            raise ValueError(
+                "joint corpus publication is incomplete: "
+                f"messages={chunked_messages}/{eligible_messages}, "
+                f"mapped={mapped_chunks}/{eligible_chunks}, "
+                f"expected={semantic.embedded_count}"
+            )
+        connection.execute(
+            """
+            UPDATE cc_search_chats.semantic_build
+            SET status = 'complete', completed_at = now(),
+                embedded_count = %s, failure = NULL, phase = 'done',
+                heartbeat_at = now(), completed_units = %s, total_units = %s
+            WHERE semantic_build = %s
+              AND corpus_generation = %s
+              AND status = 'building'
+            """,
+            (
+                semantic.embedded_count,
+                semantic.embedded_count,
+                semantic.embedded_count,
+                semantic.semantic_build,
+                corpus_generation,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE cc_search_chats.corpus_generation
+            SET status = 'complete', completed_at = now(),
+                message_count = %s, alias_count = %s,
+                source_watermarks = %s, failure = NULL,
+                semantic_build = %s
+            WHERE corpus_generation = %s AND status = 'building'
+            """,
+            (
+                message_count,
+                alias_count,
+                Jsonb(source_watermarks),
+                semantic.semantic_build,
+                corpus_generation,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE cc_search_chats.corpus_state
+            SET current_corpus_generation = %s
+            WHERE singleton
+            """,
+            (corpus_generation,),
+        )
+        connection.execute(
+            """
+            UPDATE cc_search_chats.refresh_run
+            SET status = %s, completed_at = now(), corpus_generation = %s,
+                failed_source_count = %s,
+                read_source_count = %s,
+                removed_source_count = %s,
+                advanced_source_count = %s,
+                metadata_checked_source_count = %s,
+                attempted_source_count = %s,
+                attempted_content_bytes = %s,
+                blocked_source_count = %s,
+                transient_failure_source_count = %s,
+                diagnostics = %s, phase = 'done', heartbeat_at = now(),
+                completed_units = total_units
+            WHERE run_id = %s
+            """,
+            (
+                "partial" if failed_source_count else "complete",
+                corpus_generation,
+                failed_source_count,
+                read_source_count,
+                removed_source_count,
+                advanced_source_count,
+                metadata_checked_source_count,
+                attempted_source_count,
+                attempted_content_bytes,
+                blocked_source_count,
+                transient_failure_source_count,
+                Jsonb(list(diagnostics)),
+                run_id,
+            ),
+        )
+        if automatic_request_id is not None:
+            mark_auto_refresh_complete(
+                connection,
+                automatic_request_id,
+                refresh_run_id=run_id,
+            )
+        connection.execute(
+            "SELECT pg_notify(%s, %s)",
+            (INDEX_NOTIFY_CHANNEL, str(corpus_generation)),
+        )
+        connection.execute(
+            """
+            DELETE FROM cc_search_chats.embedding_value AS value
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM cc_search_chats.semantic_chunk_current AS chunk
+                WHERE (chunk.profile_id, chunk.input_digest) =
+                      (value.profile_id, value.input_digest)
+            )
+            """
+        )
+
+
+def _finish_candidate_projection(connection: psycopg.Connection) -> None:
+    connection.execute(
+        """
+        INSERT INTO pg_temp.refresh_affected_message
+        SELECT DISTINCT alias.provider, alias.source_session_id,
+               alias.logical_message_id, alias.content_class
+        FROM cc_search_chats.physical_alias_current AS alias
+        WHERE EXISTS (
+            SELECT 1
+            FROM pg_temp.refresh_stage_source AS source
+            WHERE source.disposition = 'replace'
+              AND (source.source_root_id, source.source_file_relative) =
+                  (alias.source_root_id, alias.source_file_relative)
+        ) OR EXISTS (
+            SELECT 1
+            FROM pg_temp.refresh_stage_removed AS removed
+            WHERE (removed.source_root_id, removed.source_file_relative) =
+                  (alias.source_root_id, alias.source_file_relative)
+        )
+        UNION
+        SELECT DISTINCT staged.provider, staged.source_session_id,
+               staged.logical_message_id, staged.content_class
+        FROM pg_temp.refresh_stage_message AS staged
+        """
+    )
+    _finish_candidate_projection_rows(connection)
+
+
+def _record_literal_candidate(
+    connection: psycopg.Connection,
+    *,
+    run_id: int,
+    roots: tuple[ConfiguredSourceRoot, ...],
+    failed_source_count: int,
+    read_source_count: int,
+    removed_source_count: int,
+    advanced_source_count: int,
+    metadata_checked_source_count: int,
+    attempted_source_count: int,
+    attempted_content_bytes: int,
+    blocked_source_count: int,
+    transient_failure_source_count: int,
+    diagnostics: tuple[dict[str, object], ...],
+) -> int:
+    """Complete a literal diagnostic without mutating selected corpus state."""
+    del roots
+    current_generation = next(
+        connection.execute(
+            "SELECT current_corpus_generation "
+            "FROM cc_search_chats.corpus_state WHERE singleton"
+        )
+    )[0]
+    connection.execute(
+        """
+        UPDATE cc_search_chats.refresh_run
+        SET status = %s, completed_at = now(),
+            failed_source_count = %s,
+            read_source_count = %s,
+            removed_source_count = %s,
+            advanced_source_count = %s,
+            metadata_checked_source_count = %s,
+            attempted_source_count = %s,
+            attempted_content_bytes = %s,
+            blocked_source_count = %s,
+            transient_failure_source_count = %s,
+            diagnostics = %s || jsonb_build_array(jsonb_build_object(
+                'code', 'literal_candidate_not_published',
+                'detail', 'run composed index to publish a searchable corpus'
+            )),
+            phase = 'done', heartbeat_at = now(),
+            completed_units = total_units
+        WHERE run_id = %s
+        """,
+        (
+            "partial" if failed_source_count else "complete",
+            failed_source_count,
+            read_source_count,
+            removed_source_count,
+            advanced_source_count,
+            metadata_checked_source_count,
+            attempted_source_count,
+            attempted_content_bytes,
+            blocked_source_count,
+            transient_failure_source_count,
+            Jsonb(list(diagnostics)),
+            run_id,
+        ),
+    )
+    return 0 if current_generation is None else current_generation
+
+
+def _finish_candidate_projection_rows(connection: psycopg.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TEMP TABLE refresh_candidate_alias (
+            provider text NOT NULL,
+            source_session_id text NOT NULL,
+            logical_message_id text NOT NULL,
+            content_class text NOT NULL,
+            source_root_id text NOT NULL,
+            locator text NOT NULL,
+            source_file_relative text NOT NULL,
+            record_ordinal bigint NOT NULL,
+            source_line bigint NOT NULL,
+            source_byte_offset bigint NOT NULL,
+            raw_byte_length bigint NOT NULL,
+            source_digest text NOT NULL,
+            from_stage boolean NOT NULL,
+            PRIMARY KEY (
+                source_root_id, source_file_relative,
+                record_ordinal, content_class
+            )
+        ) ON COMMIT PRESERVE ROWS
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO pg_temp.refresh_candidate_alias
+        SELECT alias.provider, alias.source_session_id,
+               alias.logical_message_id, alias.content_class,
+               alias.source_root_id, alias.locator,
+               alias.source_file_relative, alias.record_ordinal,
+               alias.source_line, alias.source_byte_offset,
+               alias.raw_byte_length, alias.source_digest, false
+        FROM cc_search_chats.physical_alias_current AS alias
+        JOIN pg_temp.refresh_affected_message AS affected
+          USING (provider, source_session_id, logical_message_id, content_class)
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM pg_temp.refresh_stage_source AS source
+            WHERE source.disposition = 'replace'
+              AND (source.source_root_id, source.source_file_relative) =
+                  (alias.source_root_id, alias.source_file_relative)
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM pg_temp.refresh_stage_removed AS removed
+            WHERE (removed.source_root_id, removed.source_file_relative) =
+                  (alias.source_root_id, alias.source_file_relative)
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO pg_temp.refresh_candidate_alias
+        SELECT staged.provider, staged.source_session_id,
+               staged.logical_message_id, staged.content_class,
+               staged.source_root_id, staged.alias_locator,
+               staged.source_file_relative, staged.record_ordinal,
+               staged.source_line, staged.source_byte_offset,
+               staged.raw_byte_length, staged.source_digest, true
+        FROM pg_temp.refresh_stage_message AS staged
+        ON CONFLICT (
+            source_root_id, source_file_relative,
+            record_ordinal, content_class
+        ) DO UPDATE SET
+            provider = EXCLUDED.provider,
+            source_session_id = EXCLUDED.source_session_id,
+            logical_message_id = EXCLUDED.logical_message_id,
+            locator = EXCLUDED.locator,
+            source_line = EXCLUDED.source_line,
+            source_byte_offset = EXCLUDED.source_byte_offset,
+            raw_byte_length = EXCLUDED.raw_byte_length,
+            source_digest = EXCLUDED.source_digest,
+            from_stage = true
+        """
+    )
+    connection.execute(
+        """
+        CREATE TEMP TABLE refresh_candidate_observation (
+            provider text NOT NULL,
+            source_session_id text NOT NULL,
+            logical_message_id text NOT NULL,
+            canonical_locator text NOT NULL,
+            timestamp_text text NOT NULL,
+            role text NOT NULL,
+            session_kind text NOT NULL,
+            conversation_epoch integer NOT NULL,
+            content_class text NOT NULL,
+            prose_content text NOT NULL,
+            repository text,
+            cwd text,
+            submitted_by text NOT NULL,
+            embedding_input_digest text NOT NULL,
+            source_root_id text NOT NULL,
+            source_file_relative text NOT NULL,
+            record_ordinal bigint NOT NULL
+        ) ON COMMIT PRESERVE ROWS
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO pg_temp.refresh_candidate_observation
+        SELECT message.provider, message.source_session_id,
+               message.logical_message_id, message.canonical_locator,
+               message.timestamp_text, message.role, message.session_kind,
+               message.conversation_epoch, message.content_class,
+               message.prose_content, message.repository, message.cwd,
+               message.submitted_by, message.embedding_input_digest,
+               alias.source_root_id, alias.source_file_relative,
+               alias.record_ordinal
+        FROM pg_temp.refresh_candidate_alias AS alias
+        JOIN cc_search_chats.message_current AS message
+          USING (provider, source_session_id, logical_message_id, content_class)
+        WHERE NOT alias.from_stage
+        UNION ALL
+        SELECT staged.provider, staged.source_session_id,
+               staged.logical_message_id, staged.canonical_locator,
+               staged.timestamp_text, staged.role, staged.session_kind,
+               staged.conversation_epoch, staged.content_class,
+               staged.prose_content, staged.repository, staged.cwd,
+               staged.submitted_by, staged.embedding_input_digest,
+               staged.source_root_id, staged.source_file_relative,
+               staged.record_ordinal
+        FROM pg_temp.refresh_candidate_alias AS alias
+        JOIN pg_temp.refresh_stage_message AS staged
+          ON (staged.source_root_id, staged.source_file_relative,
+              staged.record_ordinal, staged.content_class) =
+             (alias.source_root_id, alias.source_file_relative,
+              alias.record_ordinal, alias.content_class)
+        WHERE alias.from_stage
+        """
+    )
+    conflict = next(
+        connection.execute(
+            """
+            SELECT min(canonical_locator)
+            FROM pg_temp.refresh_candidate_observation
+            GROUP BY provider, source_session_id,
+                     logical_message_id, content_class
+            HAVING count(DISTINCT jsonb_build_array(
+                canonical_locator, timestamp_text, role, session_kind,
+                conversation_epoch, prose_content, repository,
+                submitted_by, embedding_input_digest
+            )) > 1
+            LIMIT 1
+            """
+        ),
+        None,
+    )
+    if conflict is not None:
+        raise ValueError(f"conflicting observations for {conflict[0]}")
+    connection.execute(
+        """
+        CREATE TEMP TABLE refresh_candidate_message
+        (LIKE cc_search_chats.message_current
+         EXCLUDING INDEXES EXCLUDING GENERATED EXCLUDING CONSTRAINTS)
+        ON COMMIT PRESERVE ROWS
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO pg_temp.refresh_candidate_message (
+            provider, source_session_id, logical_message_id,
+            canonical_locator, timestamp_text, role, session_kind,
+            conversation_epoch, content_class, prose_content, repository,
+            cwd, submitted_by, embedding_input_digest
+        )
+        SELECT DISTINCT ON (
+            provider, source_session_id, logical_message_id, content_class
+        )
+            provider, source_session_id, logical_message_id,
+            canonical_locator, timestamp_text, role, session_kind,
+            conversation_epoch, content_class, prose_content, repository,
+            cwd, submitted_by, embedding_input_digest
+        FROM pg_temp.refresh_candidate_observation
+        ORDER BY provider, source_session_id, logical_message_id,
+                 content_class, source_root_id,
+                 source_file_relative, record_ordinal
+        """
+    )
+
+
 def _publish_staged_refresh(
     connection: psycopg.Connection,
     *,
@@ -1887,7 +2554,7 @@ def _current_result_values(
     return next(
         connection.execute(
             """
-            SELECT state.current_revision_id,
+            SELECT state.current_corpus_generation,
                    (SELECT count(*) FROM cc_search_chats.message_current)
             FROM cc_search_chats.corpus_state AS state
             WHERE singleton
@@ -1921,6 +2588,8 @@ def refresh_native_sources(
     codex_root: Path | None = None,
     progress: ProgressCallback | None = None,
     force_retry: bool = False,
+    _candidate_publisher: Callable[..., int] | None = None,
+    _require_publication: bool = False,
 ) -> RefreshResult:
     """Refresh changed native sources and atomically publish their deltas."""
     roots = _resolved_roots(
@@ -1970,9 +2639,14 @@ def refresh_native_sources(
                 complete_roots,
             )
         current_revision, current_messages = _current_result_values(connection)
-        if not plans and not removed_keys and not preflight_failures:
+        if (
+            not plans
+            and not removed_keys
+            and not preflight_failures
+            and not _require_publication
+        ):
             if current_revision is None:
-                current_revision = _empty_initial_revision(connection)
+                current_revision = 0
             blocked_source_count = sum(
                 failed_observations[value.key].failure_class == "deterministic"
                 for value in blocked_observations
@@ -1982,7 +2656,7 @@ def refresh_native_sources(
                 for value in blocked_observations
             )
             return RefreshResult(
-                revision_id=current_revision,
+                corpus_generation=current_revision,
                 source_count=len(discovered_keys),
                 message_count=current_messages,
                 failed_source_count=len(blocked_observations),
@@ -2103,14 +2777,17 @@ def refresh_native_sources(
                 )
             )
             successful_changes = read_source_count + removed_source_count
-            if successful_changes:
+            if successful_changes or (
+                _require_publication and failed_source_count == 0
+            ):
                 _update_run_progress(
                     connection,
                     run_id,
                     phase="fts_commit",
                     completed_units=len(plans) + len(removed_keys),
                 )
-                revision_id = _publish_staged_refresh(
+                publisher = _candidate_publisher or _record_literal_candidate
+                revision_id = publisher(
                     connection,
                     run_id=run_id,
                     roots=roots,
@@ -2126,16 +2803,12 @@ def refresh_native_sources(
                     diagnostics=tuple(diagnostics),
                 )
             else:
-                revision_id = (
-                    current_revision
-                    if current_revision is not None
-                    else _empty_initial_revision(connection)
-                )
+                revision_id = current_revision if current_revision is not None else 0
                 connection.execute(
                     """
                     UPDATE cc_search_chats.refresh_run
                     SET status = 'failed', completed_at = now(),
-                        corpus_revision_id = %s, failed_source_count = %s,
+                        corpus_generation = NULL, failed_source_count = %s,
                         metadata_checked_source_count = %s,
                         attempted_source_count = %s,
                         attempted_content_bytes = %s,
@@ -2146,7 +2819,6 @@ def refresh_native_sources(
                     WHERE run_id = %s
                     """,
                     (
-                        revision_id,
                         failed_source_count,
                         len(discovered_keys),
                         len(plans),
@@ -2160,7 +2832,7 @@ def refresh_native_sources(
             _prune_refresh_runs(connection)
             _revision, message_count = _current_result_values(connection)
             return RefreshResult(
-                revision_id=revision_id,
+                corpus_generation=revision_id,
                 source_count=len(discovered_keys),
                 message_count=message_count,
                 changed_source_count=changed_source_count,
@@ -2191,9 +2863,192 @@ def refresh_native_sources(
             raise
         finally:
             heartbeat.stop()
-            connection.execute("DROP TABLE IF EXISTS pg_temp.refresh_stage_message")
-            connection.execute(
-                "DROP TABLE IF EXISTS pg_temp.refresh_stage_message_batch"
+            for relation in (
+                "semantic_embedding_queue",
+                "semantic_candidate_chunk",
+                "semantic_candidate_message",
+                "refresh_candidate_observation",
+                "refresh_candidate_message",
+                "refresh_candidate_alias",
+                "refresh_affected_message",
+                "refresh_stage_message",
+                "refresh_stage_message_batch",
+                "refresh_stage_source",
+                "refresh_stage_removed",
+            ):
+                connection.execute(f"DROP TABLE IF EXISTS pg_temp.{relation}")
+
+
+def _selected_coherent_build(
+    connection: psycopg.Connection,
+) -> tuple[int, int, int] | None:
+    return next(
+        connection.execute(
+            """
+            SELECT generation.corpus_generation, build.semantic_build,
+                   build.embedded_count
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            JOIN cc_search_chats.semantic_build AS build
+              ON (build.semantic_build, build.corpus_generation) =
+                 (generation.semantic_build, generation.corpus_generation)
+            WHERE state.singleton
+              AND generation.status = 'complete'
+              AND generation.completed_at IS NOT NULL
+              AND build.status = 'complete'
+              AND build.completed_at IS NOT NULL
+            """
+        ),
+        None,
+    )
+
+
+def index_corpus(
+    connection: psycopg.Connection,
+    embed: Callable[[Sequence[str]], list[list[float]]],
+    *,
+    chunker: Chunker,
+    source_roots: Sequence[ConfiguredSourceRoot] | None = None,
+    claude_root: Path | None = None,
+    codex_root: Path | None = None,
+    progress: ProgressCallback | None = None,
+    embedding_progress: Callable[[int, int], None] | None = None,
+    batch_size: int = 4,
+    force_retry: bool = False,
+    automatic_request_id: int | None = None,
+) -> CorpusIndexResult:
+    """Prepare and jointly publish one coherent literal and semantic corpus."""
+    require_current_schema(connection)
+    selected_before = _selected_coherent_build(connection)
+    prepared: CandidateSemanticBuild | None = None
+
+    def publish_candidate(
+        candidate_connection: psycopg.Connection,
+        *,
+        run_id: int,
+        roots: tuple[ConfiguredSourceRoot, ...],
+        failed_source_count: int,
+        read_source_count: int,
+        removed_source_count: int,
+        advanced_source_count: int,
+        metadata_checked_source_count: int,
+        attempted_source_count: int,
+        attempted_content_bytes: int,
+        blocked_source_count: int,
+        transient_failure_source_count: int,
+        diagnostics: tuple[dict[str, object], ...],
+    ) -> int:
+        nonlocal prepared
+        corpus_generation = next(
+            candidate_connection.execute(
+                """
+                INSERT INTO cc_search_chats.corpus_generation (status)
+                VALUES ('building')
+                RETURNING corpus_generation
+                """
             )
-            connection.execute("DROP TABLE IF EXISTS pg_temp.refresh_stage_source")
-            connection.execute("DROP TABLE IF EXISTS pg_temp.refresh_stage_removed")
+        )[0]
+        try:
+            _create_candidate_projection(candidate_connection)
+            prepared = prepare_candidate_semantics(
+                candidate_connection,
+                corpus_generation,
+                embed,
+                chunker=chunker,
+                batch_size=batch_size,
+                progress=embedding_progress,
+            )
+            _publish_coherent_candidate(
+                candidate_connection,
+                corpus_generation=corpus_generation,
+                semantic=prepared,
+                run_id=run_id,
+                roots=roots,
+                failed_source_count=failed_source_count,
+                read_source_count=read_source_count,
+                removed_source_count=removed_source_count,
+                advanced_source_count=advanced_source_count,
+                metadata_checked_source_count=metadata_checked_source_count,
+                attempted_source_count=attempted_source_count,
+                attempted_content_bytes=attempted_content_bytes,
+                blocked_source_count=blocked_source_count,
+                transient_failure_source_count=transient_failure_source_count,
+                diagnostics=diagnostics,
+                automatic_request_id=automatic_request_id,
+            )
+        except Exception as error:
+            if prepared is not None:
+                candidate_connection.execute(
+                    """
+                    UPDATE cc_search_chats.semantic_build
+                    SET status = 'failed', completed_at = now(),
+                        heartbeat_at = now(),
+                        failure = jsonb_build_object(
+                            'code', 'coherent_corpus_publication_failed',
+                            'phase', phase,
+                            'error', %s::text
+                        )
+                    WHERE semantic_build = %s AND status = 'building'
+                    """,
+                    (str(error), prepared.semantic_build),
+                )
+            candidate_connection.execute(
+                """
+                UPDATE cc_search_chats.corpus_generation
+                SET status = 'failed', completed_at = now(),
+                    failure = jsonb_build_object(
+                        'code', 'coherent_corpus_candidate_failed',
+                        'error', %s::text
+                    )
+                WHERE corpus_generation = %s AND status = 'building'
+                """,
+                (str(error), corpus_generation),
+            )
+            raise
+        return corpus_generation
+
+    refresh = refresh_native_sources(
+        connection,
+        source_roots=source_roots,
+        claude_root=claude_root,
+        codex_root=codex_root,
+        progress=progress,
+        force_retry=force_retry,
+        _candidate_publisher=publish_candidate,
+        _require_publication=selected_before is None,
+    )
+    selected_after = _selected_coherent_build(connection)
+    if selected_after is None:
+        raise ValueError("coherent corpus publication did not select a build")
+    corpus_generation, semantic_build, embedded_count = selected_after
+    if prepared is not None and (
+        corpus_generation,
+        semantic_build,
+        embedded_count,
+    ) != (
+        refresh.corpus_generation,
+        prepared.semantic_build,
+        prepared.embedded_count,
+    ):
+        raise ValueError("published corpus does not match its prepared candidate")
+    return CorpusIndexResult(
+        corpus_generation=corpus_generation,
+        semantic_build=semantic_build,
+        source_count=refresh.source_count,
+        message_count=refresh.message_count,
+        embedding_count=embedded_count,
+        changed_source_count=refresh.changed_source_count,
+        failed_source_count=refresh.failed_source_count,
+        read_source_count=refresh.read_source_count,
+        removed_source_count=refresh.removed_source_count,
+        advanced_source_count=refresh.advanced_source_count,
+        pending_bytes=refresh.pending_bytes,
+        metadata_checked_source_count=refresh.metadata_checked_source_count,
+        attempted_source_count=refresh.attempted_source_count,
+        attempted_content_bytes=refresh.attempted_content_bytes,
+        blocked_source_count=refresh.blocked_source_count,
+        transient_failure_source_count=refresh.transient_failure_source_count,
+        run_id=refresh.run_id,
+    )

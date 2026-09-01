@@ -40,6 +40,14 @@ class HybridHit:
     component_depth: int
 
 
+@dataclass(frozen=True, slots=True)
+class CandidateSemanticBuild:
+    """Prepared semantic state that remains invisible until joint publication."""
+
+    semantic_build: int
+    embedded_count: int
+
+
 def _vector(value: Sequence[float]) -> str:
     if len(value) != _DIMENSIONS:
         raise ValueError(f"embedding must contain {_DIMENSIONS} dimensions")
@@ -55,7 +63,7 @@ def _vector(value: Sequence[float]) -> str:
 def _current_revision(connection: psycopg.Connection) -> int:
     revision = next(
         connection.execute(
-            "SELECT current_revision_id FROM cc_search_chats.corpus_state "
+            "SELECT current_corpus_generation FROM cc_search_chats.corpus_state "
             "WHERE singleton"
         )
     )[0]
@@ -171,20 +179,505 @@ def _selected_revision(
     row = next(
         connection.execute(
             """
-            SELECT revision.semantic_revision_id
-            FROM cc_search_chats.semantic_state AS state
-            JOIN cc_search_chats.semantic_revision AS revision
-              ON revision.semantic_revision_id = state.current_semantic_revision_id
-            WHERE state.singleton
-              AND revision.corpus_revision_id = %s
-              AND revision.profile_id = %s
-              AND revision.status = 'complete'
+            SELECT build.semantic_build
+            FROM cc_search_chats.corpus_generation AS generation
+            JOIN cc_search_chats.semantic_build AS build
+              ON (build.semantic_build, build.corpus_generation) =
+                 (generation.semantic_build, generation.corpus_generation)
+            WHERE generation.corpus_generation = %s
+              AND build.profile_id = %s
+              AND build.status = 'complete'
+              AND build.completed_at IS NOT NULL
             """,
             (corpus_revision, _PROFILE_ID),
         ),
         None,
     )
     return None if row is None else row[0]
+
+
+def _create_candidate_semantic_tables(connection: psycopg.Connection) -> None:
+    connection.execute("DROP TABLE IF EXISTS pg_temp.semantic_candidate_message")
+    connection.execute("DROP TABLE IF EXISTS pg_temp.semantic_candidate_chunk")
+    connection.execute("DROP TABLE IF EXISTS pg_temp.semantic_embedding_queue")
+    connection.execute(
+        """
+        CREATE TEMP TABLE semantic_candidate_message (
+            provider text NOT NULL,
+            source_session_id text NOT NULL,
+            logical_message_id text NOT NULL,
+            content_class text NOT NULL,
+            PRIMARY KEY (
+                provider, source_session_id, logical_message_id, content_class
+            )
+        ) ON COMMIT PRESERVE ROWS
+        """
+    )
+    connection.execute(
+        """
+        CREATE TEMP TABLE semantic_candidate_chunk
+        (LIKE cc_search_chats.semantic_chunk_current
+         INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
+        ON COMMIT PRESERVE ROWS
+        """
+    )
+    connection.execute(
+        """
+        CREATE TEMP TABLE semantic_embedding_queue (
+            input_digest text PRIMARY KEY,
+            passage_text text NOT NULL,
+            provider text NOT NULL,
+            source_session_id text NOT NULL,
+            logical_message_id text NOT NULL,
+            chunk_ordinal integer NOT NULL,
+            mapped_units bigint NOT NULL CHECK (mapped_units > 0)
+        ) ON COMMIT PRESERVE ROWS
+        """
+    )
+
+
+def _candidate_messages_requiring_chunks(
+    connection: psycopg.Connection,
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        connection.execute(
+            """
+            SELECT candidate.provider, candidate.source_session_id,
+                   candidate.logical_message_id, candidate.content_class,
+                   candidate.prose_content, candidate.embedding_input_digest
+            FROM pg_temp.refresh_candidate_message AS candidate
+            WHERE candidate.content_class = 'prose'
+              AND candidate.prose_content ~ '[^[:space:]]'
+            UNION ALL
+            SELECT current.provider, current.source_session_id,
+                   current.logical_message_id, current.content_class,
+                   current.prose_content, current.embedding_input_digest
+            FROM cc_search_chats.message_current AS current
+            WHERE current.content_class = 'prose'
+              AND current.prose_content ~ '[^[:space:]]'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_temp.refresh_affected_message AS affected
+                  WHERE (affected.provider, affected.source_session_id,
+                         affected.logical_message_id, affected.content_class) =
+                        (current.provider, current.source_session_id,
+                         current.logical_message_id, current.content_class)
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM cc_search_chats.semantic_chunk_current AS chunk
+                  WHERE (chunk.provider, chunk.source_session_id,
+                         chunk.logical_message_id, chunk.content_class) =
+                        (current.provider, current.source_session_id,
+                         current.logical_message_id, current.content_class)
+                    AND chunk.profile_id = %s
+                    AND chunk.chunker_id = %s
+                    AND chunk.source_text_digest =
+                        current.embedding_input_digest
+              )
+            ORDER BY provider, source_session_id, logical_message_id,
+                     content_class
+            """,
+            (_PROFILE_ID, CHUNKER_ID),
+        )
+    )
+
+
+def _stage_candidate_chunks(
+    connection: psycopg.Connection,
+    chunker: Chunker,
+) -> None:
+    rows = _candidate_messages_requiring_chunks(connection)
+    for offset in range(0, len(rows), 128):
+        batch = rows[offset : offset + 128]
+        chunk_groups = chunker([str(row[4]) for row in batch])
+        if len(chunk_groups) != len(batch):
+            raise ValueError("chunker returned the wrong message count")
+        connection.cursor().executemany(
+            """
+            INSERT INTO pg_temp.semantic_candidate_message (
+                provider, source_session_id, logical_message_id, content_class
+            ) VALUES (%s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            [row[:4] for row in batch],
+        )
+        inserts: list[tuple[object, ...]] = []
+        for row, chunks in zip(batch, chunk_groups, strict=True):
+            text = str(row[4])
+            _validate_chunks(text, chunks)
+            for chunk in chunks:
+                inserts.append(
+                    (
+                        *row[:4],
+                        _PROFILE_ID,
+                        chunk.ordinal,
+                        CHUNKER_ID,
+                        chunk.token_start,
+                        chunk.token_end,
+                        chunk.char_start,
+                        chunk.char_end,
+                        row[5],
+                        chunk.text,
+                        hashlib.sha256(
+                            f"{PASSAGE_PREFIX}{chunk.text}".encode()
+                        ).hexdigest(),
+                    )
+                )
+        connection.cursor().executemany(
+            """
+            INSERT INTO pg_temp.semantic_candidate_chunk (
+                provider, source_session_id, logical_message_id,
+                content_class, profile_id, chunk_ordinal, chunker_id,
+                token_start, token_end, char_start, char_end,
+                source_text_digest, passage_text, input_digest
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s
+            )
+            """,
+            inserts,
+        )
+
+
+def _prepare_candidate_embedding_queue(connection: psycopg.Connection) -> int:
+    return next(
+        connection.execute(
+            """
+            WITH candidate_chunk AS (
+                SELECT candidate.*
+                FROM pg_temp.semantic_candidate_chunk AS candidate
+                UNION ALL
+                SELECT current.*
+                FROM cc_search_chats.semantic_chunk_current AS current
+                JOIN cc_search_chats.message_current AS message
+                  USING (provider, source_session_id,
+                         logical_message_id, content_class)
+                WHERE current.profile_id = %s
+                  AND current.chunker_id = %s
+                  AND current.source_text_digest =
+                      message.embedding_input_digest
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM pg_temp.refresh_affected_message AS affected
+                      WHERE (affected.provider, affected.source_session_id,
+                             affected.logical_message_id,
+                             affected.content_class) =
+                            (current.provider, current.source_session_id,
+                             current.logical_message_id,
+                             current.content_class)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM pg_temp.semantic_candidate_message AS replacement
+                      WHERE (replacement.provider,
+                             replacement.source_session_id,
+                             replacement.logical_message_id,
+                             replacement.content_class) =
+                            (current.provider, current.source_session_id,
+                             current.logical_message_id,
+                             current.content_class)
+                  )
+            ), queued AS (
+                INSERT INTO pg_temp.semantic_embedding_queue (
+                    input_digest, passage_text, provider, source_session_id,
+                    logical_message_id, chunk_ordinal, mapped_units
+                )
+                SELECT chunk.input_digest, min(chunk.passage_text),
+                       min(chunk.provider), min(chunk.source_session_id),
+                       min(chunk.logical_message_id), min(chunk.chunk_ordinal),
+                       count(*)
+                FROM candidate_chunk AS chunk
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM cc_search_chats.embedding_value AS value
+                    WHERE (value.profile_id, value.input_digest) =
+                          (%s, chunk.input_digest)
+                )
+                GROUP BY chunk.input_digest
+                RETURNING mapped_units
+            )
+            SELECT COALESCE(sum(mapped_units), 0)::bigint FROM queued
+            """,
+            (_PROFILE_ID, CHUNKER_ID, _PROFILE_ID),
+        )
+    )[0]
+
+
+def _candidate_semantic_counts(
+    connection: psycopg.Connection,
+) -> tuple[int, int, int, int]:
+    return next(
+        connection.execute(
+            """
+            WITH candidate_message AS (
+                SELECT candidate.provider, candidate.source_session_id,
+                       candidate.logical_message_id, candidate.content_class
+                FROM pg_temp.refresh_candidate_message AS candidate
+                WHERE candidate.content_class = 'prose'
+                  AND candidate.prose_content ~ '[^[:space:]]'
+                UNION ALL
+                SELECT current.provider, current.source_session_id,
+                       current.logical_message_id, current.content_class
+                FROM cc_search_chats.message_current AS current
+                WHERE current.content_class = 'prose'
+                  AND current.prose_content ~ '[^[:space:]]'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM pg_temp.refresh_affected_message AS affected
+                      WHERE (affected.provider, affected.source_session_id,
+                             affected.logical_message_id,
+                             affected.content_class) =
+                            (current.provider, current.source_session_id,
+                             current.logical_message_id,
+                             current.content_class)
+                  )
+            ), candidate_chunk AS (
+                SELECT candidate.*
+                FROM pg_temp.semantic_candidate_chunk AS candidate
+                UNION ALL
+                SELECT current.*
+                FROM cc_search_chats.semantic_chunk_current AS current
+                JOIN cc_search_chats.message_current AS message
+                  USING (provider, source_session_id,
+                         logical_message_id, content_class)
+                WHERE current.profile_id = %s
+                  AND current.chunker_id = %s
+                  AND current.source_text_digest =
+                      message.embedding_input_digest
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM pg_temp.refresh_affected_message AS affected
+                      WHERE (affected.provider, affected.source_session_id,
+                             affected.logical_message_id,
+                             affected.content_class) =
+                            (current.provider, current.source_session_id,
+                             current.logical_message_id,
+                             current.content_class)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM pg_temp.semantic_candidate_message AS replacement
+                      WHERE (replacement.provider,
+                             replacement.source_session_id,
+                             replacement.logical_message_id,
+                             replacement.content_class) =
+                            (current.provider, current.source_session_id,
+                             current.logical_message_id,
+                             current.content_class)
+                  )
+            )
+            SELECT
+                (SELECT count(*) FROM candidate_message),
+                (SELECT count(DISTINCT (
+                    provider, source_session_id,
+                    logical_message_id, content_class
+                )) FROM candidate_chunk),
+                (SELECT count(*) FROM candidate_chunk),
+                (SELECT count(*)
+                 FROM candidate_chunk AS chunk
+                 JOIN cc_search_chats.embedding_value AS value
+                   ON (value.profile_id, value.input_digest) =
+                      (chunk.profile_id, chunk.input_digest))
+            """,
+            (_PROFILE_ID, CHUNKER_ID),
+        )
+    )
+
+
+def prepare_candidate_semantics(
+    connection: psycopg.Connection,
+    corpus_generation: int,
+    embed: Callable[[Sequence[str]], list[list[float]]],
+    *,
+    chunker: Chunker,
+    batch_size: int = 4,
+    progress: Callable[[int, int], None] | None = None,
+) -> CandidateSemanticBuild:
+    """Prepare candidate chunks and reusable vectors without selecting them."""
+    if (
+        isinstance(batch_size, bool)
+        or not isinstance(batch_size, int)
+        or batch_size <= 0
+    ):
+        raise ValueError("batch_size must be positive")
+    semantic_build = next(
+        connection.execute(
+            """
+            INSERT INTO cc_search_chats.semantic_build (
+                corpus_generation, profile_id, status, owner_pid, phase,
+                heartbeat_at, completed_units, total_units
+            ) VALUES (
+                %s, %s, 'building', pg_backend_pid(), 'semantic_embed',
+                now(), 0, 0
+            )
+            RETURNING semantic_build
+            """,
+            (corpus_generation, _PROFILE_ID),
+        )
+    )[0]
+    heartbeat = DatabaseHeartbeat(
+        connection.info.dsn,
+        """
+        UPDATE cc_search_chats.semantic_build
+        SET heartbeat_at = now()
+        WHERE semantic_build = %s AND status = 'building'
+        """,
+        (semantic_build,),
+        interval_seconds=_RUN_HEARTBEAT_SECONDS,
+        label=f"semantic heartbeat {semantic_build}",
+    )
+    completed = 0
+    total = 0
+    heartbeat.start()
+    try:
+        _create_candidate_semantic_tables(connection)
+        _stage_candidate_chunks(connection, chunker)
+        queued_units = _prepare_candidate_embedding_queue(connection)
+        message_count, chunked_messages, total, mapped = _candidate_semantic_counts(
+            connection
+        )
+        if message_count != chunked_messages or mapped > total:
+            raise ValueError(
+                "candidate semantic projection is inconsistent: "
+                f"messages={chunked_messages}/{message_count}, "
+                f"mapped={mapped}/{total}"
+            )
+        completed = total - queued_units
+        connection.execute(
+            """
+            UPDATE cc_search_chats.semantic_build
+            SET completed_units = %s, total_units = %s, heartbeat_at = now()
+            WHERE semantic_build = %s AND status = 'building'
+            """,
+            (completed, total, semantic_build),
+        )
+        if progress is not None:
+            progress(completed, total)
+        last_checkpoint = monotonic()
+        while completed < total:
+            rows = tuple(
+                connection.execute(
+                    """
+                    WITH batch AS MATERIALIZED (
+                        SELECT provider, source_session_id, logical_message_id,
+                               chunk_ordinal, passage_text, input_digest,
+                               mapped_units
+                        FROM pg_temp.semantic_embedding_queue
+                        ORDER BY input_digest
+                        LIMIT %s
+                    )
+                    SELECT provider, source_session_id, logical_message_id,
+                           chunk_ordinal, passage_text, input_digest, mapped_units
+                    FROM batch
+                    ORDER BY input_digest
+                    """,
+                    (batch_size,),
+                    prepare=True,
+                )
+            )
+            if not rows:
+                raise ValueError("candidate embedding queue made no progress")
+            try:
+                vectors = embed([row[4] for row in rows])
+            except ModelUnavailable:
+                raise
+            except Exception as error:
+                raise RuntimeError(
+                    f"semantic embedding failed after {completed}/{total} passages "
+                    f"at {rows[0][0]}:{rows[0][1]}:{rows[0][2]}:{rows[0][3]}: "
+                    f"{error}"
+                ) from error
+            if len(vectors) != len(rows):
+                raise ValueError("embedding model returned the wrong batch size")
+            with connection.transaction():
+                connection.cursor().executemany(
+                    """
+                    INSERT INTO cc_search_chats.embedding_value (
+                        profile_id, input_digest, embedding
+                    ) VALUES (%s, %s, %s::vector)
+                    ON CONFLICT (profile_id, input_digest) DO NOTHING
+                    """,
+                    [
+                        (_PROFILE_ID, row[5], _vector(vector))
+                        for row, vector in zip(rows, vectors, strict=True)
+                    ],
+                )
+                deleted_digests = connection.execute(
+                    """
+                    DELETE FROM pg_temp.semantic_embedding_queue
+                    WHERE input_digest = ANY(%s::text[])
+                    """,
+                    ([row[5] for row in rows],),
+                    prepare=True,
+                ).rowcount
+            if deleted_digests != len(rows):
+                raise ValueError("candidate embedding queue made no progress")
+            completed += sum(int(row[6]) for row in rows)
+            checkpoint_at = monotonic()
+            if (
+                completed == total
+                or checkpoint_at - last_checkpoint >= _PROGRESS_CHECKPOINT_SECONDS
+            ):
+                connection.execute(
+                    """
+                    UPDATE cc_search_chats.semantic_build
+                    SET completed_units = %s, heartbeat_at = now()
+                    WHERE semantic_build = %s AND status = 'building'
+                    """,
+                    (completed, semantic_build),
+                    prepare=True,
+                )
+                if progress is not None:
+                    progress(completed, total)
+                last_checkpoint = checkpoint_at
+        heartbeat.raise_if_failed()
+        message_count, chunked_messages, total, mapped = _candidate_semantic_counts(
+            connection
+        )
+        if message_count != chunked_messages or mapped != total or completed != total:
+            raise ValueError(
+                "candidate semantic publication is incomplete: "
+                f"messages={chunked_messages}/{message_count}, "
+                f"mapped={mapped}/{total}, completed={completed}"
+            )
+        return CandidateSemanticBuild(
+            semantic_build=semantic_build,
+            embedded_count=total,
+        )
+    except Exception as error:
+        code = (
+            error.code
+            if isinstance(error, ModelUnavailable)
+            else "semantic_candidate_failed"
+        )
+        phase = error.phase if isinstance(error, ModelUnavailable) else "semantic_embed"
+        connection.execute(
+            """
+            UPDATE cc_search_chats.semantic_build
+            SET status = 'failed', completed_at = now(), phase = %s,
+                heartbeat_at = now(), completed_units = %s,
+                failure = jsonb_build_object(
+                    'code', %s::text, 'phase', %s::text,
+                    'completed', %s::bigint, 'total', %s::bigint,
+                    'error', %s::text
+                )
+            WHERE semantic_build = %s AND status = 'building'
+            """,
+            (
+                phase,
+                completed,
+                code,
+                phase,
+                completed,
+                total,
+                str(error),
+                semantic_build,
+            ),
+        )
+        raise
+    finally:
+        heartbeat.stop()
 
 
 def _validate_chunks(text: str, chunks: tuple[SemanticChunk, ...]) -> None:
@@ -744,14 +1237,18 @@ def semantic_search(
     state = next(
         connection.execute(
             """
-            SELECT revision.status = 'complete'
-                   AND revision.profile_id = %s,
-                   revision.corpus_revision_id = corpus.current_revision_id
-            FROM cc_search_chats.semantic_state AS state
-            JOIN cc_search_chats.semantic_revision AS revision
-              ON revision.semantic_revision_id = state.current_semantic_revision_id
-            CROSS JOIN cc_search_chats.corpus_state AS corpus
-            WHERE state.singleton AND corpus.singleton
+            SELECT build.status = 'complete'
+                   AND build.completed_at IS NOT NULL
+                   AND build.profile_id = %s,
+                   build.corpus_generation = generation.corpus_generation
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            JOIN cc_search_chats.semantic_build AS build
+              ON (build.semantic_build, build.corpus_generation) =
+                 (generation.semantic_build, generation.corpus_generation)
+            WHERE state.singleton
             """,
             (_PROFILE_ID,),
         ),

@@ -1,6 +1,6 @@
 # PostgreSQL index maintenance
 
-Last verified: 2026-08-29
+Last verified: 2026-09-01
 
 This runbook separates read-only inspection, candidate migration, production
 UAT, and irreversible legacy pruning. Preparing or testing code does not
@@ -60,50 +60,56 @@ unverified checkout.
 ## 3. Apply migration without pruning
 
 Only after explicit production-migration authority, use the exact installed
-entrypoint. Migration and literal refresh are separate commands; a failed
-migration cannot be obscured by refresh output:
+entrypoint. Migration is a separate command so a failed migration cannot be
+obscured by indexing output:
 
 ```console
 cc-search-chats index --migrate --json
-cc-search-chats index --literal-only --json
 ```
 
-The migration result must report `applied_schema_version == 6`. Re-running it is
+The migration result must report `applied_schema_version == 7`. Re-running it is
 idempotent. Routine search/index commands must have reported
 `maintenance_required` without schema mutation before this explicit step.
 
-Capture each stdout/stderr separately. Stdout must parse as one schema-v2 object.
-Stderr must parse as ordered schema-v2 NDJSON ending in exactly one terminal
-event. Require positive root/file counts; zero resolved roots is not passing.
-Complete coverage passes directly. Partial coverage may proceed only when every
-current failure is reconciled to a reviewed deterministic native-source defect,
-the exact expected blocked-source count is recorded in the UAT evidence, and
-transient failures are zero. Never coerce malformed native bytes or mark the
-coverage complete manually.
+Capture stdout/stderr separately. Stdout must parse as one schema-v3 object.
+Stderr must parse as ordered schema-v3 NDJSON ending in exactly one terminal
+event.
 
-Repeat the literal command. An unchanged run must report no changed source and
-create no corpus generation or current-row version changes. Then run the
-prepared four-corpus literal, exact-resolution, and append cases.
-
-## 4. Build semantic state
+## 4. Publish one coherent corpus
 
 The pinned snapshot and dependencies must already exist in operator-configured
 locations. Runtime remains offline and does not redirect caches.
 
 ```console
-cc-search-chats index --semantic-only --json
+cc-search-chats index --json
 cc-search-chats index --status --json
 ```
 
-Require terminal success, `semantic.fresh == true`, selected semantic/corpus
-agreement, and `completed == total`. Total counts semantic chunks, not logical
-messages. Retry may reuse existing chunk vectors but must not create another
-vector for the same profile/input digest.
+Require positive root/file counts; zero resolved roots is not passing. Complete
+coverage passes directly. Partial coverage may proceed only when every current
+failure is reconciled to a reviewed deterministic native-source defect, the
+exact expected blocked-source count is recorded in the UAT evidence, and
+transient failures are zero. Never coerce malformed native bytes or mark the
+coverage complete manually.
 
-On semantic failure, preserve its phase/code and run a positive literal control.
-Literal search must remain available. Ranked hybrid search must return that
-literal answer with named degradation and may fuse only digest-valid mappings;
-explicit semantic maintenance/status must not claim current completeness.
+Require terminal success, a positive `refresh.corpus_generation`, a positive
+`semantic.semantic_build`, semantic/corpus generation agreement,
+`semantic.fresh == true`, and `completed_units == total_units`. Total units count
+semantic chunks, not logical messages. The selected corpus generation must own
+that completed semantic build. Retry may reuse existing chunk vectors but must
+not create another vector for the same profile/input digest.
+
+Repeat `cc-search-chats index --json`. An unchanged run must report no changed
+source, retain the same `corpus_generation` and `semantic_build`, and create no
+generation or current-row version changes. Then run the prepared four-corpus
+literal, exact-resolution, and append cases. `--literal-only` is a non-selecting
+diagnostic; `--semantic-only` cannot independently advance published state.
+
+On candidate semantic failure, preserve its phase/code and verify that the
+previous corpus generation and semantic build remain selected. Run a positive
+literal control against that prior corpus. Ranked hybrid search must return the
+literal answer with named `literal_fallback` degradation if query-time semantic
+work is unavailable; status must not claim the failed candidate is current.
 
 ## 5. Recovery
 
@@ -112,10 +118,9 @@ explicit semantic maintenance/status must not claim current completeness.
   recorded migration bytes.
 - **Partial/unreadable source:** preserve diagnostics/checkpoints, restore source
   availability, and rerun. Do not mark coverage complete manually.
-- **Interrupted refresh:** publication rolls back; the next owner diagnoses
-  abandoned state and retries changed sources.
-- **Interrupted semantic work:** reusable vectors remain; the failed generation
-  stays unselected and retry embeds only missing chunk digests.
+- **Interrupted coherent update:** publication rolls back, the previous corpus
+  remains selected, and the next owner diagnoses abandoned state and retries.
+  Reusable vectors remain; retry embeds only missing chunk digests.
 - **Stale exact source:** refresh and repeat exact resolution. Do not substitute
   a ranked match.
 - **Database/storage unavailable:** restore the configured boundary. Do not use
@@ -139,7 +144,7 @@ Before the second function can be invoked, require:
    `claude-ponytail`, `codex`, and `codex-ponytail` evidence plus
    `semantic_join: passed`;
 4. current message/alias counts equal corpus metadata;
-5. the selected semantic generation targets the current corpus, is complete,
+5. the selected semantic build belongs to the current corpus generation, is complete,
    and every current chunk joins one vector.
 
 Only legacy `message_embedding`, `physical_alias`, and `message` snapshot

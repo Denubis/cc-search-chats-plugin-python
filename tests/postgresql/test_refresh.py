@@ -7,10 +7,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
-from typing import cast
+from typing import LiteralString, cast
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from cc_search_chats.cli import _postgres_envelope
 from cc_search_chats.core.identity import Provider
@@ -20,14 +21,17 @@ from cc_search_chats.providers.source_discovery import (
     SourceDiagnosticCode,
     source_root_id,
 )
+from cc_search_chats.semantic import SemanticChunk
 from cc_search_chats.storage.postgresql import (
     RefreshProgress,
-    index_embeddings,
+    index_corpus,
     migrate,
-    refresh_native_sources,
-    replace_messages,
+    semantic_search,
 )
 from cc_search_chats.storage.postgresql import refresh as refresh_module
+from cc_search_chats.storage.postgresql import (
+    refresh_native_sources as inspect_native_sources,
+)
 from cc_search_chats.storage.postgresql import (
     search_messages as _search_messages,
 )
@@ -53,6 +57,23 @@ def search_messages(
         connection,
         query,
         include_agents=include_agents,
+    )
+
+
+def refresh_native_sources(
+    connection: psycopg.Connection,
+    **kwargs,
+):
+    """Exercise parser behavior through the coherent publication consumer."""
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    return index_corpus(
+        connection,
+        lambda texts: [vector for _ in texts],
+        chunker=lambda texts: tuple(
+            (SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts
+        ),
+        **kwargs,
     )
 
 
@@ -92,7 +113,7 @@ def _corpus_cardinality(
         connection.execute(
             """
             SELECT
-              (SELECT count(*) FROM cc_search_chats.corpus_revision),
+              (SELECT count(*) FROM cc_search_chats.corpus_generation),
               (SELECT count(*) FROM cc_search_chats.message_current),
               (SELECT count(*) FROM cc_search_chats.physical_alias_current)
             """
@@ -247,7 +268,7 @@ def test_cross_root_canonical_conflict_aborts_publication(
     assert next(
         postgres_connection.execute(
             """
-            SELECT current_revision_id,
+            SELECT current_corpus_generation,
                    (SELECT count(*) FROM cc_search_chats.message_current),
                    (SELECT count(*) FROM cc_search_chats.physical_alias_current)
             FROM cc_search_chats.corpus_state
@@ -331,7 +352,7 @@ def test_switching_empty_roots_removes_stale_root_without_new_generation(
         source_roots=(_source_root(Provider.CLAUDE, second_root),),
     )
 
-    assert second.revision_id == first.revision_id
+    assert second.corpus_generation == first.corpus_generation
     assert tuple(
         row[0]
         for row in postgres_connection.execute(
@@ -423,7 +444,7 @@ def test_noop_reads_no_jsonl_and_append_reads_only_suffix(
     second = refresh_native_sources(postgres_connection, source_roots=roots)
 
     assert reads == []
-    assert second.revision_id == first.revision_id
+    assert second.corpus_generation == first.corpus_generation
     assert _corpus_cardinality(postgres_connection) == first_cardinality
     assert _refresh_metadata_versions(postgres_connection) == first_metadata_versions
 
@@ -437,7 +458,7 @@ def test_noop_reads_no_jsonl_and_append_reads_only_suffix(
 
     assert reads and reads[0][1] == committed_size
     assert all(start >= committed_size for _, start, _ in reads)
-    assert appended.revision_id != first.revision_id
+    assert appended.corpus_generation != first.corpus_generation
     assert len(search_messages(postgres_connection, "incremental suffix sentinel")) == 1
     assert (
         _message_row_version(postgres_connection, first_hit.canonical_locator)
@@ -761,7 +782,7 @@ def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(
 
     failed = refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert failed.revision_id == first.revision_id
+    assert failed.corpus_generation == first.corpus_generation
     assert failed.failed_source_count == 1
     assert (
         next(
@@ -866,7 +887,7 @@ def test_unreadable_artifact_probe_retains_committed_rows_and_checkpoint(
 
     failed = refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert failed.revision_id == first.revision_id
+    assert failed.corpus_generation == first.corpus_generation
     assert failed.failed_source_count == 1
     assert (
         next(
@@ -913,7 +934,7 @@ def test_source_stat_failure_cannot_be_mistaken_for_deletion(
 
     failed = refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert failed.revision_id == first.revision_id
+    assert failed.corpus_generation == first.corpus_generation
     assert failed.failed_source_count == 1
     assert (
         next(
@@ -964,7 +985,7 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
 
     failed = refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert failed.revision_id == first.revision_id
+    assert failed.corpus_generation == first.corpus_generation
     assert failed.failed_source_count == 1
     assert failed.metadata_checked_source_count == 1
     assert failed.attempted_source_count == 1
@@ -1035,7 +1056,7 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
 
     unchanged = refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert unchanged.revision_id == first.revision_id
+    assert unchanged.corpus_generation == first.corpus_generation
     assert unchanged.changed_source_count == 0
     assert unchanged.metadata_checked_source_count == 1
     assert unchanged.attempted_source_count == 0
@@ -1119,17 +1140,22 @@ def test_failed_publication_keeps_checkpoint_and_corpus_then_retry_cleans_stage(
         uuid="claude-crash-retry",
         text="crash retry sentinel",
     )
-    original_publish = refresh_module._publish_staged_refresh
+    original_publish = refresh_module._publish_coherent_candidate
 
     def fail_before_publish(*args, **kwargs):
         raise RuntimeError("injected pre-publication crash")
 
-    monkeypatch.setattr(refresh_module, "_publish_staged_refresh", fail_before_publish)
+    monkeypatch.setattr(
+        refresh_module, "_publish_coherent_candidate", fail_before_publish
+    )
 
     with pytest.raises(RuntimeError, match="injected pre-publication crash"):
         refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert _corpus_cardinality(postgres_connection) == cardinality
+    assert _corpus_cardinality(postgres_connection) == (
+        cardinality[0] + 1,
+        *cardinality[1:],
+    )
     assert (
         next(
             postgres_connection.execute(
@@ -1164,11 +1190,633 @@ def test_failed_publication_keeps_checkpoint_and_corpus_then_retry_cleans_stage(
         )
     )[0]
 
-    monkeypatch.setattr(refresh_module, "_publish_staged_refresh", original_publish)
+    monkeypatch.setattr(refresh_module, "_publish_coherent_candidate", original_publish)
     retried = refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert retried.revision_id != first.revision_id
+    assert retried.corpus_generation != first.corpus_generation
     assert len(search_messages(postgres_connection, "crash retry sentinel")) == 1
+
+
+def test_semantic_failure_keeps_the_previous_coherent_corpus_until_retry(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    shutil.copy(FIXTURES / "claude_primary.jsonl", source)
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def embed(texts):
+        return [vector for _ in texts]
+
+    def chunks(texts):
+        return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
+
+    index_corpus = refresh_module.index_corpus
+    first = index_corpus(
+        postgres_connection,
+        embed,
+        chunker=chunks,
+        source_roots=roots,
+    )
+    selected_before = next(
+        postgres_connection.execute(
+            """
+            SELECT state.current_corpus_generation, generation.semantic_build,
+                   (SELECT count(*)
+                    FROM cc_search_chats.semantic_chunk_current),
+                   (SELECT complete_byte_offset
+                    FROM cc_search_chats.source_file_current)
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            """
+        )
+    )
+    unchanged_row_versions = next(
+        postgres_connection.execute(
+            """
+            SELECT message.canonical_locator, message.xmin::text,
+                   chunk.xmin::text
+            FROM cc_search_chats.message_current AS message
+            JOIN cc_search_chats.semantic_chunk_current AS chunk
+              USING (provider, source_session_id,
+                     logical_message_id, content_class)
+            ORDER BY message.canonical_locator, chunk.chunk_ordinal
+            LIMIT 1
+            """
+        )
+    )
+    assert first.corpus_generation == selected_before[0]
+    _append_claude_message(
+        source,
+        uuid="coherent-semantic-retry",
+        text="coherent semantic retry sentinel",
+    )
+
+    def fail_semantic(_texts):
+        raise RuntimeError("injected semantic candidate failure")
+
+    with pytest.raises(RuntimeError, match="injected semantic candidate failure"):
+        index_corpus(
+            postgres_connection,
+            fail_semantic,
+            chunker=chunks,
+            source_roots=roots,
+        )
+
+    assert (
+        next(
+            postgres_connection.execute(
+                """
+            SELECT state.current_corpus_generation, generation.semantic_build,
+                   (SELECT count(*)
+                    FROM cc_search_chats.semantic_chunk_current),
+                   (SELECT complete_byte_offset
+                    FROM cc_search_chats.source_file_current)
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            """
+            )
+        )
+        == selected_before
+    )
+    assert (
+        search_messages(postgres_connection, "coherent semantic retry sentinel") == ()
+    )
+
+    completed = index_corpus(
+        postgres_connection,
+        embed,
+        chunker=chunks,
+        source_roots=roots,
+    )
+
+    assert completed.corpus_generation != first.corpus_generation
+    assert (
+        next(
+            postgres_connection.execute(
+                """
+            SELECT message.canonical_locator, message.xmin::text,
+                   chunk.xmin::text
+            FROM cc_search_chats.message_current AS message
+            JOIN cc_search_chats.semantic_chunk_current AS chunk
+              USING (provider, source_session_id,
+                     logical_message_id, content_class)
+            WHERE message.canonical_locator = %s
+            ORDER BY chunk.chunk_ordinal
+            LIMIT 1
+            """,
+                (unchanged_row_versions[0],),
+            )
+        )
+        == unchanged_row_versions
+    )
+    literal = search_messages(postgres_connection, "coherent semantic retry sentinel")
+    assert len(literal) == 1
+    semantic = semantic_search(
+        postgres_connection,
+        vector,
+        limit=200,
+        include_agents=True,
+    )
+    assert any(
+        hit.canonical_locator == literal[0].canonical_locator for hit in semantic
+    )
+
+
+def test_semantic_candidate_remains_invisible_while_embedding_is_paused(
+    postgres_connection: psycopg.Connection,
+    postgres_cluster,
+    tmp_path: Path,
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    shutil.copy(FIXTURES / "claude_primary.jsonl", source)
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def chunks(texts):
+        return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
+
+    baseline = refresh_module.index_corpus(
+        postgres_connection,
+        lambda texts: [vector for _ in texts],
+        chunker=chunks,
+        source_roots=roots,
+    )
+    _append_claude_message(
+        source,
+        uuid="coherent-paused-candidate",
+        text="coherent paused candidate sentinel",
+    )
+    entered = Event()
+    release = Event()
+
+    def paused_embed(texts):
+        entered.set()
+        if not release.wait(timeout=2):
+            raise AssertionError("paused candidate was not released")
+        return [vector for _ in texts]
+
+    with (
+        psycopg.connect(postgres_cluster.dsn, autocommit=True) as owner,
+        psycopg.connect(postgres_cluster.dsn, autocommit=True) as observer,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        pending = executor.submit(
+            refresh_module.index_corpus,
+            owner,
+            paused_embed,
+            chunker=chunks,
+            source_roots=roots,
+        )
+        assert entered.wait(timeout=1)
+        try:
+            selected_during_pause = next(
+                observer.execute(
+                    """
+                    SELECT state.current_corpus_generation,
+                           generation.semantic_build
+                    FROM cc_search_chats.corpus_state AS state
+                    JOIN cc_search_chats.corpus_generation AS generation
+                      ON generation.corpus_generation =
+                         state.current_corpus_generation
+                    """
+                )
+            )
+            assert selected_during_pause == (
+                baseline.corpus_generation,
+                baseline.semantic_build,
+            )
+            assert search_messages(observer, "coherent paused candidate sentinel") == ()
+            assert semantic_search(
+                observer,
+                vector,
+                limit=200,
+                include_agents=True,
+            )
+        finally:
+            release.set()
+        completed = pending.result(timeout=2)
+
+        assert completed.corpus_generation != baseline.corpus_generation
+        literal = search_messages(observer, "coherent paused candidate sentinel")
+        assert len(literal) == 1
+        assert any(
+            hit.canonical_locator == literal[0].canonical_locator
+            for hit in semantic_search(
+                observer,
+                vector,
+                limit=200,
+                include_agents=True,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("relation", "events", "condition"),
+    [
+        ("message_current", "INSERT", ""),
+        ("physical_alias_current", "INSERT", ""),
+        ("source_file_current", "INSERT OR UPDATE", ""),
+        ("semantic_chunk_current", "INSERT", ""),
+        ("semantic_build", "UPDATE", "WHEN (NEW.status = 'complete')"),
+        ("corpus_generation", "UPDATE", "WHEN (NEW.status = 'complete')"),
+        ("corpus_state", "UPDATE", ""),
+        (
+            "refresh_run",
+            "UPDATE",
+            "WHEN (NEW.status IN ('complete', 'partial'))",
+        ),
+    ],
+)
+def test_each_final_publication_mutation_rolls_back_as_one_unit(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    relation: str,
+    events: LiteralString,
+    condition: LiteralString,
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    shutil.copy(FIXTURES / "claude_primary.jsonl", source)
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def chunks(texts):
+        return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
+
+    refresh_module.index_corpus(
+        postgres_connection,
+        lambda texts: [vector for _ in texts],
+        chunker=chunks,
+        source_roots=roots,
+    )
+    selected_before = next(
+        postgres_connection.execute(
+            """
+            SELECT state.current_corpus_generation,
+                   generation.semantic_build,
+                   (SELECT count(*)
+                    FROM cc_search_chats.message_current),
+                   (SELECT count(*)
+                    FROM cc_search_chats.physical_alias_current),
+                   (SELECT count(*)
+                    FROM cc_search_chats.semantic_chunk_current),
+                   (SELECT complete_byte_offset
+                    FROM cc_search_chats.source_file_current)
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            """
+        )
+    )
+    _append_claude_message(
+        source,
+        uuid=f"rollback-{relation}",
+        text=f"rollback {relation} sentinel",
+    )
+    postgres_connection.execute(
+        """
+        CREATE FUNCTION cc_search_chats.inject_publication_failure()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'injected publication failure';
+        END;
+        $$
+        """
+    )
+    postgres_connection.execute(
+        sql.SQL(
+            "CREATE TRIGGER injected_publication_failure "
+            "BEFORE {events} ON cc_search_chats.{relation} "
+            "FOR EACH ROW {condition} "
+            "EXECUTE FUNCTION cc_search_chats.inject_publication_failure()"
+        ).format(
+            events=sql.SQL(events),
+            relation=sql.Identifier(relation),
+            condition=sql.SQL(condition),
+        )
+    )
+
+    with pytest.raises(
+        psycopg.errors.RaiseException,
+        match="injected publication failure",
+    ):
+        refresh_module.index_corpus(
+            postgres_connection,
+            lambda texts: [vector for _ in texts],
+            chunker=chunks,
+            source_roots=roots,
+        )
+
+    assert (
+        next(
+            postgres_connection.execute(
+                """
+            SELECT state.current_corpus_generation,
+                   generation.semantic_build,
+                   (SELECT count(*)
+                    FROM cc_search_chats.message_current),
+                   (SELECT count(*)
+                    FROM cc_search_chats.physical_alias_current),
+                   (SELECT count(*)
+                    FROM cc_search_chats.semantic_chunk_current),
+                   (SELECT complete_byte_offset
+                    FROM cc_search_chats.source_file_current)
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            """
+            )
+        )
+        == selected_before
+    )
+    assert search_messages(postgres_connection, f"rollback {relation} sentinel") == ()
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT generation.status, build.status
+            FROM cc_search_chats.corpus_generation AS generation
+            JOIN cc_search_chats.semantic_build AS build
+              ON build.corpus_generation = generation.corpus_generation
+            ORDER BY generation.corpus_generation DESC
+            LIMIT 1
+            """
+        )
+    ) == ("failed", "failed")
+
+
+def test_automatic_request_completion_rolls_back_with_corpus_publication(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    shutil.copy(FIXTURES / "claude_primary.jsonl", source)
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def chunks(texts):
+        return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
+
+    baseline = refresh_module.index_corpus(
+        postgres_connection,
+        lambda texts: [vector for _ in texts],
+        chunker=chunks,
+        source_roots=roots,
+    )
+    _append_claude_message(
+        source,
+        uuid="automatic-completion-rollback",
+        text="automatic completion rollback sentinel",
+    )
+    postgres_connection.execute(
+        """
+        UPDATE cc_search_chats.auto_refresh_state
+        SET request_id = 23, requested_at = now(), state = 'running',
+            launch_attempt_count = 1, launched_at = now()
+        WHERE singleton
+        """
+    )
+    postgres_connection.execute(
+        """
+        CREATE FUNCTION cc_search_chats.reject_automatic_completion()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'injected automatic completion failure';
+        END;
+        $$
+        """
+    )
+    postgres_connection.execute(
+        """
+        CREATE TRIGGER reject_automatic_completion
+        BEFORE UPDATE ON cc_search_chats.auto_refresh_state
+        FOR EACH ROW WHEN (NEW.state = 'complete')
+        EXECUTE FUNCTION cc_search_chats.reject_automatic_completion()
+        """
+    )
+
+    with pytest.raises(
+        psycopg.errors.RaiseException,
+        match="injected automatic completion failure",
+    ):
+        refresh_module.index_corpus(
+            postgres_connection,
+            lambda texts: [vector for _ in texts],
+            chunker=chunks,
+            source_roots=roots,
+            automatic_request_id=23,
+        )
+
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT current_corpus_generation FROM cc_search_chats.corpus_state"
+            )
+        )[0]
+        == baseline.corpus_generation
+    )
+    assert next(
+        postgres_connection.execute(
+            "SELECT request_id, state FROM cc_search_chats.auto_refresh_state"
+        )
+    ) == (23, "running")
+    assert (
+        search_messages(
+            postgres_connection,
+            "automatic completion rollback sentinel",
+        )
+        == ()
+    )
+
+
+def test_coherent_noop_reuses_selection_but_missing_selection_forces_publication(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    shutil.copy(FIXTURES / "claude_primary.jsonl", source)
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    embedded_texts: list[str] = []
+
+    def embed(texts):
+        embedded_texts.extend(texts)
+        return [vector for _ in texts]
+
+    def chunks(texts):
+        return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
+
+    first = refresh_module.index_corpus(
+        postgres_connection,
+        embed,
+        chunker=chunks,
+        source_roots=roots,
+    )
+    cardinality = next(
+        postgres_connection.execute(
+            """
+            SELECT
+              (SELECT count(*) FROM cc_search_chats.corpus_generation),
+              (SELECT count(*) FROM cc_search_chats.semantic_build),
+              (SELECT count(*) FROM cc_search_chats.embedding_value),
+              (SELECT count(*) FROM cc_search_chats.semantic_chunk_current)
+            """
+        )
+    )
+    embedded_texts.clear()
+
+    unchanged = refresh_module.index_corpus(
+        postgres_connection,
+        embed,
+        chunker=chunks,
+        source_roots=roots,
+    )
+
+    assert unchanged.corpus_generation == first.corpus_generation
+    assert unchanged.semantic_build == first.semantic_build
+    assert embedded_texts == []
+    assert (
+        next(
+            postgres_connection.execute(
+                """
+            SELECT
+              (SELECT count(*) FROM cc_search_chats.corpus_generation),
+              (SELECT count(*) FROM cc_search_chats.semantic_build),
+              (SELECT count(*) FROM cc_search_chats.embedding_value),
+              (SELECT count(*) FROM cc_search_chats.semantic_chunk_current)
+            """
+            )
+        )
+        == cardinality
+    )
+
+    postgres_connection.execute(
+        "UPDATE cc_search_chats.corpus_state SET current_corpus_generation = NULL"
+    )
+    recovered = refresh_module.index_corpus(
+        postgres_connection,
+        embed,
+        chunker=chunks,
+        source_roots=roots,
+    )
+
+    assert recovered.corpus_generation != first.corpus_generation
+    assert recovered.semantic_build != first.semantic_build
+    assert embedded_texts == []
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT
+              (SELECT count(*) FROM cc_search_chats.corpus_generation),
+              (SELECT count(*) FROM cc_search_chats.semantic_build),
+              (SELECT count(*) FROM cc_search_chats.embedding_value),
+              (SELECT count(*) FROM cc_search_chats.semantic_chunk_current)
+            """
+        )
+    ) == (cardinality[0] + 1, cardinality[1] + 1, *cardinality[2:])
+
+
+def test_literal_candidate_diagnostic_cannot_advance_selected_state(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    shutil.copy(FIXTURES / "claude_primary.jsonl", source)
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def chunks(texts):
+        return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
+
+    baseline = refresh_module.index_corpus(
+        postgres_connection,
+        lambda texts: [vector for _ in texts],
+        chunker=chunks,
+        source_roots=roots,
+    )
+    current_before = next(
+        postgres_connection.execute(
+            """
+            SELECT state.current_corpus_generation,
+                   generation.semantic_build,
+                   (SELECT count(*)
+                    FROM cc_search_chats.message_current),
+                   (SELECT count(*)
+                    FROM cc_search_chats.semantic_chunk_current),
+                   (SELECT complete_byte_offset
+                    FROM cc_search_chats.source_file_current)
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            """
+        )
+    )
+    _append_claude_message(
+        source,
+        uuid="literal-candidate-only",
+        text="literal candidate only sentinel",
+    )
+
+    diagnostic = inspect_native_sources(postgres_connection, source_roots=roots)
+
+    assert diagnostic.corpus_generation == baseline.corpus_generation
+    assert (
+        next(
+            postgres_connection.execute(
+                """
+            SELECT state.current_corpus_generation,
+                   generation.semantic_build,
+                   (SELECT count(*)
+                    FROM cc_search_chats.message_current),
+                   (SELECT count(*)
+                    FROM cc_search_chats.semantic_chunk_current),
+                   (SELECT complete_byte_offset
+                    FROM cc_search_chats.source_file_current)
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            """
+            )
+        )
+        == current_before
+    )
+    assert search_messages(postgres_connection, "literal candidate only sentinel") == ()
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT diagnostics -> -1 ->> 'code'
+            FROM cc_search_chats.refresh_run
+            ORDER BY run_id DESC
+            LIMIT 1
+            """
+        )
+    ) == ("literal_candidate_not_published",)
 
 
 def test_removed_source_deletes_only_its_committed_aliases(
@@ -1289,6 +1937,10 @@ def test_refresh_waits_in_the_database_index_queue(
         blocker.execute(
             "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
             (_INDEX_QUEUE_LOCK,),
+        )
+        blocker.execute(
+            "SELECT pg_notify(%s, %s)",
+            (refresh_module.INDEX_NOTIFY_CHANNEL, "released"),
         )
         assert pending.result(timeout=1).message_count == 0
         assert reported_waiting
@@ -1494,7 +2146,7 @@ def test_next_owner_marks_abandoned_building_refresh_failed(
     assert recovered[4][-1]["code"] == "abandoned_refresh"
 
 
-def test_direct_semantic_index_waits_for_the_shared_index_owner(
+def test_composed_index_waits_for_the_shared_index_owner(
     postgres_cluster,
 ) -> None:
     with (
@@ -1504,47 +2156,34 @@ def test_direct_semantic_index_waits_for_the_shared_index_owner(
             autocommit=True,
             application_name="semantic-waiter",
         ) as waiter,
-        psycopg.connect(postgres_cluster.dsn, autocommit=True) as observer,
         ThreadPoolExecutor(max_workers=1) as executor,
     ):
         migrate(waiter)
-        replace_messages(waiter, ())
         blocker.execute(
             "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
             (_INDEX_QUEUE_LOCK,),
         )
+        waiting = Event()
+
+        def progress(event: RefreshProgress) -> None:
+            if event.state == "waiting_for_index":
+                waiting.set()
+
         pending = executor.submit(
-            index_embeddings,
+            index_corpus,
             waiter,
             lambda texts: [],
             chunker=lambda texts: (),
+            source_roots=(),
+            progress=progress,
         )
-        deadline = time.monotonic() + 1
-        queued = False
-        while time.monotonic() < deadline and not pending.done():
-            queued = next(
-                observer.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_locks AS lock
-                        JOIN pg_stat_activity AS activity USING (pid)
-                        WHERE activity.application_name = 'semantic-waiter'
-                          AND lock.locktype = 'advisory'
-                          AND NOT lock.granted
-                    )
-                    """
-                )
-            )[0]
-            if queued:
-                break
-            time.sleep(0.01)
+        reported_wait = waiting.wait(timeout=1)
         still_pending = not pending.done()
         blocker.execute(
             "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
             (_INDEX_QUEUE_LOCK,),
         )
 
-        assert queued
+        assert reported_wait
         assert still_pending
-        assert pending.result(timeout=1) == 0
+        assert pending.result(timeout=6).embedding_count == 0

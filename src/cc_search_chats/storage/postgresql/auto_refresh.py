@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import psycopg
 
-_AUTO_REFRESH_COOLDOWN_SECONDS = 300
+AUTO_REFRESH_COOLDOWN_SECONDS = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +45,7 @@ def auto_refresh_status(
 def admit_auto_refresh(
     connection: psycopg.Connection,
     *,
-    cooldown_seconds: int = _AUTO_REFRESH_COOLDOWN_SECONDS,
+    cooldown_seconds: int = AUTO_REFRESH_COOLDOWN_SECONDS,
 ) -> AutoRefreshRequest:
     """Admit at most one new request after the completed-request cooldown."""
     if (
@@ -68,17 +68,25 @@ def admit_auto_refresh(
                     refresh_run_id = NULL, last_error = NULL
                 WHERE singleton
                   AND (
-                      state IN ('idle', 'complete')
-                      OR (state = 'failed' AND next_launch_retry_at IS NULL)
+                      state = 'idle'
+                      OR (
+                          state = 'complete'
+                          AND completed_at <=
+                              now() - make_interval(secs => %s)
+                      )
                   )
                   AND (
-                      requested_at IS NULL
-                      OR requested_at <=
-                         now() - make_interval(secs => %s)
-                  )
+                      SELECT generation.completed_at <=
+                             now() - make_interval(secs => %s)
+                      FROM cc_search_chats.corpus_state AS corpus
+                      JOIN cc_search_chats.corpus_generation AS generation
+                        ON generation.corpus_generation =
+                           corpus.current_corpus_generation
+                      WHERE corpus.singleton
+                  ) IS NOT FALSE
                 RETURNING request_id, state
                 """,
-                (cooldown_seconds,),
+                (cooldown_seconds, cooldown_seconds),
             ),
             None,
         )
@@ -187,12 +195,13 @@ def mark_auto_refresh_complete(
     *,
     refresh_run_id: int | None,
 ) -> None:
-    """Finish the current service-owned request after literal maintenance."""
+    """Finish the current service-owned request after coherent maintenance."""
     connection.execute(
         """
         UPDATE cc_search_chats.auto_refresh_state
         SET state = 'complete', completed_at = now(),
-            refresh_run_id = %s, last_error = NULL
+            refresh_run_id = %s, next_launch_retry_at = NULL,
+            last_error = NULL
         WHERE singleton AND request_id = %s AND state = 'running'
         """,
         (refresh_run_id, request_id),
@@ -209,7 +218,15 @@ def mark_auto_refresh_run_failed(
         """
         UPDATE cc_search_chats.auto_refresh_state
         SET state = 'failed', completed_at = now(), last_error = %s,
-            next_launch_retry_at = NULL
+            next_launch_retry_at = now() + make_interval(
+                secs => LEAST(
+                    300.0,
+                    5.0 * power(
+                        2.0,
+                        GREATEST(launch_attempt_count - 1, 0)
+                    )
+                )
+            )
         WHERE singleton AND request_id = %s AND state = 'running'
         """,
         (detail, request_id),

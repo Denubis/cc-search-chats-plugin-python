@@ -99,7 +99,7 @@ def test_search_skill_has_intentional_codex_discovery_metadata() -> None:
     assert metadata["policy"] == {"allow_implicit_invocation": True}
 
 
-def test_search_guidance_describes_the_v2_cross_vendor_contract() -> None:
+def test_search_guidance_describes_the_v3_coherent_corpus_contract() -> None:
     documents = {
         "README": (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
         "CLAUDE": (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8"),
@@ -108,19 +108,25 @@ def test_search_guidance_describes_the_v2_cross_vendor_contract() -> None:
     }
 
     for name, document in documents.items():
-        schema_markers = ("schema version 2", "schema v2", "`schema_version: 2`")
+        schema_markers = ("schema version 3", "schema v3", "`schema_version: 3`")
         assert any(marker in document.lower() for marker in schema_markers), name
         assert "PostgreSQL" in document, name
         assert "Ponytail" in document, name
         assert "--literal" in document, name
         assert "--tools" in document, name
         assert "--exhaustive" in document, name
+        assert "corpus_generation" in document, name
+        assert "semantic_build" in document, name
+        assert "corpus_age_ms" in document, name
 
     assert (
-        "Search refreshes changed native records before retrieval"
-        in documents["command"]
+        "A stale ranked search admits or joins one full background update before "
+        "opening its result snapshot" in documents["command"]
     )
-    assert "Search already performs metadata discovery" in documents["skill"]
+    assert (
+        "A stale ranked search may wait within the command deadline for that "
+        "update before opening its result snapshot" in documents["skill"]
+    )
     assert "--everything` is retired" in documents["README"]
 
 

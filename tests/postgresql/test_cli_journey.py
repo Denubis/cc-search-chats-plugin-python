@@ -28,13 +28,13 @@ def _run(
     return stopped.value.code, output
 
 
-def _assert_v2_envelope(
+def _assert_v3_envelope(
     payload: dict[str, object],
     command: str,
     *,
     status: str = "complete",
 ) -> None:
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["command"] == command
     assert payload["status"] == status
     assert isinstance(payload["coverage"], dict)
@@ -55,7 +55,24 @@ def _assert_v2_envelope(
         "completeness",
     }
     assert isinstance(payload["refresh"], dict)
-    assert isinstance(payload["semantic"], dict)
+    refresh = cast(dict[str, object], payload["refresh"])
+    assert "corpus_generation" in refresh
+    semantic = payload["semantic"]
+    assert isinstance(semantic, dict)
+    semantic = cast(dict[str, object], semantic)
+    assert set(semantic) == {
+        "semantic_build",
+        "corpus_generation",
+        "state",
+        "profile_id",
+        "completed_units",
+        "total_units",
+        "fresh",
+    }
+    assert semantic["corpus_generation"] == refresh["corpus_generation"]
+    assert "indexed_at" in payload
+    assert "corpus_age_ms" in payload
+    assert isinstance(payload["background_refresh"], dict)
     assert isinstance(payload["warnings"], list)
 
 
@@ -100,12 +117,13 @@ def _progress_events(stderr: str) -> list[dict[str, object]]:
             "completed_units",
             "total_units",
             "owner",
-            "fts_revision",
-            "semantic_revision",
+            "corpus_generation",
+            "semantic_build",
             "source_watermark",
             "deadline_ms",
             "retrieval_mode",
             "indexed_at",
+            "corpus_age_ms",
             "stale_reasons",
             "background_refresh",
             "warning",
@@ -136,6 +154,10 @@ def test_postgresql_cli_journey_with_events(
     )
     monkeypatch.setattr(
         "cc_search_chats.cli._start_systemd_refresh", lambda timeout_seconds: None
+    )
+    monkeypatch.setattr(
+        "cc_search_chats.cli._wait_for_index_notification",
+        lambda connection, timeout_seconds: False,
     )
     claude_root, codex_root = tmp_path / "claude", tmp_path / "codex"
     claude_root.mkdir()
@@ -171,14 +193,55 @@ def test_postgresql_cli_journey_with_events(
         monkeypatch.setenv(variable, str(connection[key]))
     monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
     monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
+    initial_vector = [0.0] * 1024
+    initial_vector[0] = 1.0
+
+    def initial_passage_embeddings(texts, **kwargs):
+        progress = kwargs.get("progress")
+        if progress is not None:
+            progress("model_preflight", "running")
+            progress("model_preflight", "complete")
+            progress("model_load", "running")
+            progress("model_load", "complete")
+        return [initial_vector for _ in texts]
+
+    monkeypatch.setattr(
+        "cc_search_chats.cli.embed_passages", initial_passage_embeddings
+    )
+    monkeypatch.setattr("cc_search_chats.cli.chunk_passages", _single_chunks)
 
     code, migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
     assert code == 0
-    assert json.loads(migrated.out)["applied_schema_version"] == 6
-    code, indexed = _run(monkeypatch, capsys, "index", "--literal-only", "--json")
+    assert json.loads(migrated.out)["applied_schema_version"] == 7
+    code, diagnostic = _run(
+        monkeypatch,
+        capsys,
+        "index",
+        "--literal-only",
+        "--json",
+    )
+    assert code == 0
+    diagnostic_payload = json.loads(diagnostic.out)
+    assert diagnostic_payload["corpus_generation"] == 0
+    assert diagnostic_payload["coverage"]["indexed_files"] == 0
+    assert "literal_diagnostic" in {
+        event["phase"] for event in _progress_events(diagnostic.err)
+    }
+    code, indexed = _run(monkeypatch, capsys, "index", "--json")
     assert code == 0
     indexed_payload = json.loads(indexed.out)
-    _assert_v2_envelope(indexed_payload, "index")
+    _assert_v3_envelope(indexed_payload, "index")
+    assert (
+        indexed_payload["corpus_generation"]
+        == indexed_payload["refresh"]["corpus_generation"]
+    )
+    assert (
+        indexed_payload["semantic_build"]
+        == indexed_payload["semantic"]["semantic_build"]
+    )
+    assert isinstance(indexed_payload["indexed_at"], str)
+    assert isinstance(indexed_payload["corpus_age_ms"], int)
+    assert indexed_payload["corpus_age_ms"] >= 0
     coverage = indexed_payload["coverage"]
     assert coverage["configured_root_count"] == 2
     assert coverage["resolved_root_count"] == 2
@@ -207,14 +270,21 @@ def test_postgresql_cli_journey_with_events(
     assert index_progress[-1]["coverage"] == indexed_payload["coverage"]
     assert index_progress[-1]["refresh"] == indexed_payload["refresh"]
     assert index_progress[-1]["semantic"] == indexed_payload["semantic"]
+    assert (
+        index_progress[-1]["corpus_generation"] == indexed_payload["corpus_generation"]
+    )
+    assert index_progress[-1]["semantic_build"] == indexed_payload["semantic_build"]
+    assert index_progress[-1]["corpus_age_ms"] == indexed_payload["corpus_age_ms"]
 
-    code, unchanged = _run(monkeypatch, capsys, "index", "--literal-only", "--json")
+    code, unchanged = _run(monkeypatch, capsys, "index", "--json")
     assert code == 0
     unchanged_payload = json.loads(unchanged.out)
-    _assert_v2_envelope(unchanged_payload, "index")
+    _assert_v3_envelope(unchanged_payload, "index")
     unchanged_coverage = unchanged_payload["coverage"]
     unchanged_refresh = unchanged_payload["refresh"]
-    assert unchanged_payload["revision_id"] == indexed_payload["revision_id"]
+    assert (
+        unchanged_payload["corpus_generation"] == indexed_payload["corpus_generation"]
+    )
     assert unchanged_coverage["metadata_checked_files"] == 4
     assert unchanged_coverage["content_read_files"] == 0
     assert unchanged_coverage["content_read_bytes"] == 0
@@ -228,6 +298,16 @@ def test_postgresql_cli_journey_with_events(
     assert unchanged_progress[-1]["coverage"] == unchanged_coverage
     assert unchanged_progress[-1]["refresh"] == unchanged_refresh
 
+    code, human_index = _run(
+        monkeypatch,
+        capsys,
+        "index",
+        "--progress",
+        "human",
+    )
+    assert code == 0
+    assert f"into corpus {indexed_payload['corpus_generation']}" in human_index.err
+
     code, exported = _run(
         monkeypatch,
         capsys,
@@ -238,14 +318,17 @@ def test_postgresql_cli_journey_with_events(
         "2026-08-12T00:00:00Z",
         "--json",
     )
-    assert code == 0
+    assert code == 0, json.loads(exported.out)["error"]
     exported_payload = json.loads(exported.out)
-    _assert_v2_envelope(exported_payload, "events")
+    _assert_v3_envelope(exported_payload, "events")
     assert exported_payload["window"] == {
         "from_utc": "2026-08-11T00:00:00Z",
         "until_utc": "2026-08-12T00:00:00Z",
     }
-    assert exported_payload["source_revision"] == indexed_payload["revision_id"]
+    assert (
+        exported_payload["source_corpus_generation"]
+        == indexed_payload["corpus_generation"]
+    )
     assert exported_payload["population"] == {
         "scanned_content_rows": 13,
         "scanned_logical_messages": 11,
@@ -281,7 +364,7 @@ def test_postgresql_cli_journey_with_events(
             "submitted_by",
             "retention_status",
             "physical_alias_count",
-            "source_revision",
+            "source_corpus_generation",
         }
         for event in events
     )
@@ -292,7 +375,8 @@ def test_postgresql_cli_journey_with_events(
     ]
     assert [event["physical_alias_count"] for event in events] == [1, 2]
     assert all(
-        event["source_revision"] == indexed_payload["revision_id"] for event in events
+        event["source_corpus_generation"] == indexed_payload["corpus_generation"]
+        for event in events
     )
     assert "visible primary user" not in exported.out
     assert "modern visible user" not in exported.out
@@ -326,6 +410,17 @@ def test_postgresql_cli_journey_with_events(
     }
     with claude_source.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(appended, separators=(",", ":")) + "\n")
+    with psycopg.connect(postgres_cluster.dsn) as database:
+        database.execute(
+            """
+            UPDATE cc_search_chats.corpus_generation AS generation
+            SET completed_at = now() - interval '10 minutes'
+            FROM cc_search_chats.corpus_state AS state
+            WHERE state.singleton
+              AND generation.corpus_generation =
+                  state.current_corpus_generation
+            """
+        )
 
     code, stale_search = _run(
         monkeypatch,
@@ -337,12 +432,9 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     stale_payload = json.loads(stale_search.out)
-    _assert_v2_envelope(stale_payload, "search")
+    _assert_v3_envelope(stale_payload, "search")
     assert stale_payload["results"] == []
-    assert stale_payload["stale_reasons"] == [
-        "native_sources_not_checked",
-        "semantic_revision_stale",
-    ]
+    assert stale_payload["stale_reasons"] == ["native_sources_not_checked"]
     assert stale_payload["background_refresh"]["state"] == "launched"
     stale_events = _progress_events(stale_search.err)
     assert {event["phase"] for event in stale_events} == {"retrieve", "done"}
@@ -356,7 +448,6 @@ def test_postgresql_cli_journey_with_events(
         monkeypatch,
         capsys,
         "index",
-        "--literal-only",
         "--background-refresh",
         "--json",
     )
@@ -416,18 +507,8 @@ def test_postgresql_cli_journey_with_events(
         "--semantic-only",
         "--json",
     )
-    assert code == 0
-    semantic_events = _progress_events(semantic_index.err)
-    assert [
-        event["state"]
-        for event in semantic_events
-        if event["phase"] == "model_preflight" and event["event"] == "progress"
-    ] == ["running", "complete"]
-    assert [
-        event["state"]
-        for event in semantic_events
-        if event["phase"] == "model_load" and event["event"] == "progress"
-    ] == ["running", "complete"]
+    assert code == 1
+    assert "publish one coherent corpus" in semantic_index.out
     embedded_texts.clear()
     code, initial_hybrid = _run(
         monkeypatch,
@@ -470,8 +551,18 @@ def test_postgresql_cli_journey_with_events(
         database.execute(
             """
             UPDATE cc_search_chats.auto_refresh_state
-            SET requested_at = requested_at - interval '5 minutes'
+            SET completed_at = completed_at - interval '10 minutes'
             WHERE singleton
+            """
+        )
+        database.execute(
+            """
+            UPDATE cc_search_chats.corpus_generation AS generation
+            SET completed_at = now() - interval '10 minutes'
+            FROM cc_search_chats.corpus_state AS state
+            WHERE state.singleton
+              AND generation.corpus_generation =
+                  state.current_corpus_generation
             """
         )
 
@@ -491,7 +582,6 @@ def test_postgresql_cli_journey_with_events(
         monkeypatch,
         capsys,
         "index",
-        "--literal-only",
         "--background-refresh",
         "--json",
     )
@@ -509,7 +599,7 @@ def test_postgresql_cli_journey_with_events(
         result["logical_message_id"] == "claude-hybrid-refresh-append"
         for result in hybrid_results
     )
-    assert embedded_texts == []
+    assert "hybrid refresh sentinel" in embedded_texts
 
     code, searched = _run(
         monkeypatch,
@@ -524,7 +614,7 @@ def test_postgresql_cli_journey_with_events(
         "--json",
     )
     searched_payload = json.loads(searched.out)
-    _assert_v2_envelope(searched_payload, "search")
+    _assert_v3_envelope(searched_payload, "search")
     result = searched_payload["results"][0]
     assert code == 0
     assert result["provider"] == "codex"
@@ -539,7 +629,7 @@ def test_postgresql_cli_journey_with_events(
     code, resolved_many = _run(monkeypatch, capsys, "resolve", "--stdin", "--json")
     assert code == 3
     resolved_payload = json.loads(resolved_many.out)
-    _assert_v2_envelope(resolved_payload, "resolve", status="partial")
+    _assert_v3_envelope(resolved_payload, "resolve", status="partial")
     resolutions = resolved_payload["resolutions"]
     assert [value["locator"] for value in resolutions] == [
         locator,
@@ -568,7 +658,7 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     exhaustive_payload = json.loads(exhaustive.out)
-    _assert_v2_envelope(exhaustive_payload, "search")
+    _assert_v3_envelope(exhaustive_payload, "search")
     assert exhaustive_payload["exhaustive"] is True
     assert exhaustive_payload["result_limit"] is None
     assert [value["content_class"] for value in exhaustive_payload["results"]] == [
@@ -586,7 +676,7 @@ def test_postgresql_cli_journey_with_events(
         code, output = _run(monkeypatch, capsys, *command)
         assert code == 0
         payload = json.loads(output.out)
-        _assert_v2_envelope(
+        _assert_v3_envelope(
             payload,
             command[0],
             status=("resolved" if command[0] in {"context", "resolve"} else "complete"),
@@ -604,7 +694,7 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     reference_payload = json.loads(reference.out)
-    _assert_v2_envelope(reference_payload, "resolve", status="resolved")
+    _assert_v3_envelope(reference_payload, "resolve", status="resolved")
     assert reference_payload["messages"]
     assert all("text" not in message for message in reference_payload["messages"])
 
@@ -617,7 +707,7 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 2
     malformed_payload = json.loads(malformed.out)
-    _assert_v2_envelope(
+    _assert_v3_envelope(
         malformed_payload,
         "resolve",
         status="malformed_locator",
@@ -635,7 +725,7 @@ def test_postgresql_cli_journey_with_events(
         "--json",
     )
     assert code == 3
-    _assert_v2_envelope(
+    _assert_v3_envelope(
         json.loads(stale.out),
         "resolve",
         status="stale_source",
@@ -675,11 +765,25 @@ def test_extract_requires_provider_when_native_session_ids_collide(
         monkeypatch.setenv(variable, str(connection[key]))
     monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
     monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def colliding_passage_embeddings(texts, **kwargs):
+        progress = kwargs.get("progress")
+        if progress is not None:
+            progress("model_load", "complete")
+        return [vector for _ in texts]
+
+    monkeypatch.setattr(
+        "cc_search_chats.cli.embed_passages",
+        colliding_passage_embeddings,
+    )
+    monkeypatch.setattr("cc_search_chats.cli.chunk_passages", _single_chunks)
 
     code, _migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
     assert code == 0
-    code, _indexed = _run(monkeypatch, capsys, "index", "--literal-only", "--json")
-    assert code == 0
+    code, _indexed = _run(monkeypatch, capsys, "index", "--json")
+    assert code == 0, json.loads(_indexed.out)["error"]
     code, ambiguous = _run(
         monkeypatch,
         capsys,
@@ -690,7 +794,7 @@ def test_extract_requires_provider_when_native_session_ids_collide(
 
     assert code == 3
     payload = json.loads(ambiguous.out)
-    _assert_v2_envelope(payload, "extract", status="multiple_matches")
+    _assert_v3_envelope(payload, "extract", status="multiple_matches")
     assert payload["messages"] == []
     assert payload["matches"] == [
         {"provider": "claude", "source_session_id": "claude-session-primary"},
@@ -708,7 +812,7 @@ def test_extract_requires_provider_when_native_session_ids_collide(
     )
     assert code == 0
     qualified_payload = json.loads(qualified.out)
-    _assert_v2_envelope(qualified_payload, "extract")
+    _assert_v3_envelope(qualified_payload, "extract")
     assert qualified_payload["messages"]
     assert {
         message["identity"]["provider"] for message in qualified_payload["messages"]

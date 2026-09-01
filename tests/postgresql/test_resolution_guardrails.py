@@ -2,20 +2,24 @@
 
 import json
 import os
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Event
 
 import psycopg
 import pytest
 
 from cc_search_chats.cli import _handle_postgres, _ProgressStream, build_parser
+from cc_search_chats.semantic import SemanticChunk
 from cc_search_chats.storage.postgresql import migrate, resolve_message
 from cc_search_chats.storage.postgresql.guardrails import queued_read
 
 pytestmark = pytest.mark.postgresql
 _READ_QUEUE_LOCK = "cc_search_chats.read_queue"
 _INDEX_QUEUE_LOCK = "cc_search_chats.index_queue"
+FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
 
 
 def test_documented_non_superuser_role_can_apply_read_guardrails(
@@ -45,14 +49,39 @@ def _plan_nodes(node):
         yield from _plan_nodes(child)
 
 
-def _seed_representative_revision(connection: psycopg.Connection) -> tuple[str, str]:
+def _seed_representative_corpus(connection: psycopg.Connection) -> tuple[str, str]:
     migrate(connection)
-    revision_id = next(
+    corpus_generation = next(
         connection.execute(
-            "INSERT INTO cc_search_chats.corpus_revision DEFAULT VALUES "
-            "RETURNING revision_id"
+            """
+            INSERT INTO cc_search_chats.corpus_generation (
+                completed_at, status, message_count, alias_count
+            ) VALUES (now(), 'complete', 20000, 20000)
+            RETURNING corpus_generation
+            """
         )
     )[0]
+    semantic_build = next(
+        connection.execute(
+            """
+            INSERT INTO cc_search_chats.semantic_build (
+                corpus_generation, profile_id, completed_at, status
+            ) VALUES (
+                %s, 'nemotron-3-embed-8b-bf16:v1', now(), 'complete'
+            )
+            RETURNING semantic_build
+            """,
+            (corpus_generation,),
+        )
+    )[0]
+    connection.execute(
+        """
+        UPDATE cc_search_chats.corpus_generation
+        SET semantic_build = %s
+        WHERE corpus_generation = %s
+        """,
+        (semantic_build, corpus_generation),
+    )
     connection.execute(
         """
         INSERT INTO cc_search_chats.message_current (
@@ -82,9 +111,9 @@ def _seed_representative_revision(connection: psycopg.Connection) -> tuple[str, 
         """
     )
     connection.execute(
-        "UPDATE cc_search_chats.corpus_state SET current_revision_id = %s "
+        "UPDATE cc_search_chats.corpus_state SET current_corpus_generation = %s "
         "WHERE singleton",
-        (revision_id,),
+        (corpus_generation,),
     )
     connection.execute("ANALYZE cc_search_chats.message_current")
     connection.execute("ANALYZE cc_search_chats.physical_alias_current")
@@ -104,7 +133,7 @@ def test_exact_resolution_uses_current_locator_indexes(
     expected_index: str,
 ) -> None:
     """The executed lookup plan reaches each locator through its named index."""
-    canonical, alias = _seed_representative_revision(postgres_connection)
+    canonical, alias = _seed_representative_corpus(postgres_connection)
     target = canonical if target_kind == "canonical" else alias
     notices: list[str] = []
     postgres_connection.add_notice_handler(
@@ -173,7 +202,7 @@ def test_exact_resolution_waits_in_the_database_read_queue(
     monkeypatch.setattr(
         "cc_search_chats.storage.postgresql.guardrails._LOCK_TIMEOUT", "20ms"
     )
-    canonical, _ = _seed_representative_revision(postgres_connection)
+    canonical, _ = _seed_representative_corpus(postgres_connection)
     with (
         psycopg.connect(
             postgres_cluster.dsn,
@@ -237,7 +266,7 @@ def test_exact_resolution_waits_in_the_database_read_queue(
 def test_duplicate_physical_aliases_resolve_one_logical_message(
     postgres_connection: psycopg.Connection,
 ) -> None:
-    _, alias = _seed_representative_revision(postgres_connection)
+    _, alias = _seed_representative_corpus(postgres_connection)
     postgres_connection.execute(
         """
         INSERT INTO cc_search_chats.physical_alias_current (
@@ -265,18 +294,41 @@ def test_composed_index_holds_the_database_queue_through_embedding(
     postgres_cluster,
     postgres_connection: psycopg.Connection,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    _seed_representative_revision(postgres_connection)
+    migrate(postgres_connection)
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    shutil.copy(
+        FIXTURES / "claude_primary.jsonl",
+        claude_root / "claude-session-primary.jsonl",
+    )
+    codex_root = tmp_path / "codex"
+    codex_root.mkdir()
+    monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
+    monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
     embedding_started = Event()
     finish_embedding = Event()
+    vector = [0.0] * 1024
+    vector[0] = 1.0
 
-    def controlled_embedding(*args, **kwargs) -> int:
+    def controlled_embedding(texts, **kwargs):
+        progress = kwargs.get("progress")
+        if progress is not None:
+            progress("model_preflight", "running")
+            progress("model_preflight", "complete")
+            progress("model_load", "running")
+            progress("model_load", "complete")
         embedding_started.set()
         assert finish_embedding.wait(timeout=1)
-        return 20_000
+        return [vector for _ in texts]
 
-    monkeypatch.setattr("cc_search_chats.cli.index_embeddings", controlled_embedding)
-    args = build_parser().parse_args(["index", "--semantic-only"])
+    def single_chunks(texts):
+        return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
+
+    monkeypatch.setattr("cc_search_chats.cli.embed_passages", controlled_embedding)
+    monkeypatch.setattr("cc_search_chats.cli.chunk_passages", single_chunks)
+    args = build_parser().parse_args(["index"])
     with (
         psycopg.connect(postgres_cluster.dsn, autocommit=True) as observer,
         ThreadPoolExecutor(max_workers=1) as executor,
@@ -302,4 +354,4 @@ def test_composed_index_holds_the_database_queue_through_embedding(
         finish_embedding.set()
 
         assert acquired is False
-        assert pending.result(timeout=1) == 0
+        assert pending.result(timeout=3) == 0

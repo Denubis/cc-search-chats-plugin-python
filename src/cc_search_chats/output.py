@@ -499,7 +499,7 @@ def event_export_payload(export: EventExport) -> dict[str, object]:
             "from_utc": _utc_json(export.from_utc),
             "until_utc": _utc_json(export.until_utc),
         },
-        "source_revision": export.source_revision,
+        "source_corpus_generation": export.source_corpus_generation,
         "population": {
             "scanned_content_rows": population.scanned_content_rows,
             "scanned_logical_messages": population.scanned_logical_messages,
@@ -523,7 +523,7 @@ def event_export_payload(export: EventExport) -> dict[str, object]:
                 "submitted_by": event.submitted_by,
                 "retention_status": event.retention_status,
                 "physical_alias_count": event.physical_alias_count,
-                "source_revision": export.source_revision,
+                "source_corpus_generation": export.source_corpus_generation,
             }
             for event in export.events
         ],

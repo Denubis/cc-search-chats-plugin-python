@@ -26,6 +26,7 @@ _MIGRATIONS = (
     Migration(4, "coverage_schema.sql"),
     Migration(5, "semantic_chunk_schema.sql"),
     Migration(6, "incremental_refresh_schema.sql"),
+    Migration(7, "coherent_corpus_schema.sql"),
 )
 
 
@@ -390,17 +391,17 @@ def prune_legacy_snapshots(
                     SELECT 1
                     FROM cc_search_chats.cutover_validation AS validation
                     JOIN cc_search_chats.corpus_state AS corpus
-                      ON corpus.current_revision_id = validation.corpus_revision_id
-                    JOIN cc_search_chats.corpus_revision AS generation
-                      ON generation.revision_id = validation.corpus_revision_id
-                    JOIN cc_search_chats.semantic_state AS semantic_state
-                      ON semantic_state.singleton
-                    JOIN cc_search_chats.semantic_revision AS semantic_generation
-                      ON semantic_generation.semantic_revision_id =
-                         semantic_state.current_semantic_revision_id
-                     AND semantic_generation.corpus_revision_id =
-                         corpus.current_revision_id
-                     AND semantic_generation.status = 'complete'
+                      ON corpus.current_corpus_generation =
+                         validation.corpus_generation
+                    JOIN cc_search_chats.corpus_generation AS generation
+                      ON generation.corpus_generation =
+                         validation.corpus_generation
+                    JOIN cc_search_chats.semantic_build AS semantic
+                      ON semantic.semantic_build = generation.semantic_build
+                     AND semantic.corpus_generation =
+                         generation.corpus_generation
+                     AND semantic.status = 'complete'
+                     AND semantic.completed_at IS NOT NULL
                     WHERE validation.validation_id = %s
                       AND validation.accepted_at IS NOT NULL
                       AND validation.uat_evidence @> %s::jsonb
@@ -410,13 +411,13 @@ def prune_legacy_snapshots(
                       AND generation.alias_count =
                           (SELECT count(*)
                            FROM cc_search_chats.physical_alias_current)
-                      AND semantic_generation.embedded_count =
+                      AND semantic.embedded_count =
                           (SELECT count(*)
                            FROM cc_search_chats.semantic_chunk_current AS chunk
                            JOIN cc_search_chats.embedding_value AS value
                              ON (value.profile_id, value.input_digest) =
                                 (chunk.profile_id, chunk.input_digest)
-                           WHERE chunk.profile_id = semantic_generation.profile_id)
+                           WHERE chunk.profile_id = semantic.profile_id)
                 )
                 """,
                 (

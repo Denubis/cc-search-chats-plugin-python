@@ -138,18 +138,21 @@ cc-search-chats resolve CCCHAT_LOCATOR --reference-only --json
 # Export canonical human-message points from a half-open UTC window, without bodies
 cc-search-chats events --from 2026-01-01T00:00:00Z --until 2027-01-01T00:00:00Z --json
 
-# Explicit corpus/semantic maintenance or read-only semantic checkpoint
+# Explicit coherent corpus maintenance or read-only checkpoint
 cc-search-chats index --json
 cc-search-chats index --status --json
 ```
 
 Ranked `search` measures a provisional five-second deadline from executable
-invocation. It retrieves literal candidates from the committed PostgreSQL
-snapshot first and never waits for the index owner. After retrieval it may
-atomically request one low-priority literal refresh per five-minute cooldown;
-user systemd owns that work after the requesting CLI exits. A later search sees
-the resulting revision. Output names the queried revision, index time,
-staleness reasons, retrieval mode, deadline, and durable background state.
+invocation. When the selected corpus is at least five minutes old, the command
+admits or joins one user-systemd full index before opening its repeatable-read
+result snapshot. It waits only while that request remains active and preserves
+one second for retrieval. If publication finishes in budget, the search reads
+the new coherent corpus; otherwise it reads the previous completed corpus. A
+successful update, including a no-op, starts a five-minute quiet period in which
+search does not launch another request. Output names `corpus_generation`,
+`semantic_build`, `indexed_at`, `corpus_age_ms`, staleness reasons, retrieval
+mode, deadline, and durable background state.
 
 `index --migrate` is the only CLI path that applies pending schema migrations.
 Search and routine index/status commands report `maintenance_required` without
@@ -203,9 +206,9 @@ alias; conflicting content for one identity aborts publication.
 
 PostgreSQL stores one current canonical message row, one row per physical alias,
 one current semantic chunk row per chunk/profile, and one vector per
-profile/prefixed-input digest. Corpus and semantic generations contain bounded
-publication, progress, and failure metadata—not copies of messages, aliases, or
-vectors.
+profile/prefixed-input digest. Corpus generations and semantic builds contain
+bounded publication, progress, and failure metadata—not copies of messages,
+aliases, or vectors.
 
 Unchanged refreshes read metadata but no JSONL content bytes and create no
 generation. Same-device/inode growth reads only after the last complete-record
@@ -213,11 +216,13 @@ watermark. Partial tails remain pending; truncation, replacement, same-size
 modification, and parser-version changes reparse the affected source from byte
 zero. Native logs are never written or locked.
 
-One PostgreSQL advisory owner serializes refresh/semantic work. Long phases
+One PostgreSQL advisory owner serializes corpus work. Long phases
 publish owner, heartbeat, completed/total units, and named state. Committed
-literal rows remain searchable after semantic failure. Ranked search may fuse
-only digest-valid rows from the selected semantic generation; missing mappings
-produce partial hybrid coverage or literal fallback rather than stale vectors.
+state advances only when a corpus generation and its complete semantic build
+publish together. Candidate failure leaves the previous coherent corpus
+selected. If query embedding or semantic retrieval is unavailable, ranked
+search returns `literal_fallback` from that selected corpus rather than stale or
+partially mapped vectors.
 
 Deterministic source failures retain a separate observation fingerprint. An
 unchanged blocked file is metadata-checked without reopening JSONL bytes;
@@ -227,12 +232,15 @@ checkpoint.
 
 ## JSON and Progress Contract
 
-The default PostgreSQL surface emits JSON schema version 2. Each `--json`
+The default PostgreSQL surface emits JSON schema version 3. Each `--json`
 command writes one stdout object containing:
 
 - `schema_version`, `command`, and terminal `status`
 - `coverage` with roots, repositories, file counts, diagnostics, and watermarks
-- `refresh`, `semantic`, `background_refresh`, and `warnings`
+- `refresh.corpus_generation`, `semantic.semantic_build`,
+  `semantic.corpus_generation`, and their state/progress fields
+- top-level `indexed_at` and database-computed `corpus_age_ms`, plus
+  `background_refresh` and `warnings`
 - ranked-search `deadline_ms`, `elapsed_ms`, `retrieval_mode`, `indexed_at`, and
   `stale_reasons`
 - command-specific `results`, `sessions`, `messages`, `resolutions`, or `events`
@@ -243,20 +251,21 @@ are `resolved`, `no_match`, `multiple_matches`, `source_unavailable`,
 `stale_source`, `stale_index`, `malformed_locator`, and
 `unsupported_provider_schema`.
 
-`events` is a read-only export from the selected corpus revision. Its required
+`events` is a read-only export from the selected corpus generation. Its required
 timezone-aware `--from` and `--until` bounds are half-open. It emits no message
 bodies: retained rows contain canonical locator, UTC timestamp, provider,
 session kind, cwd/repository provenance, and physical-alias count. Its positive
 population block separately reconciles scanned content rows and logical
-messages with retained, excluded, and unresolved authorship counts.
+messages with retained, excluded, and unresolved authorship counts. The export
+and every event carry `source_corpus_generation`.
 
 Progress never contaminates JSON stdout. JSON or non-TTY execution writes
-ordered schema-v2 NDJSON events to stderr, including periodic heartbeats and
+ordered schema-v3 NDJSON events to stderr, including periodic heartbeats and
 exactly one terminal event. Use `--progress human` for concise terminal text.
 
 ## Scheduled Maintenance
 
-The distribution includes a low-priority automatic literal-refresh oneshot plus
+The distribution includes a low-priority automatic full-index oneshot plus
 the composed nightly service and persistent timer. Copy all packaged units to
 `~/.config/systemd/user/`. Optional operator configuration belongs in
 `~/.config/cc-search-chats/index.env`, which both services read if present.
@@ -278,7 +287,8 @@ systemctl --user enable --now cc-search-chats-index.timer  # only after accepted
 The timer runs nightly at 03:00 with up to 30 minutes randomized delay. Keep it
 disabled through migration and UAT. Search starts
 `cc-search-chats-refresh.service` with `--no-block`; the automatic oneshot has no
-timer and never loads the model. No resident daemon is required.
+timer and runs the same coherent indexing path as manual and nightly
+maintenance. No resident daemon is required.
 
 ## Recovery and Release Boundaries
 

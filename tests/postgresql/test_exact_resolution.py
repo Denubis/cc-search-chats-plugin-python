@@ -12,15 +12,26 @@ from cc_search_chats.providers.source_discovery import (
     ConfiguredSourceRoot,
     source_root_id,
 )
+from cc_search_chats.semantic import SemanticChunk
 from cc_search_chats.storage.postgresql import (
+    index_corpus,
     migrate,
-    refresh_native_sources,
     resolve_exact_messages,
     search_messages,
 )
 
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
+
+
+def _single_chunks(texts):
+    return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
+
+
+def _passage_embeddings(texts):
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    return [vector for _ in texts]
 
 
 def _indexed_claude_source(
@@ -41,7 +52,12 @@ def _indexed_claude_source(
         source_root_id=source_root_id(Provider.CLAUDE, root_path.resolve()),
     )
     migrate(connection)
-    refresh_native_sources(connection, source_roots=(root,))
+    index_corpus(
+        connection,
+        _passage_embeddings,
+        chunker=_single_chunks,
+        source_roots=(root,),
+    )
     locator = search_messages(connection, "visible primary user")[0].canonical_locator
     return source, root, locator
 

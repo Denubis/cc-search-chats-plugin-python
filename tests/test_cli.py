@@ -135,13 +135,11 @@ def test_postgresql_search_does_not_wait_on_a_local_admission_lock(
     assert admissions == []
 
 
-def test_background_refresh_service_invocation_is_a_valid_literal_index_mode() -> None:
-    args = build_parser().parse_args(
-        ["index", "--literal-only", "--background-refresh"]
-    )
+def test_background_refresh_service_invocation_is_a_valid_full_index_mode() -> None:
+    args = build_parser().parse_args(["index", "--background-refresh"])
 
     assert args.command == "index"
-    assert args.literal_only is True
+    assert args.literal_only is False
     assert args.background_refresh is True
 
 

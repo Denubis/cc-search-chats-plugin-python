@@ -1,6 +1,6 @@
 # cc-search-chats
 
-Last verified: 2026-08-24
+Last verified: 2026-09-01
 
 ## Purpose
 
@@ -30,10 +30,13 @@ They do not use the operator's production database.
 
 ## CLI Contract
 
-- PostgreSQL is the default backend. Ranked `search` reads one committed
-  snapshot under a five-second invocation-to-answer deadline, then admits at
-  most one durable literal background refresh per five-minute cooldown. It
-  never migrates, refreshes, or embeds inline; `index` owns maintenance.
+- PostgreSQL is the default backend. When the selected corpus is at least five
+  minutes old, ranked `search` admits or joins one systemd-owned full index
+  before opening its committed result snapshot. It waits only within the
+  five-second invocation-to-answer deadline while preserving one second for
+  retrieval. A completed update, including a no-op, starts five quiet minutes.
+  Search never migrates or performs maintenance in its own process; `index`
+  owns the coherent corpus update.
 - Hybrid search is the default. `--literal` avoids the model. Default search
   returns visible primary-session prose; `--agents` includes agent and unknown
   sessions; `--literal --tools` includes tool name/input/output rows;
@@ -47,12 +50,16 @@ They do not use the operator's production database.
 - `resolve` verifies exact `ccchat:v1:` locators against native source bytes.
   `--reference-only` retains verified identity and coordinates while omitting
   text.
-- `events` reads the selected corpus revision inside required half-open,
+- `events` reads the selected corpus generation inside required half-open,
   timezone-aware bounds. It exports canonical human-message timestamps and
   provenance without message bodies, plus positive retained, excluded, and
   unresolved population counts.
-- PostgreSQL JSON stdout uses schema version 2. Every command returns an object
-  with `command`, `status`, `coverage`, `refresh`, `semantic`, and `warnings`.
+- PostgreSQL JSON stdout uses schema version 3. Every command returns an object
+  with `command`, `status`, `coverage`, `refresh`, `semantic`, `indexed_at`,
+  `corpus_age_ms`, and `warnings`. Public generation identity is
+  `refresh.corpus_generation`; semantic identity is
+  `semantic.semantic_build` plus `semantic.corpus_generation`; events use
+  `source_corpus_generation`.
   JSON/non-TTY progress is ordered NDJSON on stderr and ends with one terminal
   event; stdout remains one JSON document.
 - Schema migration is explicit `index --migrate` maintenance. Other PostgreSQL
@@ -83,7 +90,7 @@ locks, or runtime state.
   current rows, incremental refresh, bounded event export, exact resolution,
   and semantic retrieval
 - `src/cc_search_chats/semantic/` — local-only model preflight and embedding
-- `src/cc_search_chats/cli.py` — imperative shell and v2 output/progress contract
+- `src/cc_search_chats/cli.py` — imperative shell and v3 output/progress contract
 - `skills/search-chat/` and `commands/search-chat.md` — agent consumers
 - `docs/architecture/database.md` — data ownership and relational invariants
 - `docs/runbooks/postgresql-index-maintenance.md` — migration, recovery, and
@@ -100,8 +107,10 @@ locks, or runtime state.
   change reparses from byte zero.
 - `message_current` and `physical_alias_current` contain only current canonical
   state. Generations retain bounded status/recovery metadata, not corpus copies.
-- One embedding value exists per profile/input digest; current mappings reuse it.
-  Semantic publication requires complete coverage of the current corpus.
+- One embedding value exists per profile/input digest; current mappings reuse
+  it. `corpus_state` selects only a completed corpus generation with its own
+  completed semantic build; candidate failure leaves the previous coherent
+  selection current.
 - Applied SQL migration bytes are immutable. Add a new ordered migration instead
   of editing one whose checksum may already be recorded.
 - Runtime commands use configured package/model caches and local model files.

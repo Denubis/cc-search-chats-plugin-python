@@ -1,9 +1,9 @@
 [Unit]
-Description=Incrementally refresh the cc-search-chats literal index
+Description=Refresh the coherent cc-search-chats corpus
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/cc-search-chats index --literal-only --background-refresh
+ExecStart=%h/.local/bin/cc-search-chats index --background-refresh
 EnvironmentFile=-%h/.config/cc-search-chats/index.env
 Environment=CC_SEARCH_CONTAINED=1
 Nice=10
