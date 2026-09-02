@@ -88,7 +88,7 @@ def validate_source_file_relative(value: Path) -> None:
     if (
         not isinstance(value, Path)
         or value.is_absolute()
-        or value == Path(".")
+        or value == Path()
         or ".." in value.parts
     ):
         raise ValueError(

@@ -3,10 +3,14 @@
 import fcntl
 import json
 import os
+import sys
 import time
-from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _runtime_dir() -> Path:
@@ -41,6 +45,4 @@ def client_admission(name: str) -> Iterator[None]:
 
 def sys_argv() -> list[str]:
     """Return argv without importing CLI state into the queue primitive."""
-    import sys
-
     return list(sys.argv)

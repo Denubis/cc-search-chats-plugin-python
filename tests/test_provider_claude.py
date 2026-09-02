@@ -420,7 +420,7 @@ class TestClaudeRecognizedShapes:
     def test_deeply_observed_ui_metadata_keysets_are_explicitly_excluded(
         self, record_type: str, keys: set[str]
     ) -> None:
-        payload: dict[str, object] = {key: None for key in keys}
+        payload: dict[str, object] = dict.fromkeys(keys)
         payload["type"] = record_type
 
         result = parse_claude_session(

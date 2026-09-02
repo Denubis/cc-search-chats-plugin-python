@@ -142,11 +142,11 @@ class TestRankSessions:
             self._make_session("new-avg", 96.0, 500),
         ]
         ranked = rank_sessions(sessions)
-        # Top 5 by mtime: new-small(100), new-big(99), new-medium(98),
-        #                  new-tiny(97), new-avg(96)
-        # Among those 5, sorted by file_size desc:
-        #   new-big(5000), new-medium(1000), new-avg(500), new-small(100), new-tiny(50)
-        # Then remainder: old-large(10.0)
+        # Top 5 by mtime: new-small 100, new-big 99, new-medium 98,
+        # new-tiny 97, new-avg 96.
+        # Among those 5, sorted by file_size desc: new-big 5000,
+        # new-medium 1000, new-avg 500, new-small 100, new-tiny 50.
+        # Then the remainder: old-large, mtime 10.0.
         assert ranked[0].session_id == "new-big"
         assert ranked[1].session_id == "new-medium"
         assert ranked[-1].session_id == "old-large"

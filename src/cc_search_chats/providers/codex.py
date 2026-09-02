@@ -518,7 +518,9 @@ class CodexParserState:
         if candidate is None:
             return
         if not isinstance(candidate, PhysicalMessageCandidate):
-            raise ValueError("trailing_candidate must be a physical message candidate")
+            raise ValueError(  # noqa: TRY004  # parser-state ValueError contract
+                "trailing_candidate must be a physical message candidate"
+            )
         message = candidate.message
         if (
             candidate.record_family
@@ -1382,7 +1384,7 @@ def _turn_context_shape(record: _DecodedRecord) -> bool:
         return False
     fields = set(payload)
     if (
-        not _TURN_CONTEXT_REQUIRED_FIELDS <= fields
+        not fields >= _TURN_CONTEXT_REQUIRED_FIELDS
         or not fields <= _TURN_CONTEXT_FIELDS
     ):
         return False
@@ -1652,7 +1654,8 @@ def parse_codex_session(
                     _diagnostic(
                         CodexDiagnosticCode.EXCLUDED_INTER_AGENT_METADATA,
                         record.envelope,
-                        "inter-agent metadata is retained as provenance, not searchable text",
+                        "inter-agent metadata is retained as provenance, "
+                        "not searchable text",
                     )
                 )
             else:

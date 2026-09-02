@@ -8,6 +8,7 @@ from fractions import Fraction
 from time import monotonic
 
 import psycopg
+from psycopg import sql
 
 from cc_search_chats.semantic import ModelUnavailable, SemanticChunk
 from cc_search_chats.semantic.model import CHUNKER_ID, PASSAGE_PREFIX
@@ -75,8 +76,9 @@ def _current_revision(connection: psycopg.Connection) -> int:
 def _eligible_message_count(connection: psycopg.Connection) -> int:
     return next(
         connection.execute(
-            "SELECT count(*) FROM cc_search_chats.message_current "
-            f"WHERE {_EMBEDDABLE_PROSE}"
+            sql.SQL(
+                "SELECT count(*) FROM cc_search_chats.message_current WHERE {predicate}"
+            ).format(predicate=sql.SQL(_EMBEDDABLE_PROSE))
         )
     )[0]
 
@@ -306,24 +308,24 @@ def _stage_candidate_chunks(
         for row, chunks in zip(batch, chunk_groups, strict=True):
             text = str(row[4])
             _validate_chunks(text, chunks)
-            for chunk in chunks:
-                inserts.append(
-                    (
-                        *row[:4],
-                        _PROFILE_ID,
-                        chunk.ordinal,
-                        CHUNKER_ID,
-                        chunk.token_start,
-                        chunk.token_end,
-                        chunk.char_start,
-                        chunk.char_end,
-                        row[5],
-                        chunk.text,
-                        hashlib.sha256(
-                            f"{PASSAGE_PREFIX}{chunk.text}".encode()
-                        ).hexdigest(),
-                    )
+            inserts.extend(
+                (
+                    *row[:4],
+                    _PROFILE_ID,
+                    chunk.ordinal,
+                    CHUNKER_ID,
+                    chunk.token_start,
+                    chunk.token_end,
+                    chunk.char_start,
+                    chunk.char_end,
+                    row[5],
+                    chunk.text,
+                    hashlib.sha256(
+                        f"{PASSAGE_PREFIX}{chunk.text}".encode()
+                    ).hexdigest(),
                 )
+                for chunk in chunks
+            )
         connection.cursor().executemany(
             """
             INSERT INTO pg_temp.semantic_candidate_chunk (
@@ -701,9 +703,9 @@ def _sync_chunks(connection: psycopg.Connection, chunker: Chunker) -> None:
     after: tuple[str, str, str, str] | None = None
     while True:
         params: list[object] = [_PROFILE_ID, _PROFILE_ID, CHUNKER_ID]
-        keyset = ""
+        keyset = sql.SQL("")
         if after is not None:
-            keyset = (
+            keyset = sql.SQL(
                 "AND (message.provider, message.source_session_id, "
                 "message.logical_message_id, message.content_class) > "
                 "(%s, %s, %s, %s)"
@@ -711,7 +713,8 @@ def _sync_chunks(connection: psycopg.Connection, chunker: Chunker) -> None:
             params.extend(after)
         rows = tuple(
             connection.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT message.provider, message.source_session_id,
                        message.logical_message_id, message.content_class,
                        message.prose_content, message.embedding_input_digest
@@ -747,7 +750,8 @@ def _sync_chunks(connection: psycopg.Connection, chunker: Chunker) -> None:
                 ORDER BY message.provider, message.source_session_id,
                          message.logical_message_id, message.content_class
                 LIMIT 128
-                """.encode(),
+                """
+                ).format(keyset=keyset),
                 params,
             )
         )
@@ -1261,25 +1265,26 @@ def semantic_search(
     if not allow_partial and not _semantic_chunks_complete(connection):
         raise ValueError("semantic chunks are unavailable or stale")
     filters = [
-        "message.session_kind IN ('primary', 'agent', 'unknown')"
+        sql.SQL("message.session_kind IN ('primary', 'agent', 'unknown')")
         if include_agents
-        else "message.session_kind = 'primary'"
+        else sql.SQL("message.session_kind = 'primary'")
     ]
     params: list[object] = [vector, vector, _PROFILE_ID, CHUNKER_ID]
     for value, clause in (
-        (provider, "message.provider = %s"),
-        (role, "message.role = %s"),
-        (project, "COALESCE(message.repository, message.cwd) = %s"),
-        (since, "message.timestamp_text >= %s"),
-        (epoch, "message.conversation_epoch = %s"),
+        (provider, sql.SQL("message.provider = %s")),
+        (role, sql.SQL("message.role = %s")),
+        (project, sql.SQL("COALESCE(message.repository, message.cwd) = %s")),
+        (since, sql.SQL("message.timestamp_text >= %s")),
+        (epoch, sql.SQL("message.conversation_epoch = %s")),
     ):
         if value is not None:
             filters.append(clause)
             params.append(value)
     params.append(limit)
-    where = " AND ".join(filters)
+    where = sql.SQL(" AND ").join(filters)
     rows = connection.execute(
-        f"""
+        sql.SQL(
+            """
         WITH ranked_chunk AS (
             SELECT message.provider, message.source_session_id,
                    message.logical_message_id, message.canonical_locator,
@@ -1315,7 +1320,8 @@ def semantic_search(
         WHERE chunk_rank = 1
         ORDER BY score DESC, provider, source_session_id, logical_message_id
         LIMIT %s
-        """.encode(),
+        """
+        ).format(where=where),
         params,
     )
     return tuple(SearchHit(*row) for row in rows)

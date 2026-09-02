@@ -1,15 +1,17 @@
 """PostgreSQL-side bounds for synchronous read operations."""
 
-from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 from threading import Event, Thread
 from time import monotonic
-from typing import Concatenate
+from typing import TYPE_CHECKING, Concatenate
 
 import psycopg
 from psycopg.pq import TransactionStatus
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 READ_QUEUE_LOCK = "cc_search_chats.read_queue"
 INDEX_QUEUE_LOCK = "cc_search_chats.index_queue"

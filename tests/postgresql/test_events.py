@@ -1,12 +1,15 @@
 """Resource and behavior guardrails for PostgreSQL event export."""
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-import psycopg
 import pytest
 
 from cc_search_chats.storage.postgresql import migrate
 from cc_search_chats.storage.postgresql.events import export_human_message_events
+
+if TYPE_CHECKING:
+    import psycopg
 
 pytestmark = pytest.mark.postgresql
 

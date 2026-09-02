@@ -51,7 +51,7 @@ def install_rule(codex_home: Path) -> tuple[Path, bool]:
             output.write(content)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, target)
+        temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
     return target, True

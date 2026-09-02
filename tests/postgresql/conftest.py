@@ -2,13 +2,15 @@
 
 import os
 import subprocess
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _BIN = Path("/usr/lib/postgresql/18/bin")
 _VECTOR_CONTROL = Path("/usr/share/postgresql/18/extension/vector.control")
@@ -106,7 +108,8 @@ def postgres_cluster(
             observed = Path(
                 _row(connection.execute("SHOW data_directory"))[0]
             ).resolve()
-            assert observed == cluster.data and observed.is_relative_to(root.resolve())
+            assert observed == cluster.data
+            assert observed.is_relative_to(root.resolve())
             connection.execute("CREATE EXTENSION vector")
             connection.execute("CREATE ROLE cc_search_chats_test_owner LOGIN")
             connection.execute(
@@ -119,9 +122,8 @@ def postgres_cluster(
                 observed = Path(
                     _row(connection.execute("SHOW data_directory"))[0]
                 ).resolve()
-                assert observed == cluster.data and observed.is_relative_to(
-                    root.resolve()
-                )
+                assert observed == cluster.data
+                assert observed.is_relative_to(root.resolve())
             _run(
                 [str(_BIN / "pg_ctl"), "-D", str(data), "-m", "fast", "-w", "stop"],
                 env=env,

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 
-import psycopg
+import psycopg  # noqa: TC002  # keep public annotations runtime-resolvable
 
 from cc_search_chats.storage.postgresql.guardrails import queued_read_operation
 

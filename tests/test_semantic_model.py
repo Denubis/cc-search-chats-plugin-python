@@ -53,7 +53,7 @@ def test_passage_embedding_does_not_start_a_synthetic_gpu_probe(
     class FakeTorch:
         cuda = FakeCuda()
 
-    monkeypatch.setattr(semantic_model, "_prepare_runtime", lambda progress: None)
+    monkeypatch.setattr(semantic_model, "_prepare_runtime", lambda _progress: None)
     monkeypatch.setattr(
         semantic_model,
         "_runtime",
@@ -62,12 +62,12 @@ def test_passage_embedding_does_not_start_a_synthetic_gpu_probe(
     monkeypatch.setattr(
         semantic_model,
         "_embed_batch",
-        lambda texts, prefix: [[1.0] * semantic_model.DIMENSIONS for _ in texts],
+        lambda texts, _prefix: [[1.0] * semantic_model.DIMENSIONS for _ in texts],
     )
     monkeypatch.setattr(
         subprocess,
         "Popen",
-        lambda *args, **kwargs: pytest.fail(
+        lambda *_args, **_kwargs: pytest.fail(
             "passage embedding started a synthetic GPU probe"
         ),
     )
@@ -93,11 +93,11 @@ def test_query_embedding_does_not_run_index_gpu_performance_probe(
     monkeypatch.setattr(
         subprocess,
         "Popen",
-        lambda *args, **kwargs: pytest.fail(
+        lambda *_args, **_kwargs: pytest.fail(
             "query embedding started indexing telemetry"
         ),
     )
-    monkeypatch.setattr(semantic_model, "_prepare_runtime", lambda progress: None)
+    monkeypatch.setattr(semantic_model, "_prepare_runtime", lambda _progress: None)
     monkeypatch.setattr(
         semantic_model,
         "_runtime",
@@ -106,7 +106,7 @@ def test_query_embedding_does_not_run_index_gpu_performance_probe(
     monkeypatch.setattr(
         semantic_model,
         "_embed_batch",
-        lambda texts, prefix: [[1.0] * semantic_model.DIMENSIONS for _ in texts],
+        lambda texts, _prefix: [[1.0] * semantic_model.DIMENSIONS for _ in texts],
     )
 
     vector = embed_query("needle")
@@ -147,7 +147,7 @@ def test_cuda_failure_is_scoped_to_the_calling_process(
     with pytest.raises(
         ModelUnavailable,
         match=(
-            "CUDA is unavailable to this process.*agent sandbox.*host approval route"
+            r"CUDA is unavailable to this process.*agent sandbox.*host approval route"
         ),
     ) as raised:
         semantic_model._runtime()
@@ -185,7 +185,7 @@ def test_terminal_vram_failure_is_named_and_reports_measurable_capacity(
     monkeypatch.setattr(
         semantic_model,
         "_embed_batch",
-        lambda texts, prefix: (_ for _ in ()).throw(FakeOutOfMemoryError("oom")),
+        lambda _texts, _prefix: (_ for _ in ()).throw(FakeOutOfMemoryError("oom")),
     )
 
     with pytest.raises(ModelUnavailable, match="VRAM") as raised:
@@ -217,7 +217,7 @@ def test_query_embedding_runtime_failure_is_named(
     monkeypatch.setattr(
         semantic_model,
         "_embed_batch",
-        lambda texts, prefix: (_ for _ in ()).throw(ValueError("fixture tokenizer")),
+        lambda _texts, _prefix: (_ for _ in ()).throw(ValueError("fixture tokenizer")),
     )
 
     with pytest.raises(ModelUnavailable, match="query embedding") as raised:

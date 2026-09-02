@@ -4,11 +4,11 @@
 
 import hashlib
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from cc_search_chats.core.identity import (
     ContentClass,
@@ -20,6 +20,9 @@ from cc_search_chats.core.identity import (
     SubmittedBy,
     format_locator,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 type _CompatibilityKey = tuple[str, Path, SessionKind, int, str, ContentClass, str]
 type _VisibilityBoundary = tuple[str, Path, int]

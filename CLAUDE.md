@@ -1,6 +1,6 @@
 # cc-search-chats
 
-Last verified: 2026-09-01
+Last verified: 2026-09-02
 
 ## Purpose
 
@@ -13,16 +13,24 @@ the content authority and are always read-only.
 - Python 3.14+, packaged with uv/hatchling
 - PostgreSQL 18 full-text search and psycopg
 - pgvector plus optional PyTorch/Transformers semantic runtime
-- pytest, Ruff, and ty
+- pytest, Ruff, ty, complexipy, vulture, and pre-commit
 - Claude Code and Codex plugin wrappers over the independently installed CLI
 
 ## Commands
 
-- `uv run --frozen pytest -q -m 'not postgresql'` — non-PostgreSQL tests
-- `uv run --frozen pytest -q -m postgresql` — disposable PostgreSQL 18 tests
-- `uv run --frozen ruff check src tests` — lint
-- `uv run --frozen ruff format --check src tests` — formatting gate
-- `uv run --frozen ty check src tests` — type check
+- `uv run --frozen pytest -q -m 'not postgresql'` — non-PostgreSQL tests (pre-commit)
+- `uv run --frozen pytest -q -m postgresql` — disposable PostgreSQL 18 tests (pre-push)
+- `uv run --frozen ruff check src tests scripts` — lint
+- `uv run --frozen ruff format --check src tests scripts` — formatting gate
+- `uv run --frozen ty check src tests scripts` — type check (ty is pinned exactly; bump
+  deliberately)
+- `uv run --frozen complexipy --failed --plain` — cognitive-complexity ratchet against
+  `complexipy-snapshot.json`; no function may exceed 15 unless already recorded, and
+  no recorded function may worsen. A passing run rewrites the snapshot, so an
+  improvement lowers the baseline; stage the rewritten file with the change
+- `uv run --frozen vulture` — high-confidence dead-code gate
+- `uv run --frozen pre-commit validate-config` — hook configuration; `pre-commit install`
+  arms the pre-commit and pre-push stages in a fresh clone
 - `uv run --frozen cc-search-chats --help` — CLI surface
 
 PostgreSQL tests create isolated schemas in the repository's disposable cluster.

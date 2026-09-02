@@ -5,8 +5,7 @@
 import json
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
-from typing import TypeIs
+from typing import TYPE_CHECKING, TypeIs
 
 from cc_search_chats.core.identity import (
     ContentClass,
@@ -22,6 +21,9 @@ from cc_search_chats.core.identity import (
     is_unicode_scalar_text,
 )
 from cc_search_chats.providers.source_discovery import RecordEnvelope
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class ClaudeDiagnosticCode(StrEnum):

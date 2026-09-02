@@ -168,27 +168,12 @@ class TestBoundedJsonlRead:
             {"max_single_record_bytes": value},
         ):
             with pytest.raises(ValueError, match="limit"):
-                if "max_records_per_batch" in limits:
-                    read_bounded_jsonl(
-                        source,
-                        source_file_relative=Path("session.jsonl"),
-                        target_size=source.stat().st_size,
-                        max_records_per_batch=value,
-                    )
-                elif "max_batch_bytes" in limits:
-                    read_bounded_jsonl(
-                        source,
-                        source_file_relative=Path("session.jsonl"),
-                        target_size=source.stat().st_size,
-                        max_batch_bytes=value,
-                    )
-                else:
-                    read_bounded_jsonl(
-                        source,
-                        source_file_relative=Path("session.jsonl"),
-                        target_size=source.stat().st_size,
-                        max_single_record_bytes=value,
-                    )
+                read_bounded_jsonl(
+                    source,
+                    source_file_relative=Path("session.jsonl"),
+                    target_size=source.stat().st_size,
+                    **limits,
+                )
 
     def test_rejects_noninteger_batch_limit(self, tmp_path: Path) -> None:
         source = tmp_path / "session.jsonl"
@@ -270,7 +255,7 @@ class TestBoundedJsonlRead:
         source = tmp_path / "session.jsonl"
         source.write_bytes(b"{}\n")
 
-        with pytest.raises(ValueError, match="coordinate|target_size"):
+        with pytest.raises(ValueError, match=r"coordinate|target_size"):
             read_bounded_jsonl(
                 source,
                 source_file_relative=Path("session.jsonl"),

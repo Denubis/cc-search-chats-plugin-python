@@ -262,7 +262,9 @@ def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
 def _required_text(value: Mapping[str, object], key: str) -> str:
     result = value.get(key)
     if not isinstance(result, str):
-        raise ValueError(f"{key} must be a string")
+        raise ValueError(  # noqa: TRY004  # persisted-state ValueError contract
+            f"{key} must be a string"
+        )
     return result
 
 
@@ -276,7 +278,9 @@ def _optional_text(value: Mapping[str, object], key: str) -> str | None:
 def _required_integer(value: Mapping[str, object], key: str) -> int:
     result = value.get(key)
     if isinstance(result, bool) or not isinstance(result, int):
-        raise ValueError(f"{key} must be an integer")
+        raise ValueError(  # noqa: TRY004  # persisted-state ValueError contract
+            f"{key} must be an integer"
+        )
     return result
 
 
@@ -478,7 +482,8 @@ def _resolved_roots(
         for root in roots
     ):
         raise ValueError(
-            "configured source roots must use IDs derived from provider and resolved path"
+            "configured source roots must use IDs derived from provider "
+            "and resolved path"
         )
     return roots
 
@@ -716,14 +721,14 @@ def _discover_sources(
         ]
         if not traversal_failures:
             complete_roots.add(root.source_root_id)
-        for diagnostic in traversal_failures:
-            failures.append(
-                {
-                    "code": diagnostic.code.value,
-                    "path": str(diagnostic.path),
-                    "detail": diagnostic.detail,
-                }
-            )
+        failures.extend(
+            {
+                "code": diagnostic.code.value,
+                "path": str(diagnostic.path),
+                "detail": diagnostic.detail,
+            }
+            for diagnostic in traversal_failures
+        )
         for source in discovery.sources:
             discovered_keys.add((root.source_root_id, source.source_file_relative))
             try:
@@ -1008,15 +1013,17 @@ def _stage_messages(
         """
     )
     connection.execute(
-        f"""
-        INSERT INTO pg_temp.refresh_stage_message ({_STAGE_MESSAGE_COLUMNS})
+        sql.SQL(
+            """
+        INSERT INTO pg_temp.refresh_stage_message ({columns})
         SELECT DISTINCT ON (
             source_root_id, source_file_relative, record_ordinal, content_class
-        ) {_STAGE_MESSAGE_COLUMNS}
+        ) {columns}
         FROM pg_temp.refresh_stage_message_batch
         ORDER BY source_root_id, source_file_relative, record_ordinal,
                  content_class, alias_locator
         """
+        ).format(columns=sql.SQL(_STAGE_MESSAGE_COLUMNS))
     )
 
 
@@ -1635,7 +1642,7 @@ def _stage_removed_sources(
     complete_root_ids: frozenset[str],
 ) -> int:
     removed = 0
-    for (root_id, relative), _checkpoint in checkpoints.items():
+    for root_id, relative in checkpoints:
         if (root_id, relative) in observed_keys:
             continue
         if root_id in configured_root_ids and root_id not in complete_root_ids:

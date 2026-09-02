@@ -323,7 +323,7 @@ def test_ponytail_root_excludes_adjacent_state_and_caches_excluded_jsonl(
     assert search_messages(postgres_connection, "agy exclusion sentinel") == ()
     assert search_messages(postgres_connection, "credential exclusion sentinel") == ()
 
-    def unexpected_content_read(*args, **kwargs):
+    def unexpected_content_read(*_args, **_kwargs):
         raise AssertionError("unchanged JSONL content was read")
 
     monkeypatch.setattr(
@@ -438,7 +438,8 @@ def test_noop_reads_no_jsonl_and_append_reads_only_suffix(
     )
     first_metadata_versions = _refresh_metadata_versions(postgres_connection)
     committed_size = source.stat().st_size
-    assert reads and reads[0][1] == 0
+    assert reads
+    assert reads[0][1] == 0
 
     reads.clear()
     second = refresh_native_sources(postgres_connection, source_roots=roots)
@@ -456,7 +457,8 @@ def test_noop_reads_no_jsonl_and_append_reads_only_suffix(
     reads.clear()
     appended = refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert reads and reads[0][1] == committed_size
+    assert reads
+    assert reads[0][1] == committed_size
     assert all(start >= committed_size for _, start, _ in reads)
     assert appended.corpus_generation != first.corpus_generation
     assert len(search_messages(postgres_connection, "incremental suffix sentinel")) == 1
@@ -515,7 +517,8 @@ def test_codex_append_resumes_persisted_session_parser_state(
     reads.clear()
     refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert reads and reads[0] == committed_size
+    assert reads
+    assert reads[0] == committed_size
     hits = search_messages(postgres_connection, "codex persisted state sentinel")
     assert len(hits) == 1
     assert hits[0].provider == "codex"
@@ -567,7 +570,8 @@ def test_partial_tail_restarts_at_last_complete_record(
 
     refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert starts and starts[0] == committed_size
+    assert starts
+    assert starts[0] == committed_size
     assert (
         len(search_messages(postgres_connection, "completed partial tail sentinel"))
         == 1
@@ -654,7 +658,8 @@ def test_same_size_edit_reparses_from_zero(
 
     refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert starts and starts[0] == 0
+    assert starts
+    assert starts[0] == 0
     assert len(search_messages(postgres_connection, "changed primary user")) == 1
 
 
@@ -682,7 +687,8 @@ def test_truncation_and_inode_replacement_reparse_from_zero(
 
     refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert starts and starts[0] == 0
+    assert starts
+    assert starts[0] == 0
     assert search_messages(postgres_connection, "visible assistant") == ()
     old_inode = source.stat().st_ino
     replacement = claude_root / "replacement.jsonl"
@@ -698,7 +704,8 @@ def test_truncation_and_inode_replacement_reparse_from_zero(
 
     refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert starts and starts[0] == 0
+    assert starts
+    assert starts[0] == 0
     assert len(search_messages(postgres_connection, "inode replacement sentinel")) == 1
     assert search_messages(postgres_connection, "visible primary user") == ()
 
@@ -730,7 +737,8 @@ def test_parser_state_version_change_forces_full_reparse(
 
     refresh_native_sources(postgres_connection, source_roots=roots)
 
-    assert starts and starts[0] == 0
+    assert starts
+    assert starts[0] == 0
     assert (
         next(
             postgres_connection.execute(
@@ -804,7 +812,7 @@ def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(
         == ()
     )
     failed_coverage = cast(
-        dict[str, object],
+        "dict[str, object]",
         _postgres_envelope(postgres_connection, "index")["coverage"],
     )
     assert failed_coverage["read_files"] == 0
@@ -1036,7 +1044,7 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
     )
     assert failure[7:] == (checkpoint[2], len(future_bytes), 1)
     failed_coverage = cast(
-        dict[str, object],
+        "dict[str, object]",
         _postgres_envelope(postgres_connection, "index")["coverage"],
     )
     assert failed_coverage["unrecognized_conversation_records"] == 1
@@ -1069,11 +1077,11 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
         refresh_result=unchanged,
     )
     unchanged_coverage = cast(
-        dict[str, object],
+        "dict[str, object]",
         unchanged_envelope["coverage"],
     )
     unchanged_refresh = cast(
-        dict[str, object],
+        "dict[str, object]",
         unchanged_envelope["refresh"],
     )
     assert unchanged_coverage["metadata_checked_files"] == 1
@@ -1249,7 +1257,7 @@ def test_first_parse_skips_unstorable_record_and_publishes_neighbors(
         }
     ]
     coverage = cast(
-        dict[str, object],
+        "dict[str, object]",
         _postgres_envelope(
             postgres_connection,
             "index",
@@ -1340,7 +1348,7 @@ def test_append_skips_unstorable_record_and_advances_checkpoint(
     assert skipped[0]["source_line"] == 2
     assert skipped[0]["source_byte_offset"] == len(before)
     coverage = cast(
-        dict[str, object],
+        "dict[str, object]",
         _postgres_envelope(
             postgres_connection,
             "index",
@@ -1464,7 +1472,7 @@ def test_failed_publication_keeps_checkpoint_and_corpus_then_retry_cleans_stage(
     )
     original_publish = refresh_module._publish_coherent_candidate
 
-    def fail_before_publish(*args, **kwargs):
+    def fail_before_publish(*_args, **_kwargs):
         raise RuntimeError("injected pre-publication crash")
 
     monkeypatch.setattr(
@@ -2494,8 +2502,8 @@ def test_composed_index_waits_for_the_shared_index_owner(
         pending = executor.submit(
             index_corpus,
             waiter,
-            lambda texts: [],
-            chunker=lambda texts: (),
+            lambda _texts: [],
+            chunker=lambda _texts: (),
             source_roots=(),
             progress=progress,
         )

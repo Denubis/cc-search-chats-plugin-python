@@ -77,9 +77,7 @@ def _is_noise(text_content: str) -> bool:
     stripped = text_content.strip()
     if not stripped:
         return True
-    if _TOOL_ONLY_RE.match(stripped):
-        return True
-    return False
+    return bool(_TOOL_ONLY_RE.match(stripped))
 
 
 def _clean_text(text_content: str) -> str:
@@ -313,21 +311,20 @@ def json_search_results(
     local miss), or ``all`` (machine-wide). ``results`` is the match array,
     each entry carrying its originating ``project_path``.
     """
-    results = []
-    for row in rows:
-        results.append(
-            {
-                "uuid": row["uuid"],
-                "session_id": row["session_id"],
-                "epoch": row["epoch"],
-                "timestamp": row["timestamp"],
-                "role": row["role"],
-                "snippet": row["snippet"],
-                "score": row["score"],
-                "project_path": row["project_path"],
-                "real_project_path": _row_value(row, "real_project_path"),
-            }
-        )
+    results = [
+        {
+            "uuid": row["uuid"],
+            "session_id": row["session_id"],
+            "epoch": row["epoch"],
+            "timestamp": row["timestamp"],
+            "role": row["role"],
+            "snippet": row["snippet"],
+            "score": row["score"],
+            "project_path": row["project_path"],
+            "real_project_path": _row_value(row, "real_project_path"),
+        }
+        for row in rows
+    ]
     return json.dumps(
         {
             "schema_version": SCHEMA_VERSION,
@@ -404,20 +401,19 @@ def json_session_list(rows: list) -> str:
     Returns an object ``{schema_version, sessions}`` where ``sessions`` is the
     array of session objects.
     """
-    sessions = []
-    for row in rows:
-        sessions.append(
-            {
-                "session_id": row["session_id"],
-                "project_path": row["project_path"],
-                "real_project_path": _row_value(row, "real_project_path"),
-                "file_size": row["file_size"],
-                "modified_at": row["modified_at"],
-                "summary": row["summary"],
-                "epoch_count": row["epoch_count"],
-                "message_count": row["total_messages"],
-            }
-        )
+    sessions = [
+        {
+            "session_id": row["session_id"],
+            "project_path": row["project_path"],
+            "real_project_path": _row_value(row, "real_project_path"),
+            "file_size": row["file_size"],
+            "modified_at": row["modified_at"],
+            "summary": row["summary"],
+            "epoch_count": row["epoch_count"],
+            "message_count": row["total_messages"],
+        }
+        for row in rows
+    ]
     return json.dumps(
         {"schema_version": SCHEMA_VERSION, "sessions": sessions},
         indent=2,

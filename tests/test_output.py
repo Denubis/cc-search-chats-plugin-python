@@ -150,7 +150,7 @@ class TestRenderSafe:
         content = "safe"
         # The template literal itself is trusted
         result = render_safe(t"ok {content}")
-        assert "ok safe" == result
+        assert result == "ok safe"
 
     def test_control_characters_in_interpolated_value(self) -> None:
         """Control characters (other than null) in interpolated values pass through.

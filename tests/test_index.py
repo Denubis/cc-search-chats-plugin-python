@@ -806,7 +806,7 @@ class TestEnsureFts5:
 
         monkeypatch.setattr(
             "cc_search_chats.storage.index.sqlite3.connect",
-            lambda *a, **kw: mock_conn,
+            lambda *_a, **_kw: mock_conn,
         )
         with pytest.raises(RuntimeError, match="FTS5"):
             ensure_fts5()

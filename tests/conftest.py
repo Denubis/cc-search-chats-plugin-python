@@ -1,14 +1,17 @@
 """Pytest fixtures providing sample JSONL record strings and database helpers."""
 
 import json
-import sqlite3
-from collections.abc import Iterator
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.storage.index import close_db, index_session, open_db
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Iterator
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -153,7 +156,6 @@ def _make_session_lines(
     session_id: str,
     *,
     compact_boundaries: int = 1,
-    project_path: str = "/home/brian/project",
 ) -> list[str]:
     """Build a list of JSONL lines representing a complete session.
 

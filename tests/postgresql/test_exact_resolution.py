@@ -3,8 +3,8 @@
 import json
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import psycopg
 import pytest
 
 from cc_search_chats.core.identity import Provider, ResolutionStatus
@@ -19,6 +19,9 @@ from cc_search_chats.storage.postgresql import (
     resolve_exact_messages,
     search_messages,
 )
+
+if TYPE_CHECKING:
+    import psycopg
 
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
@@ -107,7 +110,8 @@ def test_exact_resolution_distinguishes_unavailable_and_changed_sources(
     source, root, locator = _indexed_claude_source(postgres_connection, tmp_path)
     original = source.read_bytes()
     changed = original.replace(b"visible primary user", b"changed primary user", 1)
-    assert changed != original and len(changed) == len(original)
+    assert changed != original
+    assert len(changed) == len(original)
     source.write_bytes(changed)
 
     stale = resolve_exact_messages(

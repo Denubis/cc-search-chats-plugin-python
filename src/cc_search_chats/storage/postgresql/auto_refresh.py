@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-import psycopg
+import psycopg  # noqa: TC002  # keep public annotations runtime-resolvable
 
 AUTO_REFRESH_COOLDOWN_SECONDS = 300
 

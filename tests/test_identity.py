@@ -141,7 +141,8 @@ class TestCanonicalLocator:
             "ccchat:v1:claude:session:uuid:message:extra",
             "ccchat:v1:codex:session:ordinal:-1:sha256:" + DIGEST,
             "ccchat:v1:codex:session:ordinal:1.0:sha256:" + DIGEST,
-            "ccchat:v1:codex:session:ordinal:١:sha256:" + DIGEST,
+            "ccchat:v1:codex:session:ordinal:\N{ARABIC-INDIC DIGIT ONE}:sha256:"
+            + DIGEST,
             "ccchat:v1:codex:session:ordinal:01:sha256:" + DIGEST,
             "ccchat:v1:codex:session:ordinal:1:sha256:ABCDEF" + "0" * 58,
             "ccchat:v1:codex:session:ordinal:1:sha256:" + "a" * 63,

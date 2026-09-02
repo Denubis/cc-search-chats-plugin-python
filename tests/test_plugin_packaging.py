@@ -209,6 +209,7 @@ def test_codex_rule_installer_refuses_a_symlink_target(tmp_path: Path) -> None:
         [sys.executable, str(CODEX_RULE_INSTALLER), "--codex-home", str(codex_home)],
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert result.returncode != 0

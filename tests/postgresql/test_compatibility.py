@@ -1,7 +1,11 @@
 """PostgreSQL COPY and pgvector compatibility checks."""
 
-import psycopg
+from typing import TYPE_CHECKING
+
 import pytest
+
+if TYPE_CHECKING:
+    import psycopg
 
 pytestmark = pytest.mark.postgresql
 

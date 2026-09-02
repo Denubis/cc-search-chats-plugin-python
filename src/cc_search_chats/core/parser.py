@@ -5,10 +5,12 @@ opening files and providing lines. This is the Functional Core.
 """
 
 import json
-from collections.abc import Iterable, Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cc_search_chats.core.models import CompactEvent, SessionRecord
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
 
 
 def _to_str_or_none(value: Any) -> str | None:
@@ -252,13 +254,14 @@ def parse_record(
             return None
 
         # Unknown type (progress, queue-operation, file-history-snapshot, etc.)
-        return None
     except json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError:
         # json.JSONDecodeError: malformed JSON
         # ValueError: could arise from type conversions
         # TypeError: type mismatches in nested structures
         # KeyError: should not happen (we use .get()), but defensive
         # AttributeError: method calls on unexpected types
+        return None
+    else:
         return None
 
 

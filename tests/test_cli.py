@@ -18,16 +18,16 @@ import json
 import shutil
 import sqlite3
 import sys
-from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext, redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout, suppress
 from multiprocessing import active_children, get_context
 from pathlib import Path
 from threading import Event
 from time import monotonic, sleep
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import pytest
+from tests.conftest import SESSION_ID_A, SESSION_ID_B, _make_session_lines
 
 from cc_search_chats import __version__
 from cc_search_chats import cli as cli_module
@@ -49,7 +49,9 @@ from cc_search_chats.storage.index import (
     open_db,
     search,
 )
-from tests.conftest import SESSION_ID_A, SESSION_ID_B, _make_session_lines
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 # ============================================================
 # Fixture paths
@@ -79,13 +81,13 @@ def test_semantic_failure_names_phase_and_prints_literal_fallback(
     monkeypatch.delenv("CC_SEARCH_DB_PATH", raising=False)
     monkeypatch.setattr(sys, "argv", ["cc-search-chats", "search", "needle phrase"])
     monkeypatch.setattr(
-        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
     monkeypatch.setattr(
-        "cc_search_chats.cli.client_admission", lambda name: nullcontext()
+        "cc_search_chats.cli.client_admission", lambda _name: nullcontext()
     )
 
-    def unavailable(args, dsn, progress_stream):
+    def unavailable(_args, _dsn, _progress_stream):
         raise ModelUnavailable(
             "fixture model load failed",
             code="model_load_failed",
@@ -115,7 +117,7 @@ def test_postgresql_search_does_not_wait_on_a_local_admission_lock(
         ["cc-search-chats", "search", "needle", "--literal", "--json"],
     )
     monkeypatch.setattr(
-        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
     admissions: list[str] = []
 
@@ -126,7 +128,7 @@ def test_postgresql_search_does_not_wait_on_a_local_admission_lock(
     monkeypatch.setattr("cc_search_chats.cli.client_admission", observed_admission)
     monkeypatch.setattr(
         "cc_search_chats.cli._handle_postgres",
-        lambda args, dsn, progress_stream: 0,
+        lambda _args, _dsn, _progress_stream: 0,
     )
 
     with pytest.raises(SystemExit, match="0"):
@@ -159,7 +161,7 @@ def test_semantic_query_timeout_terminates_and_reaps_child(
         pipe.recv()
         sleep(5)
 
-    monkeypatch.setattr("cc_search_chats.cli.get_context", lambda method: context)
+    monkeypatch.setattr("cc_search_chats.cli.get_context", lambda _method: context)
     monkeypatch.setattr("cc_search_chats.cli._query_embedding_child", never_respond)
     children_before = {child.pid for child in active_children()}
     started = monotonic()
@@ -168,7 +170,7 @@ def test_semantic_query_timeout_terminates_and_reaps_child(
         _bounded_query_embedding(
             "private query text",
             timeout_seconds=0.05,
-            progress=lambda phase, state: None,
+            progress=lambda _phase, _state: None,
         )
 
     assert monotonic() - started < 1
@@ -290,7 +292,7 @@ def test_embedding_rate_alarm_compares_sustained_rate_with_target() -> None:
     guard = cli_module._EmbeddingRateGuard()
     guard.start(100.0)
 
-    with pytest.raises(ModelUnavailable, match="11.8 passages/s") as raised:
+    with pytest.raises(ModelUnavailable, match=r"11\.8 passages/s") as raised:
         guard.observe(59, 105.0)
 
     assert raised.value.code == "gpu_performance_unavailable"
@@ -320,7 +322,7 @@ def test_index_reexecs_inside_bounded_systemd_scope(
     monkeypatch.setattr(sys, "argv", ["cc-search-chats", "index", *mode])
     launched = []
     monkeypatch.setattr(
-        "os.execvp", lambda executable, command: launched.append(command)
+        "os.execvp", lambda _executable, command: launched.append(command)
     )
 
     _contain_semantic_index(args)
@@ -346,7 +348,7 @@ def test_index_does_not_nest_scope_inside_packaged_service(
     monkeypatch.setenv("CC_SEARCH_CONTAINED", "1")
     monkeypatch.setattr(
         "os.execvp",
-        lambda executable, command: pytest.fail("attempted a nested systemd scope"),
+        lambda _executable, _command: pytest.fail("attempted a nested systemd scope"),
     )
 
     _contain_semantic_index(args)
@@ -430,7 +432,7 @@ def _run_cli(
         except SystemExit as exc:
             exit_code = exc.code if isinstance(exc.code, int) else 1
         except ValueError as exc:
-            print(str(exc), file=sys.stderr)
+            stderr_buf.write(f"{exc}\n")
             exit_code = 1
 
     return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
@@ -523,12 +525,12 @@ class TestIndexAll:
     """index --all walks every project under the projects dir."""
 
     def test_index_all_runs(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(["index", "--all"], cli_env)
+        exit_code, _, stderr = _run_cli(["index", "--all"], cli_env)
         assert exit_code == 0
         assert "project" in stderr.lower()
 
     def test_index_all_json(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(["index", "--all", "--json"], cli_env)
+        exit_code, stdout, _ = _run_cli(["index", "--all", "--json"], cli_env)
         assert exit_code == 0
         payload = json.loads(stdout)
         assert payload["projects"] >= 1
@@ -1205,7 +1207,7 @@ class TestSubcommandsAccessible:
     """cc-search-v2.AC5.1: Each subcommand produces exit code 0 and output."""
 
     def test_search_runs(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["search", "database", "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1213,7 +1215,7 @@ class TestSubcommandsAccessible:
         assert len(stdout) > 0
 
     def test_extract_with_session_id(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["extract", SAMPLE_SESSION_ID, "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1230,7 +1232,7 @@ class TestSubcommandsAccessible:
         assert "Auto-discovered session:" in stderr
 
     def test_list_runs(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["list", "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1238,7 +1240,7 @@ class TestSubcommandsAccessible:
         assert len(stdout) > 0
 
     def test_index_runs(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, _, stderr = _run_cli(
             ["index", "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1251,7 +1253,7 @@ class TestSubcommandsAccessible:
         assert row is not None
         uuid = row["uuid"]
 
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["context", uuid],
             cli_env,
         )
@@ -1262,7 +1264,7 @@ class TestSubcommandsAccessible:
         self, cli_env: sqlite3.Connection
     ) -> None:
         """Search with no matches returns exit code 0 (not an error)."""
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, _, _ = _run_cli(
             ["search", "xyznonexistentterm", "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1278,7 +1280,7 @@ class TestJsonOutput:
     """cc-search-v2.AC5.2: --json output is valid JSON parseable by json.loads()."""
 
     def test_search_json(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["search", "database", "--project", FAKE_PROJECT_PATH, "--json"],
             cli_env,
         )
@@ -1288,7 +1290,7 @@ class TestJsonOutput:
         assert isinstance(parsed["results"], list)
 
     def test_extract_json(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["extract", SAMPLE_SESSION_ID, "--project", FAKE_PROJECT_PATH, "--json"],
             cli_env,
         )
@@ -1299,7 +1301,7 @@ class TestJsonOutput:
         assert "epochs" in parsed
 
     def test_list_json(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["list", "--project", FAKE_PROJECT_PATH, "--json"],
             cli_env,
         )
@@ -1312,7 +1314,7 @@ class TestJsonOutput:
         row = cli_env.execute("SELECT uuid FROM message LIMIT 1").fetchone()
         uuid = row["uuid"]
 
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["context", uuid, "--json"],
             cli_env,
         )
@@ -1325,7 +1327,7 @@ class TestJsonOutput:
 
     def test_search_json_empty_results(self, cli_env: sqlite3.Connection) -> None:
         """Empty search results still produce valid JSON (empty array)."""
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["search", "xyznonexistentterm", "--project", FAKE_PROJECT_PATH, "--json"],
             cli_env,
         )
@@ -1336,7 +1338,7 @@ class TestJsonOutput:
 
     def test_extract_json_has_messages(self, cli_env: sqlite3.Connection) -> None:
         """Extract JSON includes actual messages."""
-        exit_code, stdout, stderr = _run_cli(
+        _, stdout, _ = _run_cli(
             ["extract", SAMPLE_SESSION_ID, "--project", FAKE_PROJECT_PATH, "--json"],
             cli_env,
         )
@@ -1347,7 +1349,7 @@ class TestJsonOutput:
 
     def test_list_json_has_sessions(self, cli_env: sqlite3.Connection) -> None:
         """List JSON includes the indexed sessions."""
-        exit_code, stdout, stderr = _run_cli(
+        _, stdout, _ = _run_cli(
             ["list", "--project", FAKE_PROJECT_PATH, "--json"],
             cli_env,
         )
@@ -1358,7 +1360,7 @@ class TestJsonOutput:
 
     def test_index_json(self, cli_env: sqlite3.Connection) -> None:
         """Index --json distinguishes indexed from skipped sessions."""
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["index", "--project", FAKE_PROJECT_PATH, "--json"],
             cli_env,
         )
@@ -1382,7 +1384,7 @@ class TestHumanReadableOutput:
     """cc-search-v2.AC5.3: Human-readable output quality checks."""
 
     def test_extract_shows_role_labels(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["extract", SAMPLE_SESSION_ID, "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1392,7 +1394,7 @@ class TestHumanReadableOutput:
         assert "Assistant" in stdout or "assistant" in stdout
 
     def test_extract_shows_timestamps(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["extract", SAMPLE_SESSION_ID, "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1403,7 +1405,7 @@ class TestHumanReadableOutput:
         self, cli_env: sqlite3.Connection
     ) -> None:
         """Compressed session extract shows epoch markers."""
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["extract", COMPRESSED_SESSION_ID, "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1417,7 +1419,7 @@ class TestHumanReadableOutput:
         self, cli_env: sqlite3.Connection
     ) -> None:
         """Compressed session has multiple epochs in JSON output."""
-        exit_code, stdout, stderr = _run_cli(
+        _, stdout, _ = _run_cli(
             [
                 "extract",
                 COMPRESSED_SESSION_ID,
@@ -1431,7 +1433,7 @@ class TestHumanReadableOutput:
         assert len(parsed["epochs"]) == 2  # epoch 0 and epoch 1
 
     def test_search_results_show_session_id(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["search", "database", "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1440,7 +1442,7 @@ class TestHumanReadableOutput:
         assert "1111" in stdout or "2222" in stdout
 
     def test_list_shows_session_ids(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["list", "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
@@ -1451,7 +1453,7 @@ class TestHumanReadableOutput:
         row = cli_env.execute("SELECT uuid FROM message LIMIT 1").fetchone()
         uuid = row["uuid"]
 
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["context", uuid],
             cli_env,
         )
@@ -1474,11 +1476,8 @@ class TestHelpExamples:
     def test_help_contains_examples(self, subcommand: str) -> None:
         parser = build_parser()
         stdout_buf = io.StringIO()
-        with redirect_stdout(stdout_buf):
-            try:
-                parser.parse_args([subcommand, "--help"])
-            except SystemExit:
-                pass
+        with redirect_stdout(stdout_buf), suppress(SystemExit):
+            parser.parse_args([subcommand, "--help"])
         output = stdout_buf.getvalue()
         assert "Examples:" in output
         assert "cc-search-chats" in output
@@ -1575,7 +1574,7 @@ class TestLargeSession:
 
     def test_search_large_session(self, large_session_env: sqlite3.Connection) -> None:
         """Search against a large session completes within reasonable time."""
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["search", "database", "--project", FAKE_PROJECT_PATH, "--json"],
             large_session_env,
         )
@@ -1586,7 +1585,7 @@ class TestLargeSession:
 
     def test_extract_large_session(self, large_session_env: sqlite3.Connection) -> None:
         """Extract a large session completes within reasonable time."""
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             [
                 "extract",
                 "33333333-3333-3333-3333-333333333333",
@@ -1611,7 +1610,7 @@ class TestErrorHandling:
     """Error cases return exit code 1 with messages to stderr."""
 
     def test_extract_invalid_session_id(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, _, stderr = _run_cli(
             [
                 "extract",
                 "nonexistent-session-id",
@@ -1625,7 +1624,7 @@ class TestErrorHandling:
         assert exit_code == 1 or "not found" in stderr.lower()
 
     def test_context_invalid_uuid(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, _, stderr = _run_cli(
             ["context", "nonexistent-uuid"],
             cli_env,
         )
@@ -1641,7 +1640,7 @@ class TestEpochFilters:
     """Epoch filters work correctly through the CLI."""
 
     def test_search_epoch_0(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             [
                 "search",
                 "database",
@@ -1659,7 +1658,7 @@ class TestEpochFilters:
             assert result["epoch"] == 0
 
     def test_extract_epoch_0(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             [
                 "extract",
                 COMPRESSED_SESSION_ID,
@@ -1678,7 +1677,7 @@ class TestEpochFilters:
             assert ep["epoch"] == 0
 
     def test_extract_epoch_1(self, cli_env: sqlite3.Connection) -> None:
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             [
                 "extract",
                 COMPRESSED_SESSION_ID,
@@ -1706,7 +1705,7 @@ class TestVerboseFlag:
 
     def test_extract_accepts_verbose(self, cli_env: sqlite3.Connection) -> None:
         """--verbose is accepted by the extract subcommand."""
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             [
                 "extract",
                 SAMPLE_SESSION_ID,
@@ -1725,7 +1724,7 @@ class TestVerboseFlag:
         assert row is not None
         uuid = row["uuid"]
 
-        exit_code, stdout, stderr = _run_cli(
+        exit_code, stdout, _ = _run_cli(
             ["context", uuid, "--verbose"],
             cli_env,
         )

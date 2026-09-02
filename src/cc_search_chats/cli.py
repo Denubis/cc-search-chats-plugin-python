@@ -10,17 +10,15 @@ import shlex
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from multiprocessing import get_context
-from multiprocessing.connection import Connection
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import psycopg
 
@@ -122,6 +120,10 @@ from cc_search_chats.storage.postgresql.migrations import (
 )
 from cc_search_chats.storage.postgresql.semantic import fuse_hybrid, semantic_search
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from multiprocessing.connection import Connection
+
 _DEFAULT_POSTGRES_DSN = "service=cc_search_chats"
 _SEARCH_DEADLINE_SECONDS = 5.0
 _SEARCH_RENDER_RESERVE_SECONDS = 0.1
@@ -215,7 +217,7 @@ def _query_embedding_child(pipe: Connection) -> None:
                 },
             )
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001  # converts child failure to diagnostic
         pipe.send(("error", f"{type(error).__name__}: {error}"))
     finally:
         pipe.close()
@@ -626,24 +628,24 @@ class _ProgressStream:
         if self._terminal:
             raise RuntimeError("progress stream already has a terminal event")
         self._terminal = True
-        refresh = cast(dict[str, object], envelope["refresh"])
-        semantic = cast(dict[str, object], envelope["semantic"])
-        coverage = cast(dict[str, object], envelope["coverage"])
+        refresh = cast("dict[str, object]", envelope["refresh"])
+        semantic = cast("dict[str, object]", envelope["semantic"])
+        coverage = cast("dict[str, object]", envelope["coverage"])
         self.emit(
             "done",
             str(envelope["status"]),
             event="terminal",
-            run_id=cast(int | None, refresh.get("run_id")),
-            corpus_generation=cast(int | None, refresh.get("corpus_generation")),
+            run_id=cast("int | None", refresh.get("run_id")),
+            corpus_generation=cast("int | None", refresh.get("corpus_generation")),
             semantic_build=cast(
-                int | None,
+                "int | None",
                 semantic.get("semantic_build"),
             ),
             source_watermark=coverage.get("source_watermarks"),
-            deadline_ms=cast(int | None, envelope.get("deadline_ms")),
-            retrieval_mode=cast(str | None, envelope.get("retrieval_mode")),
-            indexed_at=cast(str | None, envelope.get("indexed_at")),
-            corpus_age_ms=cast(int | None, envelope.get("corpus_age_ms")),
+            deadline_ms=cast("int | None", envelope.get("deadline_ms")),
+            retrieval_mode=cast("str | None", envelope.get("retrieval_mode")),
+            indexed_at=cast("str | None", envelope.get("indexed_at")),
+            corpus_age_ms=cast("int | None", envelope.get("corpus_age_ms")),
             stale_reasons=envelope.get("stale_reasons"),
             background_refresh=envelope.get("background_refresh"),
             warning=envelope.get("warnings"),
@@ -672,7 +674,7 @@ class _ProgressStream:
 def _error_envelope(
     command: str,
     status: str,
-    error: dict[str, object],
+    error: Mapping[str, object],
 ) -> dict[str, object]:
     return {
         "schema_version": 3,
@@ -792,7 +794,14 @@ def _postgres_envelope(
             "excluded_files": excluded,
             "pending_files": pending,
         }
-        for provider, resolved_path, discovered, indexed, excluded, pending in connection.execute(
+        for (
+            provider,
+            resolved_path,
+            discovered,
+            indexed,
+            excluded,
+            pending,
+        ) in connection.execute(
             """
             SELECT root.provider, root.resolved_path,
                    count(source.source_file_relative),
@@ -1414,7 +1423,7 @@ def _handle_postgres(
                     total_units=result.changed_source_count,
                 )
             else:
-                assert isinstance(result, CorpusIndexResult)
+                assert isinstance(result, CorpusIndexResult)  # noqa: S101  # type invariant
                 progress_stream.emit(
                     "fts_commit",
                     "complete",
@@ -1733,7 +1742,7 @@ def _handle_postgres(
             hits = literal_hits[: args.limit]
 
         if not args.literal and not args.exhaustive:
-            assert deadline is not None
+            assert deadline is not None  # noqa: S101  # ranked-search invariant
 
             def search_model_progress(phase: str, state: str) -> None:
                 progress_stream.emit(phase, state)
@@ -1879,8 +1888,8 @@ def _handle_postgres(
             additional_warnings=search_warnings,
             results=results,
         )
-        semantic_state = cast(dict[str, object], envelope["semantic"])
-        stale_reasons = cast(list[str], envelope["stale_reasons"])
+        semantic_state = cast("dict[str, object]", envelope["semantic"])
+        stale_reasons = cast("list[str]", envelope["stale_reasons"])
         if semantic_state["fresh"] is not True:
             stale_reasons.append("semantic_build_unavailable")
             if retrieval_mode == "hybrid":
@@ -1920,7 +1929,7 @@ def _since_days(days: int | None) -> str | None:
 
 def _parse_utc_bound(value: str) -> datetime:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as error:
         raise ValueError(f"invalid event timestamp bound: {value}") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -1932,7 +1941,7 @@ def _resolve_project(args: argparse.Namespace) -> str:
     """Resolve the project path from args or cwd."""
     if hasattr(args, "project") and args.project is not None:
         return args.project
-    return os.getcwd()
+    return os.getcwd()  # noqa: PTH109  # patchable legacy seam
 
 
 def _db_project_path(project_path: str) -> str:
@@ -2027,7 +2036,7 @@ def _handle_search(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
         results = _run(_db_project_path(project_path))
         scope, searched_project, project_count = "local", project_path, 1
     else:
-        project_path = os.getcwd()
+        project_path = os.getcwd()  # noqa: PTH109  # patchable legacy seam
         encoded = encode_project_path(project_path)
         if not (get_claude_projects_dir() / encoded).is_dir():
             # cwd is not a Claude project -> search everything

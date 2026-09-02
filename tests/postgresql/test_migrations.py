@@ -503,14 +503,16 @@ def test_migration_7_rejects_incomplete_or_cross_corpus_selection(
         selected_semantic_revision=10,
     )
 
-    with pytest.raises(psycopg.errors.ForeignKeyViolation):
-        with postgres_connection.transaction():
-            postgres_connection.execute(
-                "UPDATE cc_search_chats.corpus_generation "
-                "SET semantic_build = 12 WHERE corpus_generation = 2"
-            )
+    with (
+        pytest.raises(psycopg.errors.ForeignKeyViolation),
+        postgres_connection.transaction(),
+    ):
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.corpus_generation "
+            "SET semantic_build = 12 WHERE corpus_generation = 2"
+        )
 
-    with pytest.raises(psycopg.errors.CheckViolation):
+    def select_incomplete_semantic_build() -> None:
         with postgres_connection.transaction():
             postgres_connection.execute(
                 "UPDATE cc_search_chats.corpus_generation "
@@ -519,6 +521,9 @@ def test_migration_7_rejects_incomplete_or_cross_corpus_selection(
             postgres_connection.execute(
                 "UPDATE cc_search_chats.corpus_state SET current_corpus_generation = 2"
             )
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        select_incomplete_semantic_build()
 
 
 def _seed_legacy_snapshots(connection: psycopg.Connection) -> None:

@@ -90,13 +90,13 @@ def test_ranked_refresh_skips_launch_and_wait_for_a_fresh_corpus(
     _select_corpus(postgres_connection, current)
     monkeypatch.setattr(
         "cc_search_chats.cli._start_systemd_refresh",
-        lambda timeout_seconds: pytest.fail("fresh corpus launched a refresh"),
+        lambda _timeout_seconds: pytest.fail("fresh corpus launched a refresh"),
     )
 
     coordinated = _coordinate_ranked_refresh(
         postgres_connection,
         remaining_seconds=lambda: 2.0,
-        wait_for_notification=lambda connection, timeout: pytest.fail(
+        wait_for_notification=lambda _connection, _timeout: pytest.fail(
             "fresh corpus waited for a notification"
         ),
     )
@@ -124,7 +124,7 @@ def test_ranked_refresh_uses_durable_publication_after_a_wake(
     _select_corpus(postgres_connection, old)
     monkeypatch.setattr(
         "cc_search_chats.cli._start_systemd_refresh",
-        lambda timeout_seconds: None,
+        lambda _timeout_seconds: None,
     )
 
     def publish(_connection: psycopg.Connection, timeout: float) -> bool:
@@ -152,7 +152,7 @@ def test_ranked_refresh_uses_durable_publication_after_a_wake(
     assert coordinated.warning is None
 
 
-@pytest.mark.parametrize("early_wakes", (0, 2))
+@pytest.mark.parametrize("early_wakes", [0, 2])
 def test_ranked_refresh_timeout_keeps_the_old_durable_corpus(
     postgres_connection: psycopg.Connection,
     monkeypatch: pytest.MonkeyPatch,
@@ -166,14 +166,14 @@ def test_ranked_refresh_timeout_keeps_the_old_durable_corpus(
     _select_corpus(postgres_connection, old)
     monkeypatch.setattr(
         "cc_search_chats.cli._start_systemd_refresh",
-        lambda timeout_seconds: None,
+        lambda _timeout_seconds: None,
     )
     wakes = iter([True] * early_wakes + [False])
 
     coordinated = _coordinate_ranked_refresh(
         postgres_connection,
         remaining_seconds=lambda: 2.0,
-        wait_for_notification=lambda connection, timeout: next(wakes),
+        wait_for_notification=lambda _connection, _timeout: next(wakes),
     )
 
     assert coordinated.corpus_before == old
@@ -193,7 +193,7 @@ def test_ranked_refresh_names_unavailable_systemd_without_waiting(
     )
     _select_corpus(postgres_connection, old)
 
-    def unavailable(timeout_seconds: float) -> None:
+    def unavailable(_timeout_seconds: float) -> None:
         raise RuntimeError("fixture user systemd unavailable")
 
     monkeypatch.setattr("cc_search_chats.cli._start_systemd_refresh", unavailable)
@@ -201,7 +201,7 @@ def test_ranked_refresh_names_unavailable_systemd_without_waiting(
     coordinated = _coordinate_ranked_refresh(
         postgres_connection,
         remaining_seconds=lambda: 2.0,
-        wait_for_notification=lambda connection, timeout: pytest.fail(
+        wait_for_notification=lambda _connection, _timeout: pytest.fail(
             "failed launch waited for publication"
         ),
     )
@@ -232,9 +232,9 @@ def _run(
 
 def _assert_v3_error_envelope(payload: dict[str, object]) -> None:
     assert payload["schema_version"] == 3
-    refresh = cast(dict[str, object], payload["refresh"])
+    refresh = cast("dict[str, object]", payload["refresh"])
     assert refresh["corpus_generation"] is None
-    semantic = cast(dict[str, object], payload["semantic"])
+    semantic = cast("dict[str, object]", payload["semantic"])
     assert semantic["semantic_build"] is None
     assert semantic["corpus_generation"] is None
     assert payload["indexed_at"] is None
@@ -292,7 +292,7 @@ def test_search_reports_pending_migration_without_creating_schema(
     assert payload["status"] == "maintenance_required"
     error = payload["error"]
     assert isinstance(error, dict)
-    error = cast(dict[str, object], error)
+    error = cast("dict[str, object]", error)
     assert error["pending_versions"] == [1, 2, 3, 4, 5, 6, 7, 8]
     with psycopg.connect(postgres_cluster.dsn) as connection:
         assert (
@@ -308,7 +308,7 @@ def test_search_results_and_reported_corpus_share_one_snapshot(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
-        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
     _stub_semantic_index(monkeypatch)
     claude_root = tmp_path / "claude"
@@ -330,7 +330,7 @@ def test_search_results_and_reported_corpus_share_one_snapshot(
     monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
     monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
     monkeypatch.setattr(
-        "cc_search_chats.cli._start_systemd_refresh", lambda timeout_seconds: None
+        "cc_search_chats.cli._start_systemd_refresh", lambda _timeout_seconds: None
     )
 
     assert _run(monkeypatch, capsys, "index", "--migrate", "--json")[0] == 0
@@ -379,11 +379,11 @@ def test_search_results_and_reported_corpus_share_one_snapshot(
     assert isinstance(results, list)
     result = results[0]
     assert isinstance(result, dict)
-    result = cast(dict[str, object], result)
+    result = cast("dict[str, object]", result)
     assert result["logical_message_id"] == "claude-assistant-1"
     refresh = payload["refresh"]
     assert isinstance(refresh, dict)
-    refresh = cast(dict[str, object], refresh)
+    refresh = cast("dict[str, object]", refresh)
     assert refresh["corpus_generation"] == selected_corpus
 
 
@@ -394,7 +394,7 @@ def test_ranked_search_uses_corpus_published_during_launch(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
-        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
     _stub_semantic_index(monkeypatch)
     claude_root = tmp_path / "claude"
@@ -482,11 +482,11 @@ def test_ranked_search_uses_corpus_published_during_launch(
 
     assert code == 0
     assert len(launches) == 1
-    result = cast(list[dict[str, object]], payload["results"])[0]
+    result = cast("list[dict[str, object]]", payload["results"])[0]
     assert result["logical_message_id"] == "claude-in-budget-refresh-append"
-    refresh = cast(dict[str, object], payload["refresh"])
+    refresh = cast("dict[str, object]", payload["refresh"])
     assert refresh["corpus_generation"] != initial_corpus
-    background = cast(dict[str, object], payload["background_refresh"])
+    background = cast("dict[str, object]", payload["background_refresh"])
     assert background["state"] == "complete"
 
 
@@ -497,7 +497,7 @@ def test_search_returns_committed_snapshot_then_service_refreshes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
-        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
     _stub_semantic_index(monkeypatch)
     claude_root = tmp_path / "claude"
@@ -561,12 +561,12 @@ def test_search_returns_committed_snapshot_then_service_refreshes(
     launch_budgets: list[float] = []
     monkeypatch.setattr(
         "cc_search_chats.cli._start_systemd_refresh",
-        lambda timeout_seconds: launch_budgets.append(timeout_seconds),
+        launch_budgets.append,
         raising=False,
     )
     monkeypatch.setattr(
         "cc_search_chats.cli._wait_for_index_notification",
-        lambda connection, timeout_seconds: False,
+        lambda _connection, _timeout_seconds: False,
     )
 
     code, stale = _run(
@@ -582,7 +582,7 @@ def test_search_returns_committed_snapshot_then_service_refreshes(
     assert stale["results"] == []
     stale_refresh = stale["refresh"]
     assert isinstance(stale_refresh, dict)
-    stale_refresh = cast(dict[str, object], stale_refresh)
+    stale_refresh = cast("dict[str, object]", stale_refresh)
     assert stale_refresh["corpus_generation"] == committed_corpus
     assert stale["deadline_ms"] == 5000
     assert stale["retrieval_mode"] == "literal"
@@ -610,7 +610,7 @@ def test_search_returns_committed_snapshot_then_service_refreshes(
     assert refreshed["corpus_generation"] != committed_corpus
     refreshed_state = refreshed["refresh"]
     assert isinstance(refreshed_state, dict)
-    refreshed_state = cast(dict[str, object], refreshed_state)
+    refreshed_state = cast("dict[str, object]", refreshed_state)
     with psycopg.connect(postgres_cluster.dsn) as connection:
         assert next(
             connection.execute(
@@ -633,7 +633,7 @@ def test_search_returns_committed_snapshot_then_service_refreshes(
     assert duplicate["background_noop"] is True
     duplicate_refresh = duplicate["refresh"]
     assert isinstance(duplicate_refresh, dict)
-    duplicate_refresh = cast(dict[str, object], duplicate_refresh)
+    duplicate_refresh = cast("dict[str, object]", duplicate_refresh)
     assert duplicate_refresh["corpus_generation"] == refreshed["corpus_generation"]
 
     code, current = _run(
@@ -650,7 +650,7 @@ def test_search_returns_committed_snapshot_then_service_refreshes(
     assert isinstance(current_results, list)
     current_result = current_results[0]
     assert isinstance(current_result, dict)
-    current_result = cast(dict[str, object], current_result)
+    current_result = cast("dict[str, object]", current_result)
     assert current_result["logical_message_id"] == ("claude-background-refresh-append")
     assert len(launch_budgets) == 1
 

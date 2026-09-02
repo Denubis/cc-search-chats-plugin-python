@@ -1,0 +1,95 @@
+# Install both the fast commit gate and the PostgreSQL pre-push gate by default.
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: local
+    hooks:
+      # Autofix Ruff violations only in the Python files pre-commit passes.
+      - id: ruff-check
+        name: Ruff lint with safe fixes
+        entry: uv run --frozen ruff check --fix
+        language: system
+        types: [python]
+        pass_filenames: true
+        stages: [pre-commit]
+
+      # Format only the Python files pre-commit passes.
+      - id: ruff-format
+        name: Ruff format
+        entry: uv run --frozen ruff format
+        language: system
+        types: [python]
+        pass_filenames: true
+        stages: [pre-commit]
+
+      # Type-check the complete source and test surfaces against the pinned ty.
+      - id: ty-check
+        name: ty type check
+        entry: uv run --frozen ty check src tests scripts
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # Reject new or worsened functions above the Complexipy snapshot watermark.
+      - id: complexipy
+        name: Complexipy complexity ratchet
+        entry: uv run --frozen complexipy --failed --plain
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # Reject high-confidence dead code outside the documented Protocol names.
+      - id: vulture
+        name: Vulture dead-code check
+        entry: uv run --frozen vulture
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # Run the fast non-PostgreSQL behavior partition before each commit.
+      - id: pytest-non-postgresql
+        name: pytest without PostgreSQL
+        entry: uv run --frozen pytest -q -m 'not postgresql'
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # Keep the ~25 s disposable-cluster partition on pre-push, not pre-commit.
+      - id: pytest-postgresql
+        name: pytest PostgreSQL
+        entry: uv run --frozen pytest -q -m postgresql
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Remove trailing whitespace from staged text files.
+      # complexipy rewrites its snapshot byte-for-byte on every run, without a
+      # trailing newline; excluding it here keeps the two hooks from fighting.
+      - id: trailing-whitespace
+        exclude: ^complexipy-snapshot\.json$
+      # Require exactly one newline at the end of staged text files.
+      - id: end-of-file-fixer
+        exclude: ^complexipy-snapshot\.json$
+      # Reject invalid staged YAML documents.
+      - id: check-yaml
+      # Reject invalid staged TOML documents.
+      - id: check-toml
+      # Reject newly added files larger than 700 KiB.
+      - id: check-added-large-files
+        args: [--maxkb=700]
+      # Reject unresolved merge-conflict markers.
+      - id: check-merge-conflict
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      # Reject staged secrets and high-confidence credentials.
+      - id: gitleaks

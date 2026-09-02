@@ -175,7 +175,7 @@ def test_five_minute_cooldown_admits_one_durable_request(
     assert after_cooldown.state == "pending"
 
 
-@pytest.mark.parametrize("active_state", ("pending", "running"))
+@pytest.mark.parametrize("active_state", ["pending", "running"])
 def test_old_active_request_never_admits_a_duplicate(
     postgres_connection: psycopg.Connection,
     active_state: str,

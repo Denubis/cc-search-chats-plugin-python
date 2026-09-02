@@ -780,7 +780,7 @@ def test_semantic_worker_preserves_named_model_failure_and_records_its_phase(
     with pytest.raises(ModelUnavailable) as raised:
         index_corpus(
             postgres_connection,
-            lambda texts: (_ for _ in ()).throw(failure),
+            lambda _texts: (_ for _ in ()).throw(failure),
             chunker=_single_chunks,
             source_roots=roots,
         )

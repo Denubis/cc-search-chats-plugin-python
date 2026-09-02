@@ -16,11 +16,17 @@ Acceptance criteria coverage:
 
 import json
 import sqlite3
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from tests.conftest import (
+    SESSION_ID_A,
+    SESSION_ID_B,
+    _make_session_lines,
+    _write_session_file,
+)
 
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.core.search import sanitize_fts5_query
@@ -32,12 +38,9 @@ from cc_search_chats.storage.index import (
     search,
     search_full_content,
 )
-from tests.conftest import (
-    SESSION_ID_A,
-    SESSION_ID_B,
-    _make_session_lines,
-    _write_session_file,
-)
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestSearch:

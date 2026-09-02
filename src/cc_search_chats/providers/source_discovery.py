@@ -12,12 +12,15 @@ import json
 import os
 import subprocess
 from collections import deque
-from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from cc_search_chats.core.identity import Provider, validate_source_file_relative
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 _ARTIFACT_PROBE_LIMIT = 64 * 1024
 _GIT_ROUTING_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
@@ -315,7 +318,9 @@ def read_bounded_jsonl(
     ):
         raise ValueError("resume coordinates must be integers")
     if isinstance(target_size, bool) or not isinstance(target_size, int):
-        raise ValueError("target_size must be an integer")
+        raise ValueError(  # noqa: TRY004  # reader-coordinate ValueError contract
+            "target_size must be an integer"
+        )
     if target_size < 0:
         raise ValueError("target_size must be nonnegative")
     limits = (
@@ -385,7 +390,8 @@ def read_bounded_jsonl(
                                 _record_diagnostic(
                                     SourceDiagnosticCode.OVERSIZED_RECORD,
                                     path,
-                                    "complete record exceeds the single-record byte limit",
+                                    "complete record exceeds the single-record "
+                                    "byte limit",
                                     ordinal,
                                     source_line,
                                     offset,
@@ -432,37 +438,36 @@ def read_bounded_jsonl(
                         source_line += 1
                         records_consumed += 1
                         continue
-                    elif (
+                    if (
                         envelopes
                         and batch_raw_bytes + len(record_bytes) > max_batch_bytes
                     ):
                         stop_reason = BoundedReadStopReason.BATCH_LIMIT_REACHED
                         break
-                    else:
-                        envelopes.append(
-                            _envelope(
-                                source_file_relative=source_file_relative,
-                                record_bytes=record_bytes,
-                                ordinal=ordinal,
-                                source_line=source_line,
-                                offset=offset,
-                            )
-                        )
-                        batch_raw_bytes += len(record_bytes)
-                        records_consumed += 1
-                        diagnostic = _invalid_json_diagnostic(
-                            record_bytes,
-                            path=path,
+                    envelopes.append(
+                        _envelope(
+                            source_file_relative=source_file_relative,
+                            record_bytes=record_bytes,
                             ordinal=ordinal,
                             source_line=source_line,
                             offset=offset,
                         )
-                        if diagnostic is not None:
-                            diagnostics.append(diagnostic)
-                        offset += len(line)
-                        ordinal += 1
-                        source_line += 1
-                        continue
+                    )
+                    batch_raw_bytes += len(record_bytes)
+                    records_consumed += 1
+                    diagnostic = _invalid_json_diagnostic(
+                        record_bytes,
+                        path=path,
+                        ordinal=ordinal,
+                        source_line=source_line,
+                        offset=offset,
+                    )
+                    if diagnostic is not None:
+                        diagnostics.append(diagnostic)
+                    offset += len(line)
+                    ordinal += 1
+                    source_line += 1
+                    continue
 
                 diagnostics.append(
                     _record_diagnostic(code, path, detail, ordinal, source_line, offset)
@@ -636,8 +641,7 @@ def _discover(
             )
         )
 
-    for archive in archive_paths:
-        diagnostics.append(_archive_diagnostic(archive))
+    diagnostics.extend(_archive_diagnostic(archive) for archive in archive_paths)
 
     return DiscoveryResult(
         provider=provider,

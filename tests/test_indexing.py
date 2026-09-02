@@ -13,9 +13,15 @@ Acceptance criteria coverage:
 
 import json
 import sqlite3
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+from tests.conftest import (
+    SESSION_ID_A,
+    SESSION_ID_B,
+    _make_session_lines,
+    _write_session_file,
+)
 
 from cc_search_chats.core.discovery import decode_project_path, encode_project_path
 from cc_search_chats.core.models import SessionMeta, SessionRecord
@@ -28,12 +34,9 @@ from cc_search_chats.storage.index import (
     reindex_project,
     search,
 )
-from tests.conftest import (
-    SESSION_ID_A,
-    SESSION_ID_B,
-    _make_session_lines,
-    _write_session_file,
-)
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _snapshot_index(conn: sqlite3.Connection) -> dict[str, list[tuple[object, ...]]]:

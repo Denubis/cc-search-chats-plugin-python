@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import psycopg
+import psycopg  # noqa: TC002  # keep public annotations runtime-resolvable
 
 from cc_search_chats.core.identity import (
     NativeLocator,

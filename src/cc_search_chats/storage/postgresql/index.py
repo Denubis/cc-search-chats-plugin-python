@@ -1,10 +1,14 @@
 """Minimal PostgreSQL revision storage and literal retrieval."""
 
 import hashlib
-from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import psycopg
+from psycopg import sql
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 from cc_search_chats.core.identity import NativeMessage, format_locator
 from cc_search_chats.storage.postgresql.guardrails import queued_read_operation
@@ -283,11 +287,12 @@ def replace_messages(
             )
         )[0]
         connection.execute(
-            f"""
-            INSERT INTO cc_search_chats.message_current ({message_columns})
+            sql.SQL(
+                """
+            INSERT INTO cc_search_chats.message_current ({columns})
             SELECT DISTINCT ON (
                 provider, source_session_id, logical_message_id, content_class
-            ) {message_columns}
+            ) {columns}
             FROM staged_message
             ORDER BY provider, source_session_id, logical_message_id,
                      content_class, record_ordinal
@@ -328,6 +333,7 @@ def replace_messages(
                 EXCLUDED.embedding_input_digest
             )
             """
+            ).format(columns=sql.SQL(message_columns))
         )
         connection.execute(
             """
@@ -440,27 +446,28 @@ def search_messages(
         return ()
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("limit must be a positive integer")
-    filters = ["m.search_vector @@ websearch_to_tsquery('simple', %s)"]
+    filters = [sql.SQL("m.search_vector @@ websearch_to_tsquery('simple', %s)")]
     filters.append(
-        "m.session_kind IN ('primary', 'agent', 'unknown')"
+        sql.SQL("m.session_kind IN ('primary', 'agent', 'unknown')")
         if include_agents
-        else "m.session_kind = 'primary'"
+        else sql.SQL("m.session_kind = 'primary'")
     )
     if not include_tools:
-        filters.append("m.content_class = 'prose'")
+        filters.append(sql.SQL("m.content_class = 'prose'"))
     params: list[object] = [query]
     for value, clause in (
-        (provider, "m.provider = %s"),
-        (role, "m.role = %s"),
-        (project, "COALESCE(m.repository, m.cwd) = %s"),
-        (since, "m.timestamp_text >= %s"),
-        (epoch, "m.conversation_epoch = %s"),
+        (provider, sql.SQL("m.provider = %s")),
+        (role, sql.SQL("m.role = %s")),
+        (project, sql.SQL("COALESCE(m.repository, m.cwd) = %s")),
+        (since, sql.SQL("m.timestamp_text >= %s")),
+        (epoch, sql.SQL("m.conversation_epoch = %s")),
     ):
         if value is not None:
             filters.append(clause)
             params.append(value)
     params.append(limit)
-    sql = f"""
+    statement = sql.SQL(
+        """
         SELECT m.provider, m.source_session_id, m.logical_message_id,
                m.canonical_locator, m.timestamp_text, m.role, m.session_kind,
                m.conversation_epoch, m.content_class, m.prose_content,
@@ -468,13 +475,14 @@ def search_messages(
                ts_rank_cd(
                    m.search_vector,
                    websearch_to_tsquery('simple', %s)
-               ) AS rank
+        ) AS rank
         FROM cc_search_chats.message_current AS m
-        WHERE {" AND ".join(filters)}
+        WHERE {where}
         ORDER BY rank DESC, m.provider, m.source_session_id, m.logical_message_id
         LIMIT %s
         """
-    rows = connection.execute(sql.encode(), (query, *params))
+    ).format(where=sql.SQL(" AND ").join(filters))
+    rows = connection.execute(statement, (query, *params))
     return tuple(SearchHit(*row) for row in rows)
 
 
@@ -498,31 +506,33 @@ def exhaustive_search_page(
         return ExhaustivePage((), None)
     if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size <= 0:
         raise ValueError("page_size must be a positive integer")
-    filters = ["m.search_vector @@ websearch_to_tsquery('simple', %s)"]
+    filters = [sql.SQL("m.search_vector @@ websearch_to_tsquery('simple', %s)")]
     filters.append(
-        "m.session_kind IN ('primary', 'agent', 'unknown')"
+        sql.SQL("m.session_kind IN ('primary', 'agent', 'unknown')")
         if include_agents
-        else "m.session_kind = 'primary'"
+        else sql.SQL("m.session_kind = 'primary'")
     )
     if not include_tools:
-        filters.append("m.content_class = 'prose'")
+        filters.append(sql.SQL("m.content_class = 'prose'"))
     params: list[object] = [query]
     for value, clause in (
-        (provider, "m.provider = %s"),
-        (role, "m.role = %s"),
-        (project, "COALESCE(m.repository, m.cwd) = %s"),
-        (since, "m.timestamp_text >= %s"),
-        (epoch, "m.conversation_epoch = %s"),
+        (provider, sql.SQL("m.provider = %s")),
+        (role, sql.SQL("m.role = %s")),
+        (project, sql.SQL("COALESCE(m.repository, m.cwd) = %s")),
+        (since, sql.SQL("m.timestamp_text >= %s")),
+        (epoch, sql.SQL("m.conversation_epoch = %s")),
     ):
         if value is not None:
             filters.append(clause)
             params.append(value)
     if after is not None:
         filters.append(
-            """(m.canonical_locator, content_order.value,
+            sql.SQL(
+                """(m.canonical_locator, content_order.value,
                    source_alias.record_ordinal, source_alias.source_digest,
                    m.provider, m.source_session_id, m.logical_message_id,
                    m.content_class) > (%s, %s, %s, %s, %s, %s, %s, %s)"""
+            )
         )
         params.extend(
             (
@@ -539,7 +549,8 @@ def exhaustive_search_page(
     params.append(page_size + 1)
     rows = tuple(
         connection.execute(
-            f"""
+            sql.SQL(
+                """
             SELECT m.provider, m.source_session_id, m.logical_message_id,
                    m.canonical_locator, m.timestamp_text, m.role, m.session_kind,
                    m.conversation_epoch, m.content_class, m.prose_content,
@@ -570,13 +581,14 @@ def exhaustive_search_page(
                          alias.source_file_relative, alias.source_byte_offset
                 LIMIT 1
             ) AS source_alias
-            WHERE {" AND ".join(filters)}
+            WHERE {where}
             ORDER BY m.canonical_locator, content_order.value,
                      source_alias.record_ordinal, source_alias.source_digest,
                      m.provider, m.source_session_id, m.logical_message_id,
                      m.content_class
             LIMIT %s
-            """.encode(),
+            """
+            ).format(where=sql.SQL(" AND ").join(filters)),
             (query, *params),
         )
     )
@@ -682,14 +694,16 @@ def extract_session(
 ) -> tuple[StoredMessage, ...]:
     """Extract one provider-qualified session from the selected revision."""
     rows = connection.execute(
-        f"""
-        SELECT {_MESSAGE_COLUMNS}
+        sql.SQL(
+            """
+        SELECT {message_columns}
         FROM cc_search_chats.message_current AS m
         WHERE m.source_session_id = %s
           AND (%s::text IS NULL OR m.provider = %s)
           AND (%s::integer IS NULL OR m.conversation_epoch = %s)
         ORDER BY m.timestamp_text, m.logical_message_id, m.content_class
-        """.encode(),
+        """
+        ).format(message_columns=sql.SQL(_MESSAGE_COLUMNS)),
         (source_session_id, provider, provider, epoch, epoch),
     )
     return tuple(_stored_message(row) for row in rows)
@@ -711,7 +725,8 @@ def resolve_messages(
     if not requested:
         return ()
     rows = connection.execute(
-        f"""
+        sql.SQL(
+            """
         WITH requested(locator, input_order) AS (
             SELECT locator, input_order
             FROM unnest(%s::text[]) WITH ORDINALITY
@@ -729,7 +744,7 @@ def resolve_messages(
             JOIN cc_search_chats.physical_alias_current AS a
               ON a.locator = r.locator
         )
-        SELECT r.input_order, r.locator, {_MESSAGE_COLUMNS}
+        SELECT r.input_order, r.locator, {message_columns}
         FROM requested AS r
         LEFT JOIN matched_identity AS matched
           ON (matched.input_order, matched.locator) =
@@ -741,7 +756,8 @@ def resolve_messages(
               matched.logical_message_id, matched.content_class)
         ORDER BY r.input_order, m.provider, m.source_session_id,
                  m.logical_message_id, m.content_class
-        """.encode(),
+        """
+        ).format(message_columns=sql.SQL(_MESSAGE_COLUMNS)),
         (list(requested),),
     )
     resolved: list[list[StoredMessage]] = [[] for _ in requested]

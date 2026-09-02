@@ -56,11 +56,11 @@ def _assert_v3_envelope(
         "completeness",
     }
     assert isinstance(payload["refresh"], dict)
-    refresh = cast(dict[str, object], payload["refresh"])
+    refresh = cast("dict[str, object]", payload["refresh"])
     assert "corpus_generation" in refresh
     semantic = payload["semantic"]
     assert isinstance(semantic, dict)
-    semantic = cast(dict[str, object], semantic)
+    semantic = cast("dict[str, object]", semantic)
     assert set(semantic) == {
         "semantic_build",
         "corpus_generation",
@@ -80,7 +80,7 @@ def _assert_v3_envelope(
 def _assert_message_identity(message: dict[str, object]) -> None:
     identity = message["identity"]
     assert isinstance(identity, dict)
-    identity = cast(dict[str, object], identity)
+    identity = cast("dict[str, object]", identity)
     assert set(identity) == {
         "provider",
         "source_session_id",
@@ -89,8 +89,9 @@ def _assert_message_identity(message: dict[str, object]) -> None:
         "physical_aliases",
     }
     aliases = identity["physical_aliases"]
-    assert isinstance(aliases, list) and aliases
-    alias = cast(dict[str, object], aliases[0])
+    assert isinstance(aliases, list)
+    assert aliases
+    alias = cast("dict[str, object]", aliases[0])
     assert set(alias) == {
         "locator",
         "source_file_relative",
@@ -151,14 +152,14 @@ def test_postgresql_cli_journey_with_events(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
-        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
     monkeypatch.setattr(
-        "cc_search_chats.cli._start_systemd_refresh", lambda timeout_seconds: None
+        "cc_search_chats.cli._start_systemd_refresh", lambda _timeout_seconds: None
     )
     monkeypatch.setattr(
         "cc_search_chats.cli._wait_for_index_notification",
-        lambda connection, timeout_seconds: False,
+        lambda _connection, _timeout_seconds: False,
     )
     claude_root, codex_root = tmp_path / "claude", tmp_path / "codex"
     claude_root.mkdir()
@@ -487,7 +488,7 @@ def test_postgresql_cli_journey_with_events(
         embedded_texts.extend(texts)
         return [vector for _ in texts]
 
-    def bounded_query_embedding(query, *, timeout_seconds, progress):
+    def bounded_query_embedding(_query, *, timeout_seconds, progress):
         assert 0 < timeout_seconds <= 5
         if progress is not None:
             progress("model_preflight", "running")
@@ -718,7 +719,8 @@ def test_postgresql_cli_journey_with_events(
 
     original = claude_source.read_bytes()
     changed = original.replace(b"refresh sentinel", b"stale!! sentinel", 1)
-    assert changed != original and len(changed) == len(original)
+    assert changed != original
+    assert len(changed) == len(original)
     claude_source.write_bytes(changed)
     code, stale = _run(
         monkeypatch,
@@ -742,7 +744,7 @@ def test_extract_requires_provider_when_native_session_ids_collide(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
-        "cc_search_chats.cli._contain_semantic_index", lambda args: None
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
     claude_root, codex_root = tmp_path / "claude", tmp_path / "codex"
     claude_root.mkdir()

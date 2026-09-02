@@ -1,0 +1,230 @@
+[
+  {
+    "path": "src/cc_search_chats/cli.py",
+    "file_name": "cli.py",
+    "functions": [
+      {
+        "name": "_ProgressStream::emit",
+        "complexity": 25
+      },
+      {
+        "name": "_postgres_envelope",
+        "complexity": 34
+      },
+      {
+        "name": "main",
+        "complexity": 98
+      },
+      {
+        "name": "_handle_postgres",
+        "complexity": 224
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/core/canonicalization.py",
+    "file_name": "canonicalization.py",
+    "functions": [
+      {
+        "name": "canonicalize_codex_candidates",
+        "complexity": 20
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/core/discovery.py",
+    "file_name": "discovery.py",
+    "functions": [
+      {
+        "name": "list_session_files",
+        "complexity": 19
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/core/parser.py",
+    "file_name": "parser.py",
+    "functions": [
+      {
+        "name": "_extract_full_content_list",
+        "complexity": 17
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/output.py",
+    "file_name": "output.py",
+    "functions": [
+      {
+        "name": "format_extract",
+        "complexity": 16
+      },
+      {
+        "name": "format_context",
+        "complexity": 18
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/providers/claude.py",
+    "file_name": "claude.py",
+    "functions": [
+      {
+        "name": "_tool_output",
+        "complexity": 17
+      },
+      {
+        "name": "_classify_session_kind",
+        "complexity": 24
+      },
+      {
+        "name": "parse_claude_session",
+        "complexity": 49
+      },
+      {
+        "name": "_extract_content",
+        "complexity": 64
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/providers/codex.py",
+    "file_name": "codex.py",
+    "functions": [
+      {
+        "name": "_message_content",
+        "complexity": 19
+      },
+      {
+        "name": "_parse_response_item",
+        "complexity": 29
+      },
+      {
+        "name": "_metadata_session_identity",
+        "complexity": 40
+      },
+      {
+        "name": "parse_codex_session",
+        "complexity": 52
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/providers/source_discovery.py",
+    "file_name": "source_discovery.py",
+    "functions": [
+      {
+        "name": "configured_source_roots",
+        "complexity": 23
+      },
+      {
+        "name": "read_bounded_jsonl",
+        "complexity": 66
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/semantic/model.py",
+    "file_name": "model.py",
+    "functions": [
+      {
+        "name": "chunk_passages",
+        "complexity": 23
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/storage/index.py",
+    "file_name": "index.py",
+    "functions": [
+      {
+        "name": "discard_damaged_database",
+        "complexity": 16
+      },
+      {
+        "name": "index_all_projects",
+        "complexity": 16
+      },
+      {
+        "name": "_index_session_uncommitted",
+        "complexity": 20
+      },
+      {
+        "name": "open_db",
+        "complexity": 24
+      },
+      {
+        "name": "format_index_error",
+        "complexity": 29
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/storage/postgresql/events.py",
+    "file_name": "events.py",
+    "functions": [
+      {
+        "name": "export_human_message_events",
+        "complexity": 20
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/storage/postgresql/refresh.py",
+    "file_name": "refresh.py",
+    "functions": [
+      {
+        "name": "_discover_sources",
+        "complexity": 19
+      },
+      {
+        "name": "_skipped_record_diagnostics",
+        "complexity": 24
+      },
+      {
+        "name": "_parse_and_stage_source",
+        "complexity": 25
+      },
+      {
+        "name": "refresh_native_sources",
+        "complexity": 39
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/storage/postgresql/resolution.py",
+    "file_name": "resolution.py",
+    "functions": [
+      {
+        "name": "_scan_claude_source",
+        "complexity": 17
+      },
+      {
+        "name": "_scan_codex_source",
+        "complexity": 19
+      },
+      {
+        "name": "_scan_unindexed_locator",
+        "complexity": 22
+      }
+    ]
+  },
+  {
+    "path": "src/cc_search_chats/storage/postgresql/semantic.py",
+    "file_name": "semantic.py",
+    "functions": [
+      {
+        "name": "_sync_chunks",
+        "complexity": 16
+      },
+      {
+        "name": "prepare_candidate_semantics",
+        "complexity": 35
+      },
+      {
+        "name": "_index_embeddings",
+        "complexity": 38
+      }
+    ]
+  }
+]

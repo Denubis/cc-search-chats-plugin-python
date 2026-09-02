@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -122,10 +123,10 @@ def _seed_representative_corpus(connection: psycopg.Connection) -> tuple[str, st
 
 @pytest.mark.parametrize(
     ("target_kind", "expected_index"),
-    (
+    [
         ("canonical", "message_current_canonical_locator_idx"),
         ("alias", "physical_alias_current_locator_idx"),
-    ),
+    ],
 )
 def test_exact_resolution_uses_current_locator_indexes(
     postgres_connection: psycopg.Connection,
@@ -137,7 +138,7 @@ def test_exact_resolution_uses_current_locator_indexes(
     target = canonical if target_kind == "canonical" else alias
     notices: list[str] = []
     postgres_connection.add_notice_handler(
-        lambda diagnostic: notices.append(diagnostic.message_primary)
+        lambda diagnostic: notices.append(diagnostic.message_primary or "")
     )
     postgres_connection.execute("LOAD 'auto_explain'")
     postgres_connection.execute("SET auto_explain.log_min_duration = 0")
@@ -180,7 +181,7 @@ def test_exact_resolution_uses_current_locator_indexes(
     )
     assert sum(node.get("Temp Written Blocks", 0) for node in nodes) == 0
     if os.environ.get("CC_SEARCH_EXPLAIN_REPORT"):
-        print(
+        sys.stdout.write(
             json.dumps(
                 {
                     "execution_time_ms": plan.get("Actual Total Time"),
@@ -190,6 +191,7 @@ def test_exact_resolution_uses_current_locator_indexes(
                 },
                 sort_keys=True,
             )
+            + "\n"
         )
 
 

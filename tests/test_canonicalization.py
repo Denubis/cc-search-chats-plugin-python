@@ -3,7 +3,7 @@
 import hashlib
 import sys
 from pathlib import Path
-from types import FrameType
+from typing import TYPE_CHECKING
 
 import pytest
 from hypothesis import example, given
@@ -26,6 +26,9 @@ from cc_search_chats.core.identity import (
     Provider,
     SessionKind,
 )
+
+if TYPE_CHECKING:
+    from types import FrameType
 
 
 def candidate(

@@ -42,10 +42,7 @@ def get_db_path() -> Path:
     Creates the parent directory if it does not exist.
     """
     env_path = os.environ.get("CC_SEARCH_DB_PATH")
-    if env_path:
-        path = Path(env_path)
-    else:
-        path = Path.home() / ".cc-search-chats" / "index.db"
+    path = Path(env_path) if env_path else Path.home() / ".cc-search-chats" / "index.db"
 
     path = path.expanduser().resolve()
     try:
@@ -116,11 +113,7 @@ def _permission_targets_index(exc: BaseException, db_path: Path) -> bool:
         return True
     denied_path = Path(exc.filename).expanduser().resolve()
     directory = db_path.parent
-    return (
-        denied_path == db_path
-        or denied_path == directory
-        or denied_path.is_relative_to(directory)
-    )
+    return denied_path in (db_path, directory) or denied_path.is_relative_to(directory)
 
 
 def _latest_indexed_at(
@@ -171,7 +164,7 @@ def discard_damaged_database(
     if conn is not None:
         try:
             conn.close()
-        except Exception as close_error:
+        except Exception as close_error:  # noqa: BLE001  # reports close diagnostics
             if database == IN_MEMORY_DATABASE:
                 return (
                     f"Transient in-memory index is damaged ({detail}). "
@@ -180,7 +173,7 @@ def discard_damaged_database(
                     "The transient in-memory index was abandoned. "
                     "The persistent index was not modified."
                 )
-            assert isinstance(database, Path)
+            assert isinstance(database, Path)  # noqa: S101  # identity invariant
             close_diagnostic = (
                 "SQLite also reported damage while closing "
                 f"({format_exception_detail(close_error)})."
@@ -207,7 +200,7 @@ def discard_damaged_database(
             "The persistent index was not modified."
         )
 
-    assert isinstance(database, Path)
+    assert isinstance(database, Path)  # noqa: S101  # identity invariant
     cleanup_paths = (
         database.with_name(f"{database.name}-wal"),
         database.with_name(f"{database.name}-shm"),
@@ -387,8 +380,8 @@ def open_db(db_path: DatabaseIdentity | None = None) -> sqlite3.Connection:
         if conn is not None:
             conn.close()
         raise RuntimeError(message) from exc
-
-    return conn
+    else:
+        return conn
 
 
 def close_db(conn: sqlite3.Connection) -> None:
@@ -409,11 +402,12 @@ def ensure_fts5() -> bool:
     try:
         conn.execute("CREATE VIRTUAL TABLE _fts5_check USING fts5(c)")
         conn.execute("DROP TABLE _fts5_check")
-        return True
     except sqlite3.OperationalError as exc:
         raise RuntimeError(
             "SQLite FTS5 extension not available \u2014 required for search indexing"
         ) from exc
+    else:
+        return True
     finally:
         conn.close()
 
@@ -503,7 +497,8 @@ def _index_session_uncommitted(
                 # IntegrityError on the uuid PK.
                 conn.execute(
                     "INSERT OR IGNORE INTO compact_event "
-                    "(uuid, session_id, epoch, timestamp, trigger, pre_tokens, summary_text) "
+                    "(uuid, session_id, epoch, timestamp, trigger, pre_tokens, "
+                    "summary_text) "
                     "VALUES (?, ?, ?, ?, ?, ?, NULL)",
                     (
                         record.uuid,
@@ -593,10 +588,11 @@ def index_session(
             full_content=full_content,
         )
         conn.commit()
-        return indexed
     except Exception:
         conn.rollback()
         raise
+    else:
+        return indexed
 
 
 def needs_reindex(conn: sqlite3.Connection, session_meta: SessionMeta) -> bool:
