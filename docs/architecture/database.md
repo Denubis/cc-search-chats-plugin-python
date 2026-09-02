@@ -1,6 +1,6 @@
 # Database architecture
 
-Last verified: 2026-09-01
+Last verified: 2026-09-02
 
 ## Authority and ownership
 
@@ -30,8 +30,10 @@ ledger.
 | 3 | `freshness_schema.sql` | owners, phases, heartbeats, completed/total units |
 | 4 | `coverage_schema.sql` | actual read and removed-source counts |
 | 5 | `semantic_chunk_schema.sql` | exact chunk profile, chunk coordinates, retirement of whole-message mappings |
-| 6 | `incremental_refresh_schema.sql` | failed-observation fingerprints, truthful attempted work, durable automatic-refresh admission |
+| 6 | `incremental_refresh_schema.sql` | failed-observation fingerprints, truthful attempted work, and the state table retired by migration 9 |
 | 7 | `coherent_corpus_schema.sql` | corpus-generation/semantic-build naming and one jointly selected coherent corpus |
+| 8 | `skipped_record_coverage_schema.sql` | durable count of skipped unstorable records per source checkpoint |
+| 9 | `drop_auto_refresh_state_schema.sql` | retirement of the automatic-refresh state table |
 
 Applied migration bytes are immutable. A future schema change is a new ordered
 resource plus a ledger test.
@@ -48,7 +50,6 @@ resource plus a ledger test.
 | `corpus_generation` | one small row per changed candidate | counts, watermarks, selected semantic build, terminal state; no message copies |
 | `refresh_run` | one per attempted changed refresh | progress/diagnostics; terminal rows retained to newest 100 |
 | `source_failure_current` | zero or one per current source | deterministic fingerprint or transient retry boundary without advancing the successful checkpoint |
-| `auto_refresh_state` | singleton | five-minute admission, launch/run state, retry time, and resulting refresh run |
 | `embedding_profile` | one per embedding/chunker contract | model snapshot, prefixes, pooling, dimensions, normalization, attention, token budgets |
 | `semantic_chunk_current` | one per current message/profile/chunk ordinal | source digest, token/character bounds, passage and prefixed-input digest |
 | `embedding_value` | one per profile/prefixed-input digest | reusable `vector(1024)`; unreachable rows reclaimed after publication |
@@ -109,19 +110,14 @@ last successful checkpoint. The same observation is a metadata-only blocked
 source on later refreshes. Transient I/O failures retain retry-after/backoff;
 manual force retry and changed observations invalidate the relevant boundary.
 
-One session advisory owner serializes corpus work. When the selected corpus is
-at least five minutes old, ranked search establishes `LISTEN`, durably admits or
-joins one `auto_refresh_state` request, and launches the user-systemd oneshot
-with bounded `systemctl --user start --no-block`. It waits only while the same
-request remains active and preserves one second of the five-second deadline for
-retrieval. Notifications are wake-up hints; each wake and timeout rereads
-durable generation/request state before the search opens its repeatable-read
-snapshot. The service runs the same full indexing composition as manual and
-nightly maintenance. Any successful completion, including a no-op, starts five
-quiet minutes; failed launch or execution retains the same request for bounded
-backoff. Scanning, parsing, tokenization, model loading, and embedding occur
-without a long write transaction. Independent heartbeat connections expose
-progress; database session death releases ownership.
+One session advisory owner serializes corpus work. `index`, invoked
+intentionally by a person, an agent, or the nightly timer, is the only builder
+and always composes literal and semantic publication. Search does not admit,
+join, launch, or wait for index work; it opens the currently selected coherent
+corpus in a repeatable-read snapshot. Scanning, parsing, tokenization, model
+loading, and embedding occur without a long write transaction. Independent
+heartbeat connections expose progress; database session death releases
+ownership.
 
 ## Semantic publication and retrieval
 
@@ -146,11 +142,11 @@ exact reciprocal-rank-fusion arithmetic. Query-model or semantic-query failure
 returns a named `literal_fallback` from the same selected corpus.
 
 Ranked search starts its monotonic five-second clock in the console bootstrap,
-uses deadline-derived connection/notification/statement budgets, coordinates
-stale background work before opening the result snapshot, reads literal results
-first, and runs query embedding in a terminable/reaped child. It reports a named
-deadline error only when no literal answer can be obtained; optional semantic or
-background-launch failure degrades the committed literal answer.
+uses deadline-derived connection and statement budgets, opens the selected
+result snapshot immediately, reads literal results first, and runs query
+embedding in a terminable/reaped child. It reports a named deadline error only
+when no literal answer can be obtained; optional semantic failure degrades the
+committed literal answer.
 
 ## Storage, backup, and rebuild boundary
 

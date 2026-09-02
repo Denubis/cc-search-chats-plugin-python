@@ -13,6 +13,7 @@ from psycopg.conninfo import conninfo_to_dict
 
 from cc_search_chats.cli import main
 from cc_search_chats.semantic import SemanticChunk
+from cc_search_chats.storage.postgresql import migrate
 
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
@@ -73,7 +74,7 @@ def _assert_v3_envelope(
     assert semantic["corpus_generation"] == refresh["corpus_generation"]
     assert "indexed_at" in payload
     assert "corpus_age_ms" in payload
-    assert isinstance(payload["background_refresh"], dict)
+    assert "background_refresh" not in payload
     assert isinstance(payload["warnings"], list)
 
 
@@ -127,7 +128,6 @@ def _progress_events(stderr: str) -> list[dict[str, object]]:
             "indexed_at",
             "corpus_age_ms",
             "stale_reasons",
-            "background_refresh",
             "warning",
             "error",
             "coverage",
@@ -145,6 +145,65 @@ def _single_chunks(texts):
     return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
 
 
+@pytest.mark.parametrize("json_output", [True, False])
+def test_migration_reporting_uses_applied_ledger_version(
+    postgres_cluster,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    json_output: bool,
+) -> None:
+    connection_info = conninfo_to_dict(postgres_cluster.dsn)
+    for variable, key in (
+        ("PGHOST", "host"),
+        ("PGPORT", "port"),
+        ("PGDATABASE", "dbname"),
+        ("PGUSER", "user"),
+    ):
+        monkeypatch.setenv(variable, str(connection_info[key]))
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
+    )
+
+    def migrate_with_future_ledger(connection: psycopg.Connection) -> None:
+        migrate(connection)
+        connection.execute(
+            """
+            INSERT INTO cc_search_chats.schema_migration (
+                version, resource_name, sha256
+            ) VALUES (10, 'future_schema.sql', %s)
+            """,
+            ("0" * 64,),
+        )
+
+    monkeypatch.setattr("cc_search_chats.cli.migrate", migrate_with_future_ledger)
+    arguments = (
+        ("index", "--migrate", "--json")
+        if json_output
+        else (
+            "index",
+            "--migrate",
+        )
+    )
+
+    code, output = _run(monkeypatch, capsys, *arguments)
+
+    assert code == 0
+    with psycopg.connect(postgres_cluster.dsn, autocommit=True) as connection:
+        ledger_version = next(
+            connection.execute(
+                "SELECT max(version) FROM cc_search_chats.schema_migration"
+            )
+        )[0]
+    assert ledger_version == 10
+    if json_output:
+        assert json.loads(output.out)["applied_schema_version"] == ledger_version
+    else:
+        assert output.out.strip() == (
+            f"Applied PostgreSQL schema migration {ledger_version}"
+        )
+
+
 def test_postgresql_cli_journey_with_events(
     postgres_cluster,
     tmp_path: Path,
@@ -153,13 +212,6 @@ def test_postgresql_cli_journey_with_events(
 ) -> None:
     monkeypatch.setattr(
         "cc_search_chats.cli._contain_semantic_index", lambda _args: None
-    )
-    monkeypatch.setattr(
-        "cc_search_chats.cli._start_systemd_refresh", lambda _timeout_seconds: None
-    )
-    monkeypatch.setattr(
-        "cc_search_chats.cli._wait_for_index_notification",
-        lambda _connection, _timeout_seconds: False,
     )
     claude_root, codex_root = tmp_path / "claude", tmp_path / "codex"
     claude_root.mkdir()
@@ -214,21 +266,7 @@ def test_postgresql_cli_journey_with_events(
 
     code, migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
     assert code == 0
-    assert json.loads(migrated.out)["applied_schema_version"] == 7
-    code, diagnostic = _run(
-        monkeypatch,
-        capsys,
-        "index",
-        "--literal-only",
-        "--json",
-    )
-    assert code == 0
-    diagnostic_payload = json.loads(diagnostic.out)
-    assert diagnostic_payload["corpus_generation"] == 0
-    assert diagnostic_payload["coverage"]["indexed_files"] == 0
-    assert "literal_diagnostic" in {
-        event["phase"] for event in _progress_events(diagnostic.err)
-    }
+    assert json.loads(migrated.out)["applied_schema_version"] == 9
     code, indexed = _run(monkeypatch, capsys, "index", "--json")
     assert code == 0
     indexed_payload = json.loads(indexed.out)
@@ -439,20 +477,17 @@ def test_postgresql_cli_journey_with_events(
     _assert_v3_envelope(stale_payload, "search")
     assert stale_payload["results"] == []
     assert stale_payload["stale_reasons"] == ["native_sources_not_checked"]
-    assert stale_payload["background_refresh"]["state"] == "launched"
     stale_events = _progress_events(stale_search.err)
     assert {event["phase"] for event in stale_events} == {"retrieve", "done"}
     assert stale_events[-1]["deadline_ms"] == stale_payload["deadline_ms"]
     assert stale_events[-1]["retrieval_mode"] == stale_payload["retrieval_mode"]
     assert stale_events[-1]["indexed_at"] == stale_payload["indexed_at"]
     assert stale_events[-1]["stale_reasons"] == stale_payload["stale_reasons"]
-    assert stale_events[-1]["background_refresh"] == stale_payload["background_refresh"]
 
-    code, _background = _run(
+    code, _intentional_index = _run(
         monkeypatch,
         capsys,
         "index",
-        "--background-refresh",
         "--json",
     )
     assert code == 0
@@ -504,15 +539,6 @@ def test_postgresql_cli_journey_with_events(
         raising=False,
     )
     monkeypatch.setattr("cc_search_chats.cli.chunk_passages", _single_chunks)
-    code, semantic_index = _run(
-        monkeypatch,
-        capsys,
-        "index",
-        "--semantic-only",
-        "--json",
-    )
-    assert code == 1
-    assert "publish one coherent corpus" in semantic_index.out
     embedded_texts.clear()
     code, initial_hybrid = _run(
         monkeypatch,
@@ -554,13 +580,6 @@ def test_postgresql_cli_journey_with_events(
     with psycopg.connect(postgres_cluster.dsn) as database:
         database.execute(
             """
-            UPDATE cc_search_chats.auto_refresh_state
-            SET completed_at = completed_at - interval '10 minutes'
-            WHERE singleton
-            """
-        )
-        database.execute(
-            """
             UPDATE cc_search_chats.corpus_generation AS generation
             SET completed_at = now() - interval '10 minutes'
             FROM cc_search_chats.corpus_state AS state
@@ -582,11 +601,10 @@ def test_postgresql_cli_journey_with_events(
         result["logical_message_id"] != "claude-hybrid-refresh-append"
         for result in json.loads(stale_hybrid.out)["results"]
     )
-    code, _background = _run(
+    code, _intentional_index = _run(
         monkeypatch,
         capsys,
         "index",
-        "--background-refresh",
         "--json",
     )
     assert code == 0

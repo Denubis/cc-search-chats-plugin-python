@@ -120,13 +120,14 @@ def test_search_guidance_describes_the_v3_coherent_corpus_contract() -> None:
         assert "corpus_age_ms" in document, name
 
     assert (
-        "A stale ranked search admits or joins one full background update before "
-        "opening its result snapshot" in documents["command"]
+        "A search opens the currently selected coherent corpus without admitting,\n"
+        "launching, joining, or waiting for index work" in documents["command"]
     )
     assert (
-        "A stale ranked search may wait within the command deadline for that "
-        "update before opening its result snapshot" in documents["skill"]
+        "Search opens the currently selected coherent corpus without admitting,\n"
+        "launching, joining, or waiting for index work" in documents["skill"]
     )
+    assert all("background_refresh" not in document for document in documents.values())
     assert "--everything` is retired" in documents["README"]
 
 

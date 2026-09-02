@@ -8,3 +8,4 @@ ruling.
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
 | [0001](0001-classify-index-failures-before-acting.md) | Classify index failures before acting on them | Accepted | 2026-07-31 |
+| [0002](0002-explicit-search-modes-no-search-triggered-refresh.md) | Search never refreshes; the caller names the mode; the index stays joint | Accepted | 2026-09-02 |

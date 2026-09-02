@@ -1,6 +1,6 @@
 # PostgreSQL index maintenance
 
-Last verified: 2026-09-01
+Last verified: 2026-09-02
 
 This runbook separates read-only inspection, candidate migration, production
 UAT, and irreversible legacy pruning. Preparing or testing code does not
@@ -67,7 +67,7 @@ obscured by indexing output:
 cc-search-chats index --migrate --json
 ```
 
-The migration result must report `applied_schema_version == 7`. Re-running it is
+The migration result must report `applied_schema_version == 9`. Re-running it is
 idempotent. Routine search/index commands must have reported
 `maintenance_required` without schema mutation before this explicit step.
 
@@ -102,8 +102,8 @@ not create another vector for the same profile/input digest.
 Repeat `cc-search-chats index --json`. An unchanged run must report no changed
 source, retain the same `corpus_generation` and `semantic_build`, and create no
 generation or current-row version changes. Then run the prepared four-corpus
-literal, exact-resolution, and append cases. `--literal-only` is a non-selecting
-diagnostic; `--semantic-only` cannot independently advance published state.
+literal, exact-resolution, and append cases. `index` has one composition: it
+publishes literal and semantic state together.
 
 On candidate semantic failure, preserve its phase/code and verify that the
 previous corpus generation and semantic build remain selected. Run a positive

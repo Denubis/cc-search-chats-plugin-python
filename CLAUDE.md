@@ -38,13 +38,12 @@ They do not use the operator's production database.
 
 ## CLI Contract
 
-- PostgreSQL is the default backend. When the selected corpus is at least five
-  minutes old, ranked `search` admits or joins one systemd-owned full index
-  before opening its committed result snapshot. It waits only within the
-  five-second invocation-to-answer deadline while preserving one second for
-  retrieval. A completed update, including a no-op, starts five quiet minutes.
-  Search never migrates or performs maintenance in its own process; `index`
-  owns the coherent corpus update.
+- PostgreSQL is the default backend. `search` opens the currently selected
+  coherent corpus in a repeatable-read snapshot inside a five-second
+  invocation-to-answer deadline. It never indexes, launches, joins, or waits
+  for index work. `index`, run by a person, an agent, or the nightly timer, is
+  the only builder and always publishes literal and semantic state together
+  (ADR 0002). Search never migrates or performs maintenance in its own process.
 - Hybrid search is the default. `--literal` avoids the model. Default search
   returns visible primary-session prose; `--agents` includes agent and unknown
   sessions; `--literal --tools` includes tool name/input/output rows;

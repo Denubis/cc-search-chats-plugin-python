@@ -23,7 +23,7 @@ uv tool install \
   'cc-search-chats[semantic] @ git+https://github.com/Denubis/cc-search-chats-plugin-python@main'
 ```
 
-For literal-only use:
+For PostgreSQL full-text search without semantic dependencies:
 
 ```console
 uv tool install \
@@ -144,15 +144,12 @@ cc-search-chats index --status --json
 ```
 
 Ranked `search` measures a provisional five-second deadline from executable
-invocation. When the selected corpus is at least five minutes old, the command
-admits or joins one user-systemd full index before opening its repeatable-read
-result snapshot. It waits only while that request remains active and preserves
-one second for retrieval. If publication finishes in budget, the search reads
-the new coherent corpus; otherwise it reads the previous completed corpus. A
-successful update, including a no-op, starts a five-minute quiet period in which
-search does not launch another request. Output names `corpus_generation`,
-`semantic_build`, `indexed_at`, `corpus_age_ms`, staleness reasons, retrieval
-mode, deadline, and durable background state.
+invocation and opens its repeatable-read snapshot without indexing, launching
+a service, joining index work, or waiting for publication. It reads the
+currently selected coherent corpus even when newer native records exist.
+Output names `corpus_generation`, `semantic_build`, `indexed_at`,
+`corpus_age_ms`, staleness reasons, retrieval mode, and deadline. Run
+`cc-search-chats index` intentionally when the selected corpus is too old.
 
 `index --migrate` is the only CLI path that applies pending schema migrations.
 Search and routine index/status commands report `maintenance_required` without
@@ -202,7 +199,7 @@ Discovery traverses only those session directories. Equal native identities
 share one canonical message and retain each genuine physical occurrence as an
 alias; conflicting content for one identity aborts publication.
 
-## Refresh and Storage
+## Index and Storage
 
 PostgreSQL stores one current canonical message row, one row per physical alias,
 one current semantic chunk row per chunk/profile, and one vector per
@@ -239,8 +236,7 @@ command writes one stdout object containing:
 - `coverage` with roots, repositories, file counts, diagnostics, and watermarks
 - `refresh.corpus_generation`, `semantic.semantic_build`,
   `semantic.corpus_generation`, and their state/progress fields
-- top-level `indexed_at` and database-computed `corpus_age_ms`, plus
-  `background_refresh` and `warnings`
+- top-level `indexed_at`, database-computed `corpus_age_ms`, and `warnings`
 - ranked-search `deadline_ms`, `elapsed_ms`, `retrieval_mode`, `indexed_at`, and
   `stale_reasons`
 - command-specific `results`, `sessions`, `messages`, `resolutions`, or `events`
@@ -265,11 +261,11 @@ exactly one terminal event. Use `--progress human` for concise terminal text.
 
 ## Scheduled Maintenance
 
-The distribution includes a low-priority automatic full-index oneshot plus
-the composed nightly service and persistent timer. Copy all packaged units to
+The distribution includes one low-priority full-index service and its
+persistent nightly timer. Copy both packaged units to
 `~/.config/systemd/user/`. Optional operator configuration belongs in
-`~/.config/cc-search-chats/index.env`, which both services read if present.
-For example:
+`~/.config/cc-search-chats/index.env`, which the service reads if present. For
+example:
 
 ```text
 CC_SEARCH_CLAUDE_ROOTS=/home/USER/.claude/projects:/home/USER/.claude-ponytail/projects
@@ -284,11 +280,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now cc-search-chats-index.timer  # only after accepted UAT
 ```
 
-The timer runs nightly at 03:00 with up to 30 minutes randomized delay. Keep it
-disabled through migration and UAT. Search starts
-`cc-search-chats-refresh.service` with `--no-block`; the automatic oneshot has no
-timer and runs the same coherent indexing path as manual and nightly
-maintenance. No resident daemon is required.
+The timer runs the same intentional `cc-search-chats index` build nightly at
+03:00 with up to 30 minutes randomized delay. Keep it disabled through
+migration and UAT. A person or agent may run that command directly when a newer
+corpus is required. Search never starts it, and no resident daemon is required.
 
 ## Recovery and Release Boundaries
 

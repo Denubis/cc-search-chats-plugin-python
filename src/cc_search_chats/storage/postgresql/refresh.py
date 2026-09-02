@@ -54,9 +54,6 @@ from cc_search_chats.providers.source_discovery import (
     read_bounded_jsonl,
     source_root_id,
 )
-from cc_search_chats.storage.postgresql.auto_refresh import (
-    mark_auto_refresh_complete,
-)
 from cc_search_chats.storage.postgresql.guardrails import (
     INDEX_NOTIFY_CHANNEL,
     INDEX_QUEUE_LOCK,
@@ -1766,7 +1763,6 @@ def _publish_coherent_candidate(
     blocked_source_count: int,
     transient_failure_source_count: int,
     diagnostics: tuple[dict[str, object], ...],
-    automatic_request_id: int | None,
 ) -> None:
     """Publish the literal delta and prepared semantic build in one transaction."""
     with connection.transaction():
@@ -2062,16 +2058,6 @@ def _publish_coherent_candidate(
                 Jsonb(list(diagnostics)),
                 run_id,
             ),
-        )
-        if automatic_request_id is not None:
-            mark_auto_refresh_complete(
-                connection,
-                automatic_request_id,
-                refresh_run_id=run_id,
-            )
-        connection.execute(
-            "SELECT pg_notify(%s, %s)",
-            (INDEX_NOTIFY_CHANNEL, str(corpus_generation)),
         )
         connection.execute(
             """
@@ -3062,7 +3048,6 @@ def index_corpus(
     embedding_progress: Callable[[int, int], None] | None = None,
     batch_size: int = 4,
     force_retry: bool = False,
-    automatic_request_id: int | None = None,
 ) -> CorpusIndexResult:
     """Prepare and jointly publish one coherent literal and semantic corpus."""
     require_current_schema(connection)
@@ -3121,7 +3106,6 @@ def index_corpus(
                 blocked_source_count=blocked_source_count,
                 transient_failure_source_count=transient_failure_source_count,
                 diagnostics=diagnostics,
-                automatic_request_id=automatic_request_id,
             )
         except Exception as error:
             if prepared is not None:

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Changed:**
+- Search no longer admits, launches, joins, or waits for index work; `index` is
+  the single intentional joint literal-and-semantic builder.
+- PostgreSQL migration 9 removes the retired automatic-refresh state table.
+- The obsolete `cc-search-chats-refresh.service` unit is no longer packaged.
+
 ## cc-search-chats 2.0.5
 
 Adds incremental cross-vendor PostgreSQL search across standard and isolated

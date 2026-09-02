@@ -28,6 +28,7 @@ _MIGRATIONS = (
     Migration(6, "incremental_refresh_schema.sql"),
     Migration(7, "coherent_corpus_schema.sql"),
     Migration(8, "skipped_record_coverage_schema.sql"),
+    Migration(9, "drop_auto_refresh_state_schema.sql"),
 )
 
 

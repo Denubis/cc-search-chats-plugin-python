@@ -292,6 +292,7 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
         (6, "incremental_refresh_schema.sql", 64),
         (7, "coherent_corpus_schema.sql", 64),
         (8, "skipped_record_coverage_schema.sql", 64),
+        (9, "drop_auto_refresh_state_schema.sql", 64),
     )
     assert next(
         postgres_connection.execute(
@@ -300,7 +301,7 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
     )[0]
     assert next(
         postgres_connection.execute(
-            "SELECT to_regclass('cc_search_chats.auto_refresh_state') IS NOT NULL"
+            "SELECT to_regclass('cc_search_chats.auto_refresh_state') IS NULL"
         )
     )[0]
     postgres_connection.execute(
@@ -318,7 +319,7 @@ def test_pending_migrations_is_read_only_and_reports_the_packaged_suffix(
     assert tuple(
         migration.version
         for migration in migrations.pending_migrations(postgres_connection)
-    ) == (1, 2, 3, 4, 5, 6, 7, 8)
+    ) == (1, 2, 3, 4, 5, 6, 7, 8, 9)
     assert (
         next(postgres_connection.execute("SELECT to_regnamespace('cc_search_chats')"))[
             0
@@ -353,7 +354,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
     monkeypatch.setattr(
         migrations,
         "_MIGRATIONS",
-        (*migrations._MIGRATIONS, migrations.Migration(9, "missing-migration.sql")),
+        (*migrations._MIGRATIONS, migrations.Migration(10, "missing-migration.sql")),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -363,7 +364,37 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
         postgres_connection.execute(
             "SELECT version FROM cc_search_chats.schema_migration ORDER BY version"
         )
-    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,))
+    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,))
+
+
+def test_migration_9_drops_only_the_retired_auto_refresh_state(
+    postgres_connection: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packaged_migrations = migrations._MIGRATIONS
+    migrations_through_v8 = tuple(
+        migration for migration in packaged_migrations if migration.version <= 8
+    )
+    monkeypatch.setattr(migrations, "_MIGRATIONS", migrations_through_v8)
+    migrations.apply_migrations(postgres_connection)
+    assert next(
+        postgres_connection.execute(
+            "SELECT to_regclass('cc_search_chats.auto_refresh_state') IS NOT NULL"
+        )
+    )[0]
+
+    monkeypatch.setattr(migrations, "_MIGRATIONS", packaged_migrations)
+    assert tuple(
+        migration.version
+        for migration in migrations.pending_migrations(postgres_connection)
+    ) == (9,)
+    migrations.apply_migrations(postgres_connection)
+
+    assert next(
+        postgres_connection.execute(
+            "SELECT to_regclass('cc_search_chats.auto_refresh_state') IS NULL"
+        )
+    )[0]
 
 
 def _upgrade_seeded_v6_schema(
@@ -429,6 +460,7 @@ def _upgrade_seeded_v6_schema(
         6,
         7,
         8,
+        9,
     )
     migrations.apply_migrations(connection)
 

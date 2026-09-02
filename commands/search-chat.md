@@ -24,11 +24,11 @@ and do not invent connection or cache environment variables.
 - Explicit maintenance: `cc-search-chats index --json`
 - Semantic checkpoint: `cc-search-chats index --status --json`
 
-A stale ranked search admits or joins one full background update before opening its result snapshot. It may wait within the command deadline; a completed update
-starts a five-minute quiet period, while a timeout keeps the previous coherent
-corpus. A miss merits alternate terms, `--literal`, and filter review before
-explicit maintenance. Default search contains visible primary prose from
-configured standard and Ponytail roots;
+A search opens the currently selected coherent corpus without admitting,
+launching, joining, or waiting for index work. Run `index` intentionally when a
+newer corpus is required. A miss merits alternate terms, `--literal`, and
+filter review before explicit maintenance. Default search contains visible
+primary prose from configured standard and Ponytail roots;
 `--agents` adds agent/unknown sessions;
 `--literal --tools` adds tool content. Reasoning, instructions, injected context,
 and unrecognized shapes are unavailable.

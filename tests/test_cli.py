@@ -137,12 +137,15 @@ def test_postgresql_search_does_not_wait_on_a_local_admission_lock(
     assert admissions == []
 
 
-def test_background_refresh_service_invocation_is_a_valid_full_index_mode() -> None:
-    args = build_parser().parse_args(["index", "--background-refresh"])
-
-    assert args.command == "index"
-    assert args.literal_only is False
-    assert args.background_refresh is True
+@pytest.mark.parametrize(
+    "retired_flag",
+    ["--background-refresh", "--literal-only", "--semantic-only"],
+)
+def test_index_rejects_retired_partial_and_automatic_modes(
+    retired_flag: str,
+) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        build_parser().parse_args(["index", retired_flag])
 
 
 def test_explicit_postgresql_migration_is_an_index_maintenance_mode() -> None:
@@ -313,13 +316,11 @@ def test_embedding_rate_alarm_accepts_the_minimum_sustained_rate() -> None:
 # ============================================================
 
 
-@pytest.mark.parametrize("mode", [(), ("--literal-only",), ("--semantic-only",)])
 def test_index_reexecs_inside_bounded_systemd_scope(
     monkeypatch: pytest.MonkeyPatch,
-    mode: tuple[str, ...],
 ) -> None:
-    args = build_parser().parse_args(["index", *mode])
-    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "index", *mode])
+    args = build_parser().parse_args(["index"])
+    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "index"])
     launched = []
     monkeypatch.setattr(
         "os.execvp", lambda _executable, command: launched.append(command)
@@ -337,7 +338,7 @@ def test_index_reexecs_inside_bounded_systemd_scope(
     assert "--property=TasksMax=256" in command
     separator = command.index("--")
     assert command[separator + 1 : separator + 3] == ["ionice", "--class=idle"]
-    assert command[separator + 3 :] == ["cc-search-chats", "index", *mode]
+    assert command[separator + 3 :] == ["cc-search-chats", "index"]
     assert "--property=IOSchedulingClass=idle" not in command
 
 

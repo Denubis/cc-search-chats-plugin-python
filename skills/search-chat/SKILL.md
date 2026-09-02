@@ -55,10 +55,9 @@ cc-search-chats index --json
 cc-search-chats index --status --json
 ```
 
-A stale ranked search admits or joins one full systemd-owned update. A stale ranked search may wait within the command deadline for that update before opening its result snapshot. If publication does not finish in budget, it reads
-the previous coherent corpus. A completed update, including a no-op, starts a
-five-minute quiet period. Use `index` for explicit maintenance, not as the
-automatic response to a miss. A miss merits alternate terms, `--literal`, and
+Search opens the currently selected coherent corpus without admitting,
+launching, joining, or waiting for index work. Use `index` intentionally when a
+newer corpus is required. A miss merits alternate terms, `--literal`, and
 careful filter review. Add `--project` only when `list` or prior results show the
 exact recorded repository/cwd; missing project metadata cannot match it.
 
@@ -71,8 +70,8 @@ instructions, injected context, or unrecognized record shapes.
 ## Interpret schema v3
 
 Every command object contains `command`, terminal `status`, `coverage`,
-`refresh`, `semantic`, `indexed_at`, `corpus_age_ms`, `background_refresh`, and
-`warnings`. Read the selected identity from `refresh.corpus_generation` and the
+`refresh`, `semantic`, `indexed_at`, `corpus_age_ms`, and `warnings`. Read the
+selected identity from `refresh.corpus_generation` and the
 coherent semantic identity from `semantic.semantic_build` plus
 `semantic.corpus_generation`.
 

@@ -8,10 +8,8 @@ import json
 import os
 import shlex
 import sqlite3
-import subprocess
 import sys
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from multiprocessing import get_context
@@ -80,7 +78,6 @@ from cc_search_chats.storage.postgresql import (
     export_human_message_events,
     index_corpus,
     migrate,
-    refresh_native_sources,
     resolve_exact_messages,
     search_messages,
 )
@@ -96,20 +93,7 @@ from cc_search_chats.storage.postgresql import (
 from cc_search_chats.storage.postgresql import (
     resolve_messages as pg_resolve_messages,
 )
-from cc_search_chats.storage.postgresql.auto_refresh import (
-    AUTO_REFRESH_COOLDOWN_SECONDS,
-    AutoRefreshStatus,
-    admit_auto_refresh,
-    auto_refresh_status,
-    claim_auto_refresh_launch,
-    mark_auto_refresh_complete,
-    mark_auto_refresh_launch_failed,
-    mark_auto_refresh_launched,
-    mark_auto_refresh_run_failed,
-    mark_auto_refresh_running,
-)
 from cc_search_chats.storage.postgresql.guardrails import (
-    INDEX_NOTIFY_CHANNEL,
     ReadDeadlineExceeded,
     acquire_index_session,
     read_deadline,
@@ -127,29 +111,9 @@ if TYPE_CHECKING:
 _DEFAULT_POSTGRES_DSN = "service=cc_search_chats"
 _SEARCH_DEADLINE_SECONDS = 5.0
 _SEARCH_RENDER_RESERVE_SECONDS = 0.1
-_SEARCH_RETRIEVAL_RESERVE_SECONDS = 1.0
-_AUTO_REFRESH_LAUNCH_MAX_SECONDS = 0.5
-_AUTO_REFRESH_SERVICE = "cc-search-chats-refresh.service"
 _EMBEDDING_RATE_WINDOW_SECONDS = 5.0
 _EMBEDDING_DESIRED_PASSAGES_PER_SECOND = 16.0
 _EMBEDDING_MINIMUM_RATE_RATIO = 0.75
-_ACTIVE_AUTO_REFRESH_STATES = frozenset({"pending", "launching", "launched", "running"})
-
-
-@dataclass(frozen=True, slots=True)
-class _RefreshSnapshot:
-    corpus_generation: int | None
-    indexed_at: datetime | None
-    stale: bool
-    background: AutoRefreshStatus
-
-
-@dataclass(frozen=True, slots=True)
-class _RankedRefreshCoordination:
-    corpus_before: int | None
-    corpus_after: int | None
-    background: AutoRefreshStatus
-    warning: dict[str, str] | None
 
 
 class SearchDeadlineExceeded(TimeoutError):
@@ -279,176 +243,6 @@ def _bounded_query_embedding(
             process.join(timeout=0.2)
 
 
-def _start_systemd_refresh(timeout_seconds: float) -> None:
-    """Ask user systemd to own the refresh, bounded by the caller's budget."""
-    if timeout_seconds <= 0:
-        raise TimeoutError("no request budget remains for background refresh launch")
-    completed = subprocess.run(
-        (
-            "systemctl",
-            "--user",
-            "start",
-            "--no-block",
-            _AUTO_REFRESH_SERVICE,
-        ),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds,
-        check=False,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(
-            detail or f"systemctl exited with status {completed.returncode}"
-        )
-
-
-def _request_auto_refresh(
-    connection: psycopg.Connection,
-    *,
-    timeout_seconds: float,
-) -> AutoRefreshStatus:
-    """Admit or retry one durable request and launch its systemd owner."""
-    request = admit_auto_refresh(connection)
-    if not claim_auto_refresh_launch(connection, request.request_id):
-        return auto_refresh_status(connection)
-    try:
-        _start_systemd_refresh(timeout_seconds)
-    except (OSError, RuntimeError, subprocess.TimeoutExpired, TimeoutError) as error:
-        mark_auto_refresh_launch_failed(
-            connection,
-            request.request_id,
-            f"{type(error).__name__}: {error}",
-        )
-    else:
-        mark_auto_refresh_launched(connection, request.request_id)
-    return auto_refresh_status(connection)
-
-
-def _refresh_snapshot(connection: psycopg.Connection) -> _RefreshSnapshot:
-    row = next(
-        connection.execute(
-            """
-            SELECT corpus.current_corpus_generation,
-                   generation.completed_at,
-                   generation.completed_at IS NULL
-                       OR generation.completed_at <= now() - make_interval(
-                           secs => %s
-                       ) AS stale,
-                   automatic.request_id, automatic.state,
-                   automatic.refresh_run_id, automatic.last_error
-            FROM cc_search_chats.corpus_state AS corpus
-            LEFT JOIN cc_search_chats.corpus_generation AS generation
-              ON generation.corpus_generation =
-                 corpus.current_corpus_generation
-            CROSS JOIN cc_search_chats.auto_refresh_state AS automatic
-            WHERE corpus.singleton AND automatic.singleton
-            """,
-            (AUTO_REFRESH_COOLDOWN_SECONDS,),
-        )
-    )
-    return _RefreshSnapshot(
-        corpus_generation=row[0],
-        indexed_at=row[1],
-        stale=bool(row[2]),
-        background=AutoRefreshStatus(*row[3:]),
-    )
-
-
-def _should_wait_for_ranked_refresh(
-    *,
-    corpus_before: int | None,
-    current: _RefreshSnapshot,
-    remaining_seconds: float,
-) -> bool:
-    return (
-        current.corpus_generation == corpus_before
-        and current.background.state in _ACTIVE_AUTO_REFRESH_STATES
-        and remaining_seconds > _SEARCH_RETRIEVAL_RESERVE_SECONDS
-    )
-
-
-def _wait_for_index_notification(
-    connection: psycopg.Connection,
-    timeout_seconds: float,
-) -> bool:
-    notification = next(
-        connection.notifies(timeout=timeout_seconds, stop_after=1),
-        None,
-    )
-    return notification is not None
-
-
-def _auto_refresh_warning(status: AutoRefreshStatus) -> dict[str, str] | None:
-    if status.state != "failed":
-        return None
-    return {
-        "code": "auto_refresh_unavailable",
-        "detail": status.last_error or "unknown launch failure",
-    }
-
-
-def _coordinate_ranked_refresh(
-    connection: psycopg.Connection,
-    *,
-    remaining_seconds: Callable[[], float],
-    wait_for_notification: Callable[[psycopg.Connection, float], bool] | None = None,
-) -> _RankedRefreshCoordination:
-    """Launch or join stale work, treating notifications only as wake-up hints."""
-    wait = wait_for_notification or _wait_for_index_notification
-    observed = _refresh_snapshot(connection)
-    if not observed.stale:
-        return _RankedRefreshCoordination(
-            corpus_before=observed.corpus_generation,
-            corpus_after=observed.corpus_generation,
-            background=observed.background,
-            warning=_auto_refresh_warning(observed.background),
-        )
-
-    connection.execute(f"LISTEN {INDEX_NOTIFY_CHANNEL}")
-    try:
-        before = _refresh_snapshot(connection)
-        current = before
-        if current.stale:
-            remaining = remaining_seconds()
-            launch_budget = min(
-                _AUTO_REFRESH_LAUNCH_MAX_SECONDS,
-                remaining - _SEARCH_RETRIEVAL_RESERVE_SECONDS,
-            )
-            if launch_budget > 0:
-                _request_auto_refresh(
-                    connection,
-                    timeout_seconds=launch_budget,
-                )
-                current = _refresh_snapshot(connection)
-
-            while True:
-                remaining = remaining_seconds()
-                if not _should_wait_for_ranked_refresh(
-                    corpus_before=before.corpus_generation,
-                    current=current,
-                    remaining_seconds=remaining,
-                ):
-                    break
-                woke = wait(
-                    connection,
-                    remaining - _SEARCH_RETRIEVAL_RESERVE_SECONDS,
-                )
-                current = _refresh_snapshot(connection)
-                if not woke:
-                    break
-
-        return _RankedRefreshCoordination(
-            corpus_before=before.corpus_generation,
-            corpus_after=current.corpus_generation,
-            background=current.background,
-            warning=_auto_refresh_warning(current.background),
-        )
-    finally:
-        connection.execute(f"UNLISTEN {INDEX_NOTIFY_CHANNEL}")
-
-
 class _ProgressStream:
     """Render one ordered progress stream without contaminating stdout."""
 
@@ -484,7 +278,6 @@ class _ProgressStream:
         indexed_at: str | None = None,
         corpus_age_ms: int | None = None,
         stale_reasons: object = None,
-        background_refresh: object = None,
         warning: object = None,
         error: object = None,
         coverage: object = None,
@@ -513,7 +306,6 @@ class _ProgressStream:
                 "indexed_at": indexed_at,
                 "corpus_age_ms": corpus_age_ms,
                 "stale_reasons": stale_reasons,
-                "background_refresh": background_refresh,
                 "warning": warning,
                 "error": error,
                 "coverage": coverage,
@@ -647,7 +439,6 @@ class _ProgressStream:
             indexed_at=cast("str | None", envelope.get("indexed_at")),
             corpus_age_ms=cast("int | None", envelope.get("corpus_age_ms")),
             stale_reasons=envelope.get("stale_reasons"),
-            background_refresh=envelope.get("background_refresh"),
             warning=envelope.get("warnings"),
             error=envelope.get("error"),
             coverage=coverage,
@@ -727,12 +518,6 @@ def _error_envelope(
         },
         "indexed_at": None,
         "corpus_age_ms": None,
-        "background_refresh": {
-            "request_id": 0,
-            "state": "unavailable",
-            "refresh_run_id": None,
-            "last_error": None,
-        },
         "warnings": [],
         "error": error,
     }
@@ -1054,7 +839,6 @@ def _postgres_envelope(
             """
         )
     )
-    background = auto_refresh_status(connection)
     return {
         "schema_version": 3,
         "command": command,
@@ -1064,15 +848,18 @@ def _postgres_envelope(
         "semantic": semantic,
         "indexed_at": indexed_at.isoformat() if indexed_at is not None else None,
         "corpus_age_ms": corpus_age_ms,
-        "background_refresh": {
-            "request_id": background.request_id,
-            "state": background.state,
-            "refresh_run_id": background.refresh_run_id,
-            "last_error": background.last_error,
-        },
         "warnings": [*diagnostics, *additional_warnings],
         **payload,
     }
+
+
+def _applied_schema_version(connection: psycopg.Connection) -> int:
+    version = next(
+        connection.execute("SELECT max(version) FROM cc_search_chats.schema_migration")
+    )[0]
+    if version is None:
+        raise RuntimeError("schema migration ledger is empty after migration")
+    return int(version)
 
 
 def _eta(seconds: float) -> str:
@@ -1177,16 +964,17 @@ def _handle_postgres(
 
         if args.command == "index" and args.migrate:
             migrate(connection)
+            applied_schema_version = _applied_schema_version(connection)
             envelope = _postgres_envelope(
                 connection,
                 "index",
-                applied_schema_version=7,
+                applied_schema_version=applied_schema_version,
             )
             progress_stream.terminal(envelope)
             if args.json:
                 print(json.dumps(envelope, sort_keys=True))
             else:
-                print("Applied PostgreSQL schema migration 7")
+                print(f"Applied PostgreSQL schema migration {applied_schema_version}")
             return 0
 
         require_current_schema(connection)
@@ -1274,27 +1062,6 @@ def _handle_postgres(
                     print(f"Semantic index: {completed}/{total} passages")
                 return 0
 
-            if args.semantic_only:
-                raise ValueError(
-                    "independent semantic publication is unavailable; "
-                    "run `cc-search-chats index` to publish one coherent corpus"
-                )
-            if args.literal_only and args.background_refresh:
-                raise ValueError(
-                    "automatic refresh requires the full coherent index; "
-                    "run `cc-search-chats index --background-refresh`"
-                )
-
-            background_request_id = (
-                mark_auto_refresh_running(connection)
-                if args.background_refresh
-                else None
-            )
-            if args.background_refresh and background_request_id is None:
-                envelope = finish("index", background_noop=True)
-                if args.json:
-                    print(json.dumps(envelope, sort_keys=True))
-                return 0
             acquire_index_session(connection)
 
             scan_complete = False
@@ -1364,40 +1131,16 @@ def _handle_postgres(
             progress_stream.emit("scan", "running")
             with progress_stream.heartbeat("scan") as heartbeat_update:
                 refresh_heartbeat = heartbeat_update
-                try:
-                    if args.literal_only:
-                        result = refresh_native_sources(
-                            connection,
-                            source_roots=configured_source_roots(),
-                            progress=progress,
-                            force_retry=args.force_retry,
-                        )
-                    else:
-                        result = index_corpus(
-                            connection,
-                            passage_embed,
-                            chunker=chunk_passages,
-                            source_roots=configured_source_roots(),
-                            progress=progress,
-                            embedding_progress=embedding_progress,
-                            force_retry=args.force_retry,
-                            automatic_request_id=background_request_id,
-                        )
-                    current_refresh_result = result
-                except Exception as error:
-                    if background_request_id is not None:
-                        mark_auto_refresh_run_failed(
-                            connection,
-                            background_request_id,
-                            f"{type(error).__name__}: {error}",
-                        )
-                    raise
-            if background_request_id is not None:
-                mark_auto_refresh_complete(
+                result = index_corpus(
                     connection,
-                    background_request_id,
-                    refresh_run_id=result.run_id,
+                    passage_embed,
+                    chunker=chunk_passages,
+                    source_roots=configured_source_roots(),
+                    progress=progress,
+                    embedding_progress=embedding_progress,
+                    force_retry=args.force_retry,
                 )
+                current_refresh_result = result
             corpus_generation = result.corpus_generation
             source_count = result.source_count
             message_count = result.message_count
@@ -1411,43 +1154,27 @@ def _handle_postgres(
                     completed_units=result.read_source_count,
                     total_units=result.changed_source_count,
                 )
-            vector_count = (
-                result.embedding_count if isinstance(result, CorpusIndexResult) else 0
+            vector_count = result.embedding_count
+            progress_stream.emit(
+                "fts_commit",
+                "complete",
+                completed_units=result.changed_source_count
+                - result.failed_source_count,
+                total_units=result.changed_source_count,
+                corpus_generation=result.corpus_generation,
             )
-            if args.literal_only:
-                progress_stream.emit(
-                    "literal_diagnostic",
-                    "complete",
-                    completed_units=result.changed_source_count
-                    - result.failed_source_count,
-                    total_units=result.changed_source_count,
-                )
-            else:
-                assert isinstance(result, CorpusIndexResult)  # noqa: S101  # type invariant
-                progress_stream.emit(
-                    "fts_commit",
-                    "complete",
-                    completed_units=result.changed_source_count
-                    - result.failed_source_count,
-                    total_units=result.changed_source_count,
-                    corpus_generation=result.corpus_generation,
-                )
-                progress_stream.emit(
-                    "semantic_commit",
-                    "complete",
-                    completed_units=vector_count,
-                    total_units=vector_count,
-                    semantic_build=result.semantic_build,
-                )
+            progress_stream.emit(
+                "semantic_commit",
+                "complete",
+                completed_units=vector_count,
+                total_units=vector_count,
+                semantic_build=result.semantic_build,
+            )
             envelope = finish(
                 "index",
                 refresh_result=current_refresh_result,
                 corpus_generation=corpus_generation,
-                semantic_build=(
-                    result.semantic_build
-                    if isinstance(result, CorpusIndexResult)
-                    else None
-                ),
+                semantic_build=result.semantic_build,
                 sources=source_count,
                 messages=message_count,
                 embeddings=vector_count,
@@ -1674,21 +1401,6 @@ def _handle_postgres(
         project = args.project
         hybrid_rankings = {}
         search_warnings: list[dict[str, str]] = []
-        coordination = (
-            _RankedRefreshCoordination(
-                corpus_before=None,
-                corpus_after=None,
-                background=auto_refresh_status(connection),
-                warning=None,
-            )
-            if args.exhaustive
-            else _coordinate_ranked_refresh(
-                connection,
-                remaining_seconds=lambda: _remaining_search_seconds(args),
-            )
-        )
-        if coordination.warning is not None:
-            search_warnings.append(coordination.warning)
         connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         next(
             connection.execute(
@@ -1896,15 +1608,6 @@ def _handle_postgres(
                 envelope["retrieval_mode"] = "literal_fallback"
         connection.execute("COMMIT")
 
-        background = coordination.background
-        envelope["background_refresh"] = {
-            "request_id": background.request_id,
-            "state": background.state,
-            "refresh_run_id": background.refresh_run_id,
-            "last_error": background.last_error,
-        }
-        if background.state == "failed":
-            stale_reasons.append("background_refresh_failed")
         envelope["elapsed_ms"] = round((monotonic() - args.request_started) * 1000)
         progress_stream.terminal(envelope)
         if args.json:
@@ -2386,7 +2089,6 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  cc-search-chats index\n"
-            "  cc-search-chats index --literal-only\n"
             "  cc-search-chats index --status --json"
         ),
     )
@@ -2404,26 +2106,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="retry unchanged failed source observations during explicit maintenance",
     )
-    index_parser.add_argument(
-        "--background-refresh",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
     index_mode = index_parser.add_mutually_exclusive_group()
     index_mode.add_argument(
         "--migrate",
         action="store_true",
         help="explicitly apply pending PostgreSQL schema migrations",
-    )
-    index_mode.add_argument(
-        "--literal-only",
-        action="store_true",
-        help="skip local semantic embedding generation",
-    )
-    index_mode.add_argument(
-        "--semantic-only",
-        action="store_true",
-        help="embed the selected corpus without refreshing native sources",
     )
     index_mode.add_argument(
         "--status",
