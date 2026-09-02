@@ -29,7 +29,7 @@ wheels = [
 
 [[package]]
 name = "cc-search-chats"
-version = "2.0.5"
+version = "2.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "psycopg", extra = ["c"] },

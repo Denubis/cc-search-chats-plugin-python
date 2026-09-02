@@ -10,7 +10,7 @@
     {
       "name": "cc-search-chats",
       "description": "Search and recover Claude Code and Codex chat history",
-      "version": "2.0.5",
+      "version": "2.1.0",
       "source": "./",
       "author": {
         "name": "Denubis"

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## cc-search-chats 2.1.0
 
 **Changed:**
 - Search now requires exactly one explicit `--literal` or `--semantic` mode;
