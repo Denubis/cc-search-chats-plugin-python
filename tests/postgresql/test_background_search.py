@@ -6,6 +6,7 @@ import shutil
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from time import monotonic
 from typing import cast
 
@@ -17,6 +18,7 @@ from cc_search_chats.cli import main
 from cc_search_chats.semantic import SemanticChunk
 from cc_search_chats.storage.postgresql import migrate
 from cc_search_chats.storage.postgresql import search_messages as literal_search
+from cc_search_chats.storage.postgresql.guardrails import ReadDeadlineExceeded
 
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
@@ -103,8 +105,8 @@ def _run(
     return code, payload
 
 
-def _assert_v3_error_envelope(payload: dict[str, object]) -> None:
-    assert payload["schema_version"] == 3
+def _assert_v4_error_envelope(payload: dict[str, object]) -> None:
+    assert payload["schema_version"] == 4
     refresh = cast("dict[str, object]", payload["refresh"])
     assert refresh["corpus_generation"] is None
     semantic = cast("dict[str, object]", payload["semantic"])
@@ -112,6 +114,11 @@ def _assert_v3_error_envelope(payload: dict[str, object]) -> None:
     assert semantic["corpus_generation"] is None
     assert payload["indexed_at"] is None
     assert payload["corpus_age_ms"] is None
+    assert payload["mode"] == "literal"
+    index_state = cast("dict[str, object]", payload["index_state"])
+    assert index_state["made_at"] is None
+    assert index_state["unindexed"] is None
+    assert index_state["unindexed_reason"] == "unavailable"
     assert "background_refresh" not in payload
     assert isinstance(payload["warnings"], list)
 
@@ -154,7 +161,7 @@ def test_search_reports_pending_migration_without_creating_schema(
     )
 
     assert code == 6
-    _assert_v3_error_envelope(payload)
+    _assert_v4_error_envelope(payload)
     assert payload["status"] == "maintenance_required"
     error = cast("dict[str, object]", payload["error"])
     assert error["pending_versions"] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
@@ -322,7 +329,7 @@ def test_search_deadline_expires_before_connection(
     expired = json.loads(capsys.readouterr().out)
 
     assert stopped.value.code == 7
-    _assert_v3_error_envelope(expired)
+    _assert_v4_error_envelope(expired)
     assert expired["status"] == "deadline_exceeded"
     assert expired["error"]["code"] == "search_deadline_exceeded"
 
@@ -359,7 +366,248 @@ def test_search_read_deadline_expires_while_read_queue_is_locked(
         locked = json.loads(capsys.readouterr().out)
 
     assert stopped.value.code == 7
-    _assert_v3_error_envelope(locked)
+    _assert_v4_error_envelope(locked)
     assert elapsed < 1
     assert locked["status"] == "deadline_exceeded"
     assert locked["error"]["code"] == "search_deadline_exceeded"
+
+
+def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
+    postgres_cluster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
+    )
+    _stub_semantic_index(monkeypatch)
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    shutil.copy(
+        FIXTURES / "claude_primary.jsonl",
+        claude_root / "claude-session-primary.jsonl",
+    )
+    codex_root = tmp_path / "codex"
+    codex_root.mkdir()
+    _configure_cli_connection(postgres_cluster, monkeypatch)
+    monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
+    monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
+    assert _run(monkeypatch, capsys, "index", "--migrate", "--json")[0] == 0
+    assert _run(monkeypatch, capsys, "index", "--json")[0] == 0
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def query_embedding(_query, *, timeout_seconds, progress):
+        assert timeout_seconds > 0
+        progress("model_load", "complete")
+        return vector
+
+    monkeypatch.setattr("cc_search_chats.cli._bounded_query_embedding", query_embedding)
+
+    def human_search(mode: str) -> list[str]:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "cc-search-chats",
+                "search",
+                "visible assistant",
+                mode,
+                "--progress",
+                "human",
+            ],
+        )
+        with pytest.raises(SystemExit, match="0"):
+            main()
+        return capsys.readouterr().out.splitlines()
+
+    literal = human_search("--literal")
+    assert literal[0] == (
+        "literal search (exact full-text, no model): visible assistant"
+    )
+    assert literal[1].startswith("index made ")
+    assert "; now " in literal[1]
+    assert "; age " in literal[1]
+    assert literal[2] == "missing 0 chats"
+    assert "visible assistant" in "\n".join(literal[3:])
+
+    semantic = human_search("--semantic")
+    assert semantic[0] == ("semantic search (hybrid model ranking): visible assistant")
+    assert semantic[1].startswith("index made ")
+    assert semantic[2] == "missing 0 chats"
+    assert "visible assistant" in "\n".join(semantic[3:])
+
+    def timed_out_embedding(*_args, **_kwargs):
+        raise TimeoutError("fixture semantic deadline")
+
+    monkeypatch.setattr(
+        "cc_search_chats.cli._bounded_query_embedding", timed_out_embedding
+    )
+    degraded = human_search("--semantic")
+    assert degraded[0] == ("semantic search (hybrid model ranking): visible assistant")
+    assert degraded[3].startswith(
+        "WARNING: semantic ranking unavailable (TimeoutError: fixture semantic "
+        "deadline); these are literal results"
+    )
+    assert "visible assistant" in "\n".join(degraded[4:])
+
+    monkeypatch.setattr(
+        "cc_search_chats.cli.unindexed_sources",
+        lambda *_args, **_kwargs: (None, "scan_budget_exhausted"),
+    )
+    unknown = human_search("--literal")
+    assert unknown[2] == "unindexed chats: unknown (scan_budget_exhausted)"
+
+
+def test_exhaustive_search_starts_a_fresh_staleness_scan_budget(
+    postgres_cluster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
+    )
+    _stub_semantic_index(monkeypatch)
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    shutil.copy(
+        FIXTURES / "claude_primary.jsonl",
+        claude_root / "claude-session-primary.jsonl",
+    )
+    codex_root = tmp_path / "codex"
+    codex_root.mkdir()
+    _configure_cli_connection(postgres_cluster, monkeypatch)
+    monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
+    monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
+    assert _run(monkeypatch, capsys, "index", "--migrate", "--json")[0] == 0
+    assert _run(monkeypatch, capsys, "index", "--json")[0] == 0
+    monkeypatch.setattr("cc_search_chats.cli._SEARCH_DEADLINE_SECONDS", 0.0)
+    monkeypatch.setattr("cc_search_chats.cli._SEARCH_RENDER_RESERVE_SECONDS", 0.0)
+
+    code, payload = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "visible assistant",
+        "--literal",
+        "--exhaustive",
+        "--json",
+    )
+
+    assert code == 0
+    index_state = cast("dict[str, object]", payload["index_state"])
+    assert index_state["unindexed"] == {
+        "files": 0,
+        "directories": 0,
+        "bytes": 0,
+    }
+    assert index_state["unindexed_reason"] is None
+
+
+def test_human_index_status_prints_staleness_before_checkpoint(
+    postgres_cluster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
+    )
+    _stub_semantic_index(monkeypatch)
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    shutil.copy(
+        FIXTURES / "claude_primary.jsonl",
+        claude_root / "claude-session-primary.jsonl",
+    )
+    codex_root = tmp_path / "codex"
+    codex_root.mkdir()
+    _configure_cli_connection(postgres_cluster, monkeypatch)
+    monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
+    monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
+    assert _run(monkeypatch, capsys, "index", "--migrate", "--json")[0] == 0
+    assert _run(monkeypatch, capsys, "index", "--json")[0] == 0
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "index", "--status", "--progress", "human"],
+    )
+
+    with pytest.raises(SystemExit, match="0"):
+        main()
+    lines = capsys.readouterr().out.splitlines()
+
+    assert lines[0].startswith("index made ")
+    assert lines[1] == "missing 0 chats"
+    assert lines[2].startswith("Semantic index: ")
+
+
+@pytest.mark.parametrize("resolution_expires", [False, True])
+def test_deadline_after_retrieval_returns_hits_as_partial(
+    postgres_cluster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    resolution_expires: bool,
+) -> None:
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
+    )
+    _stub_semantic_index(monkeypatch)
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    shutil.copy(
+        FIXTURES / "claude_primary.jsonl",
+        claude_root / "claude-session-primary.jsonl",
+    )
+    codex_root = tmp_path / "codex"
+    codex_root.mkdir()
+    _configure_cli_connection(postgres_cluster, monkeypatch)
+    monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
+    monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
+    assert _run(monkeypatch, capsys, "index", "--migrate", "--json")[0] == 0
+    assert _run(monkeypatch, capsys, "index", "--json")[0] == 0
+
+    arguments = ["search", "visible assistant", "--literal", "--json"]
+    if resolution_expires:
+        monkeypatch.setattr(
+            "cc_search_chats.cli.pg_resolve_messages",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                ReadDeadlineExceeded("fixture identity-resolution deadline")
+            ),
+        )
+    else:
+        arguments[2] = "--semantic"
+        monkeypatch.setattr("cc_search_chats.cli._SEARCH_DEADLINE_SECONDS", 0.5)
+        monkeypatch.setattr("cc_search_chats.cli._SEARCH_RENDER_RESERVE_SECONDS", 0.05)
+
+        def outlive_budget(_query, *, timeout_seconds, progress):
+            assert timeout_seconds > 0
+            progress("model_load", "running")
+            Event().wait(timeout_seconds + 0.02)
+            raise TimeoutError("fixture embedding child exceeded its deadline")
+
+        monkeypatch.setattr(
+            "cc_search_chats.cli._bounded_query_embedding", outlive_budget
+        )
+
+    code, payload = _run(monkeypatch, capsys, *arguments)
+
+    assert code == 0
+    assert payload["status"] == "partial"
+    assert payload["mode"] == ("literal" if resolution_expires else "semantic")
+    results = cast("list[dict[str, object]]", payload["results"])
+    assert results
+    assert results[0]["logical_message_id"] == "claude-assistant-1"
+    warnings = cast("list[dict[str, object]]", payload["warnings"])
+    assert any(warning["code"] == "deadline_degraded" for warning in warnings)
+    if resolution_expires:
+        assert payload["retrieval_mode"] == "literal"
+    else:
+        assert payload["retrieval_mode"] == "literal_fallback"
+        assert any(
+            warning["code"] == "semantic_search_degraded" for warning in warnings
+        )

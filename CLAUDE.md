@@ -38,22 +38,36 @@ They do not use the operator's production database.
 
 ## CLI Contract
 
-- PostgreSQL is the default backend. `search` opens the currently selected
-  coherent corpus in a repeatable-read snapshot inside a five-second
+- PostgreSQL is the default backend. `search` requires exactly one explicit
+  mode, `--literal` or `--semantic`, and opens the currently selected coherent
+  corpus in a repeatable-read snapshot inside a five-second
   invocation-to-answer deadline. It never indexes, launches, joins, or waits
   for index work. `index`, run by a person, an agent, or the nightly timer, is
   the only builder and always publishes literal and semantic state together
   (ADR 0002). Search never migrates or performs maintenance in its own process.
-- Hybrid search is the default. `--literal` avoids the model. Default search
-  returns visible primary-session prose; `--agents` includes agent and unknown
+- `--literal` is exact full-text PostgreSQL search and loads no model or GPU.
+  `--semantic` is model-ranked hybrid search that fuses bounded full-text and
+  embedding candidates with exact reciprocal-rank-fusion arithmetic. Both modes
+  return visible primary-session prose; `--agents` includes agent and unknown
   sessions; `--literal --tools` includes tool name/input/output rows;
   `--exhaustive` requires literal mode and returns deterministic complete
   occurrences. No supported mode exposes reasoning, system/developer
   instructions, injected context, or unrecognised record shapes.
-- Ranked `--limit` is 1–200. Hybrid ranking uses bounded literal and semantic
-  components with exact reciprocal-rank-fusion arithmetic. Query embedding is
-  a bounded, reaped child; timeout or unavailable semantic state returns the
-  literal answer with explicit degradation.
+- Every search states its requested mode before results. JSON separates
+  requested `mode` from delivered `retrieval_mode`. Query embedding is a
+  bounded, reaped child; a semantic timeout or unavailable semantic state
+  returns literal results with `retrieval_mode: literal_fallback`, an explicit
+  human warning, and `semantic_search_degraded`. A caller must not read the
+  degraded answer as semantic.
+- Search and `index --status` report `index_state`: when the selected index
+  was made, the current time, its age, corpus/semantic identity, and a
+  deadline-bounded count of unindexed native files, directories, and bytes or
+  a closed unknown reason. Search never refreshes implicitly; run
+  `cc-search-chats index` intentionally to publish newer native records.
+- Ranked `--limit` is 1–200. Query embedding and PostgreSQL reads share the one
+  answer deadline after its render reserve. A deadline before retrieval returns
+  the deadline error; a deadline after hits were retrieved returns those hits
+  with `status: partial`, `deadline_degraded`, and exit 0.
 - `resolve` verifies exact `ccchat:v1:` locators against native source bytes.
   `--reference-only` retains verified identity and coordinates while omitting
   text.
@@ -61,14 +75,15 @@ They do not use the operator's production database.
   timezone-aware bounds. It exports canonical human-message timestamps and
   provenance without message bodies, plus positive retained, excluded, and
   unresolved population counts.
-- PostgreSQL JSON stdout uses schema version 3. Every command returns an object
+- PostgreSQL JSON stdout uses schema version 4. Every command returns an object
   with `command`, `status`, `coverage`, `refresh`, `semantic`, `indexed_at`,
-  `corpus_age_ms`, and `warnings`. Public generation identity is
-  `refresh.corpus_generation`; semantic identity is
+  `corpus_age_ms`, and `warnings`. Search adds `mode`, `retrieval_mode`, and
+  `index_state`; `index --status` adds `index_state`. Public generation
+  identity is `refresh.corpus_generation`; semantic identity is
   `semantic.semantic_build` plus `semantic.corpus_generation`; events use
   `source_corpus_generation`.
-  JSON/non-TTY progress is ordered NDJSON on stderr and ends with one terminal
-  event; stdout remains one JSON document.
+  JSON/non-TTY progress is ordered schema-v4 NDJSON on stderr and ends with one
+  terminal event; stdout remains one JSON document.
 - Schema migration is explicit `index --migrate` maintenance. Other PostgreSQL
   commands report `maintenance_required` without changing schema.
 
@@ -97,7 +112,7 @@ locks, or runtime state.
   current rows, incremental refresh, bounded event export, exact resolution,
   and semantic retrieval
 - `src/cc_search_chats/semantic/` — local-only model preflight and embedding
-- `src/cc_search_chats/cli.py` — imperative shell and v3 output/progress contract
+- `src/cc_search_chats/cli.py` — imperative shell and v4 output/progress contract
 - `skills/search-chat/` and `commands/search-chat.md` — agent consumers
 - `docs/architecture/database.md` — data ownership and relational invariants
 - `docs/runbooks/postgresql-index-maintenance.md` — migration, recovery, and

@@ -3,6 +3,13 @@
 ## Unreleased
 
 **Changed:**
+- Search now requires exactly one explicit `--literal` or `--semantic` mode;
+  schema-v4 output separates requested `mode` from delivered `retrieval_mode`.
+- Search and `index --status` report selected-index time, age, and bounded
+  unindexed source counts in `index_state` and the human staleness header.
+- A deadline reached after retrieval returns the retrieved hits as a partial
+  answer with `deadline_degraded`; semantic timeout fallback is explicitly
+  labelled as literal.
 - Search no longer admits, launches, joins, or waits for index work; `index` is
   the single intentional joint literal-and-semantic builder.
 - PostgreSQL migration 9 removes the retired automatic-refresh state table.

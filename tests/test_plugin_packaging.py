@@ -99,7 +99,7 @@ def test_search_skill_has_intentional_codex_discovery_metadata() -> None:
     assert metadata["policy"] == {"allow_implicit_invocation": True}
 
 
-def test_search_guidance_describes_the_v3_coherent_corpus_contract() -> None:
+def test_search_guidance_describes_the_v4_explicit_mode_contract() -> None:
     documents = {
         "README": (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
         "CLAUDE": (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8"),
@@ -108,7 +108,7 @@ def test_search_guidance_describes_the_v3_coherent_corpus_contract() -> None:
     }
 
     for name, document in documents.items():
-        schema_markers = ("schema version 3", "schema v3", "`schema_version: 3`")
+        schema_markers = ("schema version 4", "schema v4", "`schema_version: 4`")
         assert any(marker in document.lower() for marker in schema_markers), name
         assert "PostgreSQL" in document, name
         assert "Ponytail" in document, name
@@ -118,15 +118,24 @@ def test_search_guidance_describes_the_v3_coherent_corpus_contract() -> None:
         assert "corpus_generation" in document, name
         assert "semantic_build" in document, name
         assert "corpus_age_ms" in document, name
+        assert "index_state" in document, name
+        assert "retrieval_mode" in document, name
+        assert "semantic_search_degraded" in document, name
+        assert "exact full-text" in document, name
+        assert "model-ranked hybrid" in document, name
+        search_examples = [
+            line for line in document.splitlines() if "cc-search-chats search" in line
+        ]
+        if search_examples:
+            assert all(
+                ("--literal" in line) != ("--semantic" in line)
+                for line in search_examples
+            ), name
 
-    assert (
-        "A search opens the currently selected coherent corpus without admitting,\n"
-        "launching, joining, or waiting for index work" in documents["command"]
-    )
-    assert (
-        "Search opens the currently selected coherent corpus without admitting,\n"
-        "launching, joining, or waiting for index work" in documents["skill"]
-    )
+    for name in ("command", "skill"):
+        assert "opens the currently selected coherent corpus" in documents[name]
+        assert "without admitting" in documents[name]
+        assert "launching, joining, or waiting for index work" in documents[name]
     assert all("background_refresh" not in document for document in documents.values())
     assert "--everything` is retired" in documents["README"]
 

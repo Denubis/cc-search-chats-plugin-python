@@ -34,6 +34,7 @@ from cc_search_chats import cli as cli_module
 from cc_search_chats.cli import (
     _bounded_query_embedding,
     _contain_semantic_index,
+    _index_age,
     _ProgressStream,
     build_parser,
     main,
@@ -79,7 +80,11 @@ def test_semantic_failure_names_phase_and_prints_literal_fallback(
 ) -> None:
     monkeypatch.setenv("PGSERVICE", "fixture")
     monkeypatch.delenv("CC_SEARCH_DB_PATH", raising=False)
-    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "search", "needle phrase"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "needle phrase", "--semantic"],
+    )
     monkeypatch.setattr(
         "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
@@ -135,6 +140,38 @@ def test_postgresql_search_does_not_wait_on_a_local_admission_lock(
         main()
 
     assert admissions == []
+
+
+def test_search_read_deadline_uses_the_single_reserved_answer_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PGSERVICE", "fixture")
+    monkeypatch.delenv("CC_SEARCH_DB_PATH", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "needle", "--semantic", "--json"],
+    )
+    monkeypatch.setattr("cc_search_chats.cli.monotonic", lambda: 100.25)
+    observed_timeouts: list[int] = []
+
+    def observed_read_deadline(timeout_ms: int):
+        observed_timeouts.append(timeout_ms)
+        return nullcontext()
+
+    monkeypatch.setattr("cc_search_chats.cli.read_deadline", observed_read_deadline)
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
+    )
+    monkeypatch.setattr(
+        "cc_search_chats.cli._handle_postgres",
+        lambda _args, _dsn, _progress_stream: 0,
+    )
+
+    with pytest.raises(SystemExit, match="0"):
+        main(request_started=100.0)
+
+    assert observed_timeouts == [4650]
 
 
 @pytest.mark.parametrize(
@@ -198,13 +235,15 @@ def test_search_scope_flags_are_explicit_and_everything_is_rejected(
     assert parsed.tools is True
     assert parsed.exhaustive is True
 
-    retired = build_parser().parse_args(["search", "needle", "--everything"])
+    retired = build_parser().parse_args(
+        ["search", "needle", "--literal", "--everything"]
+    )
     assert retired.everything is True
 
     monkeypatch.setattr(
         sys,
         "argv",
-        ["cc-search-chats", "search", "needle", "--everything"],
+        ["cc-search-chats", "search", "needle", "--literal", "--everything"],
     )
     with pytest.raises(SystemExit, match="2"):
         main()
@@ -213,17 +252,95 @@ def test_search_scope_flags_are_explicit_and_everything_is_rejected(
     assert "--literal --tools --exhaustive" in migration_error
     assert "Reasoning and instructions remain excluded" in migration_error
 
-    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "search", "needle", "--tools"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "needle", "--semantic", "--tools"],
+    )
     with pytest.raises(SystemExit, match="2"):
         main()
     assert "--tools requires --literal" in capsys.readouterr().err
 
     monkeypatch.setattr(
-        sys, "argv", ["cc-search-chats", "search", "needle", "--limit", "201"]
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "needle", "--semantic", "--exhaustive"],
+    )
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert "--exhaustive requires --literal" in capsys.readouterr().err
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "needle", "--literal", "--limit", "201"],
     )
     with pytest.raises(SystemExit, match="2"):
         main()
     assert "--limit must be between 1 and 200" in capsys.readouterr().err
+
+
+def test_search_requires_one_explicit_described_mode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        build_parser().parse_args(["search", "needle"])
+
+    error = capsys.readouterr().err
+    assert "--literal" in error
+    assert "exact PostgreSQL full-text search; no model, no GPU" in error
+    assert "--semantic" in error
+    assert (
+        "model-ranked search: hybrid fusion of full-text and embedding candidates "
+        "by reciprocal rank; loads the embedding model"
+    ) in error
+
+
+def test_required_search_mode_error_does_not_depend_on_argparse_prose(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit, match="2"):
+        parser.error("arguments --semantic and --literal are required")
+
+    error = capsys.readouterr().err
+    assert "exact PostgreSQL full-text search; no model, no GPU" in error
+    assert (
+        "model-ranked search: hybrid fusion of full-text and embedding candidates "
+        "by reciprocal rank; loads the embedding model"
+    ) in error
+
+
+@pytest.mark.parametrize(
+    ("flag", "literal", "semantic"),
+    [("--literal", True, False), ("--semantic", False, True)],
+)
+def test_search_accepts_exactly_one_explicit_mode(
+    flag: str,
+    *,
+    literal: bool,
+    semantic: bool,
+) -> None:
+    args = build_parser().parse_args(["search", "needle", flag])
+
+    assert args.literal is literal
+    assert args.semantic is semantic
+
+    with pytest.raises(SystemExit, match="2"):
+        build_parser().parse_args(["search", "needle", "--literal", "--semantic"])
+
+
+@pytest.mark.parametrize(
+    ("age_ms", "rendered"),
+    [
+        (12 * 60_000, "12m"),
+        ((5 * 60 + 42) * 60_000, "5h 42m"),
+        (((7 * 24 + 2) * 60 + 3) * 60_000, "7d 2h 3m"),
+    ],
+)
+def test_index_age_renders_minutes_hours_and_days(age_ms: int, rendered: str) -> None:
+    assert _index_age(age_ms) == rendered
 
 
 def test_progress_heartbeat_tracks_the_active_phase() -> None:
@@ -579,7 +696,7 @@ class TestMainErrors:
         monkeypatch.setattr(
             sys,
             "argv",
-            ["cc-search-chats", "search", "query", "--all"],
+            ["cc-search-chats", "search", "query", "--literal", "--all"],
         )
         monkeypatch.setattr("cc_search_chats.cli.open_db", lambda _db_path: conn)
 
@@ -597,7 +714,9 @@ class TestMainErrors:
     ) -> None:
         monkeypatch.setenv("CC_SEARCH_DB_PATH", "/tmp/test-index.sqlite")
         monkeypatch.setattr(
-            sys, "argv", ["cc-search-chats", "search", "query", "--all"]
+            sys,
+            "argv",
+            ["cc-search-chats", "search", "query", "--literal", "--all"],
         )
 
         def fail_open(_db_path: Path) -> sqlite3.Connection:
@@ -652,6 +771,7 @@ class TestMainErrors:
                 "cc-search-chats",
                 "search",
                 "query",
+                "--literal",
                 "--project",
                 str(tmp_path),
             ],
@@ -745,7 +865,7 @@ class TestMainErrors:
         monkeypatch.setattr(
             sys,
             "argv",
-            ["cc-search-chats", "search", "query", "--all"],
+            ["cc-search-chats", "search", "query", "--literal", "--all"],
         )
 
         with pytest.raises(SystemExit) as caught:
@@ -1103,7 +1223,9 @@ class TestSearchScope:
     """Local-first search with broaden-on-miss across projects."""
 
     def test_all_flag_searches_everything(self, cli_env: sqlite3.Connection) -> None:
-        _, stdout, _ = _run_cli(["search", "database", "--all", "--json"], cli_env)
+        _, stdout, _ = _run_cli(
+            ["search", "database", "--literal", "--all", "--json"], cli_env
+        )
         parsed = json.loads(stdout)
         assert parsed["scope"] == "all"
         assert len(parsed["results"]) > 0
@@ -1112,7 +1234,7 @@ class TestSearchScope:
         self, cli_env: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("os.getcwd", lambda: FAKE_PROJECT_PATH)
-        _, stdout, _ = _run_cli(["search", "database", "--json"], cli_env)
+        _, stdout, _ = _run_cli(["search", "database", "--literal", "--json"], cli_env)
         parsed = json.loads(stdout)
         assert parsed["scope"] == "local"
         assert len(parsed["results"]) > 0
@@ -1128,7 +1250,7 @@ class TestSearchScope:
             cli_env, tmp_path, "/home/other/proj", SESSION_ID_B, "a wandering pelican"
         )
         monkeypatch.setattr("os.getcwd", lambda: FAKE_PROJECT_PATH)
-        _, stdout, _ = _run_cli(["search", "pelican", "--json"], cli_env)
+        _, stdout, _ = _run_cli(["search", "pelican", "--literal", "--json"], cli_env)
         parsed = json.loads(stdout)
         assert parsed["scope"] == "widened"
         assert parsed["searched_project"] == FAKE_PROJECT_PATH
@@ -1138,7 +1260,7 @@ class TestSearchScope:
         self, cli_env: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("os.getcwd", lambda: "/not/a/claude/project/xyz")
-        _, stdout, _ = _run_cli(["search", "database", "--json"], cli_env)
+        _, stdout, _ = _run_cli(["search", "database", "--literal", "--json"], cli_env)
         parsed = json.loads(stdout)
         assert parsed["scope"] == "all"
         assert len(parsed["results"]) > 0
@@ -1148,7 +1270,9 @@ class TestSearchScope:
     ) -> None:
         """A machine-wide miss tells the user to run index --all (human mode)."""
         monkeypatch.setattr("os.getcwd", lambda: FAKE_PROJECT_PATH)
-        _, stdout, stderr = _run_cli(["search", "zzqxnope98765term"], cli_env)
+        _, stdout, stderr = _run_cli(
+            ["search", "zzqxnope98765term", "--literal"], cli_env
+        )
         assert stdout == ""
         assert "index --all" in stderr
 
@@ -1160,7 +1284,15 @@ class TestSearchScope:
             cli_env, tmp_path, "/home/other/proj", SESSION_ID_B, "a wandering pelican"
         )
         _, stdout, _ = _run_cli(
-            ["search", "pelican", "--project", FAKE_PROJECT_PATH, "--json"], cli_env
+            [
+                "search",
+                "pelican",
+                "--literal",
+                "--project",
+                FAKE_PROJECT_PATH,
+                "--json",
+            ],
+            cli_env,
         )
         parsed = json.loads(stdout)
         assert parsed["scope"] == "local"
@@ -1193,7 +1325,14 @@ class TestExcludedThinking:
     ) -> None:
         self._write_thinking_session(tmp_path)
         _, stdout, _ = _run_cli(
-            ["search", "secretwombat", "--project", FAKE_PROJECT_PATH, "--json"],
+            [
+                "search",
+                "secretwombat",
+                "--literal",
+                "--project",
+                FAKE_PROJECT_PATH,
+                "--json",
+            ],
             cli_env,
         )
         assert json.loads(stdout)["results"] == []
@@ -1209,7 +1348,7 @@ class TestSubcommandsAccessible:
 
     def test_search_runs(self, cli_env: sqlite3.Connection) -> None:
         exit_code, stdout, _ = _run_cli(
-            ["search", "database", "--project", FAKE_PROJECT_PATH],
+            ["search", "database", "--literal", "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
         assert exit_code == 0
@@ -1266,7 +1405,13 @@ class TestSubcommandsAccessible:
     ) -> None:
         """Search with no matches returns exit code 0 (not an error)."""
         exit_code, _, _ = _run_cli(
-            ["search", "xyznonexistentterm", "--project", FAKE_PROJECT_PATH],
+            [
+                "search",
+                "xyznonexistentterm",
+                "--literal",
+                "--project",
+                FAKE_PROJECT_PATH,
+            ],
             cli_env,
         )
         assert exit_code == 0
@@ -1282,7 +1427,14 @@ class TestJsonOutput:
 
     def test_search_json(self, cli_env: sqlite3.Connection) -> None:
         exit_code, stdout, _ = _run_cli(
-            ["search", "database", "--project", FAKE_PROJECT_PATH, "--json"],
+            [
+                "search",
+                "database",
+                "--literal",
+                "--project",
+                FAKE_PROJECT_PATH,
+                "--json",
+            ],
             cli_env,
         )
         assert exit_code == 0
@@ -1329,7 +1481,14 @@ class TestJsonOutput:
     def test_search_json_empty_results(self, cli_env: sqlite3.Connection) -> None:
         """Empty search results still produce valid JSON (empty array)."""
         exit_code, stdout, _ = _run_cli(
-            ["search", "xyznonexistentterm", "--project", FAKE_PROJECT_PATH, "--json"],
+            [
+                "search",
+                "xyznonexistentterm",
+                "--literal",
+                "--project",
+                FAKE_PROJECT_PATH,
+                "--json",
+            ],
             cli_env,
         )
         assert exit_code == 0
@@ -1435,7 +1594,7 @@ class TestHumanReadableOutput:
 
     def test_search_results_show_session_id(self, cli_env: sqlite3.Connection) -> None:
         exit_code, stdout, _ = _run_cli(
-            ["search", "database", "--project", FAKE_PROJECT_PATH],
+            ["search", "database", "--literal", "--project", FAKE_PROJECT_PATH],
             cli_env,
         )
         assert exit_code == 0
@@ -1576,7 +1735,14 @@ class TestLargeSession:
     def test_search_large_session(self, large_session_env: sqlite3.Connection) -> None:
         """Search against a large session completes within reasonable time."""
         exit_code, stdout, _ = _run_cli(
-            ["search", "database", "--project", FAKE_PROJECT_PATH, "--json"],
+            [
+                "search",
+                "database",
+                "--literal",
+                "--project",
+                FAKE_PROJECT_PATH,
+                "--json",
+            ],
             large_session_env,
         )
         assert exit_code == 0
@@ -1645,6 +1811,7 @@ class TestEpochFilters:
             [
                 "search",
                 "database",
+                "--literal",
                 "--project",
                 FAKE_PROJECT_PATH,
                 "--epoch",

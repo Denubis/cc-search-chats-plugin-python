@@ -16,7 +16,7 @@ from multiprocessing import get_context
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Never, cast
 
 import psycopg
 
@@ -70,8 +70,11 @@ from cc_search_chats.storage.index import (
 )
 from cc_search_chats.storage.postgresql import (
     CorpusIndexResult,
+    HybridHit,
+    MessageResolution,
     RefreshProgress,
     RefreshResult,
+    SearchHit,
     StoredAlias,
     StoredMessage,
     exhaustive_search_page,
@@ -80,6 +83,7 @@ from cc_search_chats.storage.postgresql import (
     migrate,
     resolve_exact_messages,
     search_messages,
+    unindexed_sources,
 )
 from cc_search_chats.storage.postgresql import (
     context_messages as pg_context_messages,
@@ -108,9 +112,20 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
     from multiprocessing.connection import Connection
 
+    from cc_search_chats.providers.source_discovery import ConfiguredSourceRoot
+
 _DEFAULT_POSTGRES_DSN = "service=cc_search_chats"
+_POSTGRES_SCHEMA_VERSION = 4
 _SEARCH_DEADLINE_SECONDS = 5.0
 _SEARCH_RENDER_RESERVE_SECONDS = 0.1
+_INDEX_STATE_SCAN_BUDGET_SECONDS = (
+    _SEARCH_DEADLINE_SECONDS - _SEARCH_RENDER_RESERVE_SECONDS
+)
+_LITERAL_MODE_HELP = "exact PostgreSQL full-text search; no model, no GPU"
+_SEMANTIC_MODE_HELP = (
+    "model-ranked search: hybrid fusion of full-text and embedding candidates by "
+    "reciprocal rank; loads the embedding model"
+)
 _EMBEDDING_RATE_WINDOW_SECONDS = 5.0
 _EMBEDDING_DESIRED_PASSAGES_PER_SECOND = 16.0
 _EMBEDDING_MINIMUM_RATE_RATIO = 0.75
@@ -118,6 +133,18 @@ _EMBEDDING_MINIMUM_RATE_RATIO = 0.75
 
 class SearchDeadlineExceeded(TimeoutError):
     """The ranked search request no longer has a safe answer budget."""
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """Keep the required search-mode error as descriptive as the help surface."""
+
+    def error(self, message: str) -> Never:
+        if "required" in message and "--literal" in message and "--semantic" in message:
+            message = (
+                f"search requires --literal ({_LITERAL_MODE_HELP}) or "
+                f"--semantic ({_SEMANTIC_MODE_HELP})"
+            )
+        super().error(message)
 
 
 class _EmbeddingRateGuard:
@@ -155,7 +182,7 @@ class _EmbeddingRateGuard:
 
 
 def _remaining_search_seconds(args: argparse.Namespace) -> float:
-    return args.request_started + _SEARCH_DEADLINE_SECONDS - monotonic()
+    return args.answer_deadline - monotonic()
 
 
 def _query_embedding_child(pipe: Connection) -> None:
@@ -275,8 +302,10 @@ class _ProgressStream:
         source_watermark: object = None,
         deadline_ms: int | None = None,
         retrieval_mode: str | None = None,
+        mode: str | None = None,
         indexed_at: str | None = None,
         corpus_age_ms: int | None = None,
+        index_state: object = None,
         stale_reasons: object = None,
         warning: object = None,
         error: object = None,
@@ -288,7 +317,7 @@ class _ProgressStream:
             emitted_at = monotonic()
             self._sequence += 1
             value = {
-                "schema_version": 3,
+                "schema_version": _POSTGRES_SCHEMA_VERSION,
                 "sequence": self._sequence,
                 "event": event,
                 "run_id": run_id,
@@ -303,8 +332,10 @@ class _ProgressStream:
                 "source_watermark": source_watermark,
                 "deadline_ms": deadline_ms,
                 "retrieval_mode": retrieval_mode,
+                "mode": mode,
                 "indexed_at": indexed_at,
                 "corpus_age_ms": corpus_age_ms,
+                "index_state": index_state,
                 "stale_reasons": stale_reasons,
                 "warning": warning,
                 "error": error,
@@ -436,8 +467,10 @@ class _ProgressStream:
             source_watermark=coverage.get("source_watermarks"),
             deadline_ms=cast("int | None", envelope.get("deadline_ms")),
             retrieval_mode=cast("str | None", envelope.get("retrieval_mode")),
+            mode=cast("str | None", envelope.get("mode")),
             indexed_at=cast("str | None", envelope.get("indexed_at")),
             corpus_age_ms=cast("int | None", envelope.get("corpus_age_ms")),
+            index_state=envelope.get("index_state"),
             stale_reasons=envelope.get("stale_reasons"),
             warning=envelope.get("warnings"),
             error=envelope.get("error"),
@@ -466,9 +499,12 @@ def _error_envelope(
     command: str,
     status: str,
     error: Mapping[str, object],
+    *,
+    mode: str | None = None,
+    index_state_reason: str | None = None,
 ) -> dict[str, object]:
-    return {
-        "schema_version": 3,
+    envelope: dict[str, object] = {
+        "schema_version": _POSTGRES_SCHEMA_VERSION,
         "command": command,
         "status": status,
         "coverage": {
@@ -521,6 +557,40 @@ def _error_envelope(
         "warnings": [],
         "error": error,
     }
+    if mode is not None:
+        envelope["mode"] = mode
+    if index_state_reason is not None:
+        now = datetime.now().astimezone()
+        envelope["index_state"] = {
+            "made_at": None,
+            "now": now.isoformat(),
+            "age_ms": None,
+            "corpus_generation": None,
+            "semantic_build": None,
+            "unindexed": None,
+            "unindexed_reason": index_state_reason,
+        }
+    return envelope
+
+
+def _requested_search_mode(args: argparse.Namespace) -> str:
+    return "literal" if args.literal else "semantic"
+
+
+def _command_error_envelope(
+    args: argparse.Namespace,
+    status: str,
+    error: Mapping[str, object],
+) -> dict[str, object]:
+    search = args.command == "search"
+    status_request = args.command == "index" and getattr(args, "status", False)
+    return _error_envelope(
+        args.command,
+        status,
+        error,
+        mode=_requested_search_mode(args) if search else None,
+        index_state_reason="unavailable" if search or status_request else None,
+    )
 
 
 def _alias_json(alias: StoredAlias) -> dict[str, object]:
@@ -561,6 +631,61 @@ def _message_json(
     return value
 
 
+def _corpus_times(
+    indexed_at: datetime | None,
+) -> tuple[datetime, datetime | None, int | None]:
+    now = datetime.now().astimezone()
+    if indexed_at is None:
+        return now, None, None
+    made_at = indexed_at.astimezone(now.tzinfo)
+    age_ms = max(0, int((now - made_at).total_seconds() * 1000))
+    return now, made_at, age_ms
+
+
+def _index_state_payload(
+    connection: psycopg.Connection,
+    *,
+    roots: tuple[ConfiguredSourceRoot, ...] | None,
+    deadline: float | None,
+    now: datetime,
+    made_at: datetime | None,
+    age_ms: int | None,
+    corpus_generation: int | None,
+    semantic_build: int | None,
+) -> dict[str, object]:
+    if roots is None:
+        return {}
+    if made_at is None:
+        unindexed, reason = None, "no_selected_corpus"
+    elif deadline is None:
+        raise RuntimeError("index-state scan requires a deadline")
+    else:
+        unindexed, reason = unindexed_sources(
+            connection,
+            roots,
+            deadline_monotonic=deadline,
+        )
+    return {
+        "index_state": {
+            "made_at": made_at.isoformat() if made_at is not None else None,
+            "now": now.isoformat(),
+            "age_ms": age_ms,
+            "corpus_generation": corpus_generation,
+            "semantic_build": semantic_build,
+            "unindexed": (
+                {
+                    "files": unindexed.files,
+                    "directories": unindexed.directories,
+                    "bytes": unindexed.bytes,
+                }
+                if unindexed is not None
+                else None
+            ),
+            "unindexed_reason": reason,
+        }
+    }
+
+
 def _postgres_envelope(
     connection: psycopg.Connection,
     command: str,
@@ -568,6 +693,8 @@ def _postgres_envelope(
     status: str = "complete",
     additional_warnings: Sequence[object] = (),
     refresh_result: RefreshResult | CorpusIndexResult | None = None,
+    index_state_roots: tuple[ConfiguredSourceRoot, ...] | None = None,
+    index_state_deadline: float | None = None,
     **payload: object,
 ) -> dict[str, object]:
     roots = [
@@ -818,19 +945,10 @@ def _postgres_envelope(
         "total_units": semantic_row[5] or 0,
         "fresh": semantic_row[6] is True,
     }
-    indexed_at, corpus_age_ms = next(
+    indexed_at = next(
         connection.execute(
             """
-            SELECT generation.completed_at,
-                   CASE
-                       WHEN generation.completed_at IS NULL THEN NULL
-                       ELSE GREATEST(
-                           0,
-                           floor(extract(
-                               epoch FROM now() - generation.completed_at
-                           ) * 1000)
-                       )::bigint
-                   END AS corpus_age_ms
+            SELECT generation.completed_at
             FROM cc_search_chats.corpus_state AS state
             LEFT JOIN cc_search_chats.corpus_generation AS generation
               ON generation.corpus_generation =
@@ -838,18 +956,29 @@ def _postgres_envelope(
             WHERE state.singleton
             """
         )
-    )
+    )[0]
+    now, made_at, corpus_age_ms = _corpus_times(indexed_at)
     return {
-        "schema_version": 3,
+        "schema_version": _POSTGRES_SCHEMA_VERSION,
         "command": command,
         "status": status,
         "coverage": coverage,
         "refresh": refresh,
         "semantic": semantic,
-        "indexed_at": indexed_at.isoformat() if indexed_at is not None else None,
+        "indexed_at": made_at.isoformat() if made_at is not None else None,
         "corpus_age_ms": corpus_age_ms,
         "warnings": [*diagnostics, *additional_warnings],
         **payload,
+        **_index_state_payload(
+            connection,
+            roots=index_state_roots,
+            deadline=index_state_deadline,
+            now=now,
+            made_at=made_at,
+            age_ms=corpus_age_ms,
+            corpus_generation=corpus_generation,
+            semantic_build=semantic_row[0],
+        ),
     }
 
 
@@ -866,6 +995,223 @@ def _eta(seconds: float) -> str:
     minutes, seconds = divmod(max(0, round(seconds)), 60)
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{seconds:02d}s"
+
+
+def _index_timestamp(value: object) -> str:
+    parsed = datetime.fromisoformat(str(value))
+    offset = parsed.strftime("%z")
+    return f"{parsed:%Y-%m-%d %H:%M:%S} {offset[:3]}:{offset[3:]}"
+
+
+def _index_age(age_ms: int) -> str:
+    total_minutes = max(0, int(age_ms)) // 60_000
+    hours, minutes = divmod(total_minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m" if hours else f"{minutes}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h {minutes}m"
+
+
+def _print_index_state_header(envelope: Mapping[str, object]) -> None:
+    state = cast("Mapping[str, object]", envelope["index_state"])
+    made_at = state["made_at"]
+    age_ms = state["age_ms"]
+    now = _index_timestamp(state["now"])
+    if made_at is None or age_ms is None:
+        print(f"index made unknown; now {now}; age unknown")
+    elif not isinstance(age_ms, int):
+        raise RuntimeError("index-state age_ms must be an integer")
+    else:
+        print(
+            f"index made {_index_timestamp(made_at)}; now {now}; "
+            f"age {_index_age(age_ms)}"
+        )
+    unindexed = cast("Mapping[str, object] | None", state["unindexed"])
+    if unindexed is None:
+        print(f"unindexed chats: unknown ({state['unindexed_reason']})")
+    else:
+        files = unindexed["files"]
+        if not isinstance(files, int):
+            raise RuntimeError("index-state unindexed files must be an integer")
+        if files == 0:
+            print("missing 0 chats")
+            return
+        print(
+            f"missing {files} chats in {unindexed['directories']} "
+            "directories since that index; run `cc-search-chats index` to include "
+            "them"
+        )
+
+
+def _print_human_search(
+    args: argparse.Namespace,
+    envelope: Mapping[str, object],
+    warnings: Sequence[Mapping[str, str]],
+    results: Sequence[Mapping[str, object]],
+) -> None:
+    print(
+        f"literal search (exact full-text, no model): {args.query}"
+        if args.literal
+        else f"semantic search (hybrid model ranking): {args.query}"
+    )
+    _print_index_state_header(envelope)
+    degraded = next(
+        (
+            warning
+            for warning in warnings
+            if warning["code"] == "semantic_search_degraded"
+        ),
+        None,
+    )
+    if degraded is not None:
+        print(
+            "WARNING: semantic ranking unavailable "
+            f"({degraded['detail']}); these are literal results"
+        )
+    for result in results:
+        print(
+            f"[{result['timestamp']}] {result['provider']}:"
+            f"{result['session_id']} ({result['role']})\n"
+            f"  {result['text']}\n  {result['locator']}"
+        )
+
+
+def _search_identity(
+    hit: SearchHit,
+    identity_message: StoredMessage | None,
+) -> dict[str, object]:
+    if identity_message is not None:
+        return _identity_json(identity_message)
+    return {
+        "provider": hit.provider,
+        "source_session_id": hit.source_session_id,
+        "logical_message_id": hit.logical_message_id,
+        "canonical_locator": hit.canonical_locator,
+        "physical_aliases": [],
+    }
+
+
+def _search_ranking(
+    hit: SearchHit,
+    hybrid: HybridHit | None,
+    *,
+    exhaustive: bool,
+) -> dict[str, object]:
+    if hybrid is None:
+        return {
+            "method": "fts",
+            "score": hit.rank,
+            "tie_breaker": (
+                "canonical_locator,content_class,record_ordinal,digest"
+                if exhaustive
+                else "rank,provider,session,logical_message"
+            ),
+        }
+    return {
+        "method": "rrf",
+        "score": {
+            "numerator": hybrid.score.numerator,
+            "denominator": hybrid.score.denominator,
+        },
+        "rank_constant": hybrid.rank_constant,
+        "component_depth": hybrid.component_depth,
+        "literal_rank": hybrid.literal_rank,
+        "semantic_rank": hybrid.semantic_rank,
+        "literal_score": hybrid.literal_score,
+        "semantic_score": hybrid.semantic_score,
+        "semantic_chunk_ordinal": hybrid.semantic_chunk_ordinal,
+        "tie_breaker": "canonical_locator",
+    }
+
+
+def _search_result(
+    hit: SearchHit,
+    identity_message: StoredMessage | None,
+    hybrid: HybridHit | None,
+    *,
+    exhaustive: bool,
+) -> dict[str, object]:
+    return {
+        "identity": _search_identity(hit, identity_message),
+        "provider": hit.provider,
+        "session_id": hit.source_session_id,
+        "logical_message_id": hit.logical_message_id,
+        "locator": hit.canonical_locator,
+        "timestamp": hit.timestamp,
+        "role": hit.role,
+        "session_kind": hit.session_kind,
+        "conversation_epoch": hit.conversation_epoch,
+        "content_class": hit.content_class,
+        "text": hit.text,
+        "repository": hit.repository,
+        "cwd": hit.cwd,
+        "score": float(hybrid.score) if hybrid is not None else hit.rank,
+        "ranking": _search_ranking(hit, hybrid, exhaustive=exhaustive),
+    }
+
+
+def _resolved_search_results(
+    hits: Sequence[SearchHit],
+    resolutions: Sequence[MessageResolution],
+    hybrid_rankings: Mapping[str, HybridHit],
+    *,
+    exhaustive: bool,
+    answer_deadline: float | None,
+) -> list[dict[str, object]]:
+    results = []
+    for hit, resolution in zip(hits, resolutions, strict=True):
+        if answer_deadline is not None and monotonic() >= answer_deadline:
+            raise SearchDeadlineExceeded(
+                "search deadline expired during result rendering"
+            )
+        identity_message = next(
+            (
+                message
+                for message in resolution.messages
+                if message.logical_message_id == hit.logical_message_id
+            ),
+            None,
+        )
+        if identity_message is None:
+            raise RuntimeError(
+                f"search result identity became stale: {hit.canonical_locator}"
+            )
+        results.append(
+            _search_result(
+                hit,
+                identity_message,
+                hybrid_rankings.get(hit.canonical_locator),
+                exhaustive=exhaustive,
+            )
+        )
+    return results
+
+
+def _unresolved_search_results(
+    hits: Sequence[SearchHit],
+    hybrid_rankings: Mapping[str, HybridHit],
+    *,
+    exhaustive: bool,
+) -> list[dict[str, object]]:
+    return [
+        _search_result(
+            hit,
+            None,
+            hybrid_rankings.get(hit.canonical_locator),
+            exhaustive=exhaustive,
+        )
+        for hit in hits
+    ]
+
+
+def _append_envelope_warning(
+    envelope: Mapping[str, object],
+    warning: Mapping[str, str],
+) -> None:
+    warnings = envelope["warnings"]
+    if not isinstance(warnings, list):
+        raise TypeError("search envelope warnings must be a list")
+    warnings.append(warning)
 
 
 def _contain_semantic_index(args: argparse.Namespace) -> None:
@@ -934,7 +1280,7 @@ def _handle_postgres(
     """Run the migrated index/search surface against PostgreSQL."""
     if args.command == "search" and not args.exhaustive:
         remaining = _remaining_search_seconds(args)
-        if remaining <= _SEARCH_RENDER_RESERVE_SECONDS:
+        if remaining <= 0:
             raise SearchDeadlineExceeded("search deadline expired before connection")
         connection_context = psycopg.connect(
             dsn,
@@ -946,14 +1292,11 @@ def _handle_postgres(
     with connection_context as connection:
         if args.command == "search" and not args.exhaustive:
             remaining = _remaining_search_seconds(args)
-            if remaining <= _SEARCH_RENDER_RESERVE_SECONDS:
+            if remaining <= 0:
                 raise SearchDeadlineExceeded(
                     "search deadline expired while connecting to PostgreSQL"
                 )
-            timeout_ms = max(
-                1,
-                int((remaining - _SEARCH_RENDER_RESERVE_SECONDS) * 1000),
-            )
+            timeout_ms = max(1, int(remaining * 1000))
             connection.execute(
                 """
                 SELECT set_config('lock_timeout', %s, false),
@@ -985,31 +1328,18 @@ def _handle_postgres(
             status: str = "complete",
             additional_warnings: Sequence[object] = (),
             refresh_result: RefreshResult | CorpusIndexResult | None = None,
+            index_state_roots: tuple[ConfiguredSourceRoot, ...] | None = None,
+            index_state_deadline: float | None = None,
             **payload: object,
         ) -> dict[str, object]:
-            if args.command == "search" and not args.exhaustive:
-                remaining = _remaining_search_seconds(args)
-                if remaining <= _SEARCH_RENDER_RESERVE_SECONDS:
-                    raise SearchDeadlineExceeded(
-                        "search deadline expired before result serialization"
-                    )
-                timeout_ms = max(
-                    1,
-                    int((remaining - _SEARCH_RENDER_RESERVE_SECONDS) * 1000),
-                )
-                connection.execute(
-                    """
-                    SELECT set_config('lock_timeout', %s, false),
-                           set_config('statement_timeout', %s, false)
-                    """,
-                    (f"{timeout_ms}ms", f"{timeout_ms}ms"),
-                )
             envelope = _postgres_envelope(
                 connection,
                 command,
                 status=status,
                 additional_warnings=additional_warnings,
                 refresh_result=refresh_result,
+                index_state_roots=index_state_roots,
+                index_state_deadline=index_state_deadline,
                 **payload,
             )
             progress_stream.terminal(envelope)
@@ -1050,6 +1380,12 @@ def _handle_postgres(
                 )
                 envelope = finish(
                     "index",
+                    index_state_roots=configured_source_roots(),
+                    index_state_deadline=(
+                        args.request_started
+                        + _SEARCH_DEADLINE_SECONDS
+                        - _SEARCH_RENDER_RESERVE_SECONDS
+                    ),
                     corpus_generation=selected_corpus,
                     semantic_build=selected_build,
                     completed=completed,
@@ -1059,6 +1395,7 @@ def _handle_postgres(
                 if args.json:
                     print(json.dumps(envelope, sort_keys=True))
                 else:
+                    _print_index_state_header(envelope)
                     print(f"Semantic index: {completed}/{total} passages")
                 return 0
 
@@ -1395,11 +1732,9 @@ def _handle_postgres(
                 return 2
             return 3
 
-        deadline = (
-            None if args.exhaustive else args.request_started + _SEARCH_DEADLINE_SECONDS
-        )
+        answer_deadline = None if args.exhaustive else args.answer_deadline
         project = args.project
-        hybrid_rankings = {}
+        hybrid_rankings: dict[str, HybridHit] = {}
         search_warnings: list[dict[str, str]] = []
         connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         next(
@@ -1454,12 +1789,12 @@ def _handle_postgres(
             hits = literal_hits[: args.limit]
 
         if not args.literal and not args.exhaustive:
-            assert deadline is not None  # noqa: S101  # ranked-search invariant
+            assert answer_deadline is not None  # noqa: S101  # ranked-search invariant
 
             def search_model_progress(phase: str, state: str) -> None:
                 progress_stream.emit(phase, state)
 
-            semantic_budget = deadline - monotonic() - _SEARCH_RENDER_RESERVE_SECONDS
+            semantic_budget = answer_deadline - monotonic()
             progress_stream.emit("query_embed", "running")
             try:
                 query_embedding = _bounded_query_embedding(
@@ -1517,78 +1852,15 @@ def _handle_postgres(
             completed_units=len(hits),
             total_units=len(hits),
         )
-        resolutions = pg_resolve_messages(
-            connection,
-            tuple(hit.canonical_locator for hit in hits),
-        )
-        results = []
-        for hit, resolution in zip(hits, resolutions, strict=True):
-            identity_message = next(
-                (
-                    message
-                    for message in resolution.messages
-                    if message.logical_message_id == hit.logical_message_id
-                ),
-                None,
-            )
-            if identity_message is None:
-                raise RuntimeError(
-                    f"search result identity became stale: {hit.canonical_locator}"
-                )
-            hybrid_ranking = hybrid_rankings.get(hit.canonical_locator)
-            ranking = (
-                {
-                    "method": "rrf",
-                    "score": {
-                        "numerator": hybrid_ranking.score.numerator,
-                        "denominator": hybrid_ranking.score.denominator,
-                    },
-                    "rank_constant": hybrid_ranking.rank_constant,
-                    "component_depth": hybrid_ranking.component_depth,
-                    "literal_rank": hybrid_ranking.literal_rank,
-                    "semantic_rank": hybrid_ranking.semantic_rank,
-                    "literal_score": hybrid_ranking.literal_score,
-                    "semantic_score": hybrid_ranking.semantic_score,
-                    "semantic_chunk_ordinal": (hybrid_ranking.semantic_chunk_ordinal),
-                    "tie_breaker": "canonical_locator",
-                }
-                if hybrid_ranking is not None
-                else {
-                    "method": "fts",
-                    "score": hit.rank,
-                    "tie_breaker": (
-                        "canonical_locator,content_class,record_ordinal,digest"
-                        if args.exhaustive
-                        else "rank,provider,session,logical_message"
-                    ),
-                }
-            )
-            results.append(
-                {
-                    "identity": _identity_json(identity_message),
-                    "provider": hit.provider,
-                    "session_id": hit.source_session_id,
-                    "logical_message_id": hit.logical_message_id,
-                    "locator": hit.canonical_locator,
-                    "timestamp": hit.timestamp,
-                    "role": hit.role,
-                    "session_kind": hit.session_kind,
-                    "conversation_epoch": hit.conversation_epoch,
-                    "content_class": hit.content_class,
-                    "text": hit.text,
-                    "repository": hit.repository,
-                    "cwd": hit.cwd,
-                    "score": (
-                        float(hybrid_ranking.score)
-                        if hybrid_ranking is not None
-                        else hit.rank
-                    ),
-                    "ranking": ranking,
-                }
-            )
         envelope = _postgres_envelope(
             connection,
             "search",
+            index_state_roots=configured_source_roots(),
+            index_state_deadline=(
+                monotonic() + _INDEX_STATE_SCAN_BUDGET_SECONDS
+                if args.exhaustive
+                else args.answer_deadline
+            ),
             exhaustive=args.exhaustive,
             result_limit=None if args.exhaustive else args.limit,
             deadline_ms=(
@@ -1596,9 +1868,9 @@ def _handle_postgres(
             ),
             elapsed_ms=round((monotonic() - args.request_started) * 1000),
             retrieval_mode=retrieval_mode,
-            stale_reasons=["native_sources_not_checked"],
+            mode=_requested_search_mode(args),
+            stale_reasons=[],
             additional_warnings=search_warnings,
-            results=results,
         )
         semantic_state = cast("dict[str, object]", envelope["semantic"])
         stale_reasons = cast("list[str]", envelope["stale_reasons"])
@@ -1606,19 +1878,47 @@ def _handle_postgres(
             stale_reasons.append("semantic_build_unavailable")
             if retrieval_mode == "hybrid":
                 envelope["retrieval_mode"] = "literal_fallback"
-        connection.execute("COMMIT")
+        try:
+            resolutions = pg_resolve_messages(
+                connection,
+                tuple(hit.canonical_locator for hit in hits),
+            )
+            results = _resolved_search_results(
+                hits,
+                resolutions,
+                hybrid_rankings,
+                exhaustive=args.exhaustive,
+                answer_deadline=answer_deadline,
+            )
+        except (
+            ReadDeadlineExceeded,
+            SearchDeadlineExceeded,
+            psycopg.errors.LockNotAvailable,
+            psycopg.errors.QueryCanceled,
+        ) as error:
+            deadline_warning = {
+                "code": "deadline_degraded",
+                "detail": f"{type(error).__name__}: {error}",
+            }
+            search_warnings.append(deadline_warning)
+            _append_envelope_warning(envelope, deadline_warning)
+            envelope["status"] = "partial"
+            results = _unresolved_search_results(
+                hits,
+                hybrid_rankings,
+                exhaustive=args.exhaustive,
+            )
+            connection.execute("ROLLBACK")
+        else:
+            connection.execute("COMMIT")
 
         envelope["elapsed_ms"] = round((monotonic() - args.request_started) * 1000)
+        envelope["results"] = results
         progress_stream.terminal(envelope)
         if args.json:
             print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
         else:
-            for result in results:
-                print(
-                    f"[{result['timestamp']}] {result['provider']}:"
-                    f"{result['session_id']} ({result['role']})\n"
-                    f"  {result['text']}\n  {result['locator']}"
-                )
+            _print_human_search(args, envelope, search_warnings, results)
         return 0
 
 
@@ -1900,7 +2200,7 @@ def _handle_context(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with all subcommands."""
-    parser = argparse.ArgumentParser(
+    parser = _ArgumentParser(
         prog="cc-search-chats",
         description="Search and recover Claude Code and Codex chat history",
     )
@@ -1917,7 +2217,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Create a parent parser for shared flags across all subcommands.
-    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser = _ArgumentParser(add_help=False)
     common_parser.add_argument(
         "--json",
         action="store_true",
@@ -1942,7 +2242,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=_fmt,
         epilog=(
             "Examples:\n"
-            '  cc-search-chats search "database migration"\n'
+            '  cc-search-chats search "database migration" --semantic\n'
             '  cc-search-chats search "auth" --literal --provider codex\n'
             '  cc-search-chats search "tool output" --literal --tools\n'
             '  cc-search-chats search "sentinel" --literal --exhaustive --json'
@@ -1995,8 +2295,10 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument(
         "--limit", type=int, default=20, help="maximum ranked results (default: 20)"
     )
-    search_parser.add_argument(
-        "--literal", action="store_true", help="use PostgreSQL FTS without the model"
+    search_mode = search_parser.add_mutually_exclusive_group(required=True)
+    search_mode.add_argument("--literal", action="store_true", help=_LITERAL_MODE_HELP)
+    search_mode.add_argument(
+        "--semantic", action="store_true", help=_SEMANTIC_MODE_HELP
     )
     search_parser.set_defaults(func=_handle_search)
 
@@ -2180,6 +2482,9 @@ def main(*, request_started: float | None = None) -> None:
         sys.exit(0)
 
     if args.command == "search":
+        args.answer_deadline = (
+            request_started + _SEARCH_DEADLINE_SECONDS - _SEARCH_RENDER_RESERVE_SECONDS
+        )
         if args.everything:
             parser.error(
                 "--everything was removed; use --literal --tools --exhaustive "
@@ -2213,16 +2518,11 @@ def main(*, request_started: float | None = None) -> None:
         try:
             if args.command == "search" and not args.exhaustive:
                 remaining = _remaining_search_seconds(args)
-                if remaining <= _SEARCH_RENDER_RESERVE_SECONDS:
+                if remaining <= 0:
                     raise SearchDeadlineExceeded(
                         "search deadline expired before PostgreSQL admission"
                     )
-                read_scope = read_deadline(
-                    max(
-                        1,
-                        int((remaining - _SEARCH_RENDER_RESERVE_SECONDS) * 1000),
-                    )
-                )
+                read_scope = read_deadline(max(1, int(remaining * 1000)))
             else:
                 read_scope = nullcontext()
             _contain_semantic_index(args)
@@ -2256,7 +2556,7 @@ def main(*, request_started: float | None = None) -> None:
                 "phase": "retrieve",
                 "message": str(exc),
             }
-            envelope = _error_envelope(args.command, "deadline_exceeded", error)
+            envelope = _command_error_envelope(args, "deadline_exceeded", error)
             progress_stream.terminal(envelope)
             if args.json:
                 print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
@@ -2268,7 +2568,7 @@ def main(*, request_started: float | None = None) -> None:
                 "message": str(exc),
                 "pending_versions": [migration.version for migration in exc.pending],
             }
-            envelope = _error_envelope(args.command, "maintenance_required", error)
+            envelope = _command_error_envelope(args, "maintenance_required", error)
             progress_stream.terminal(envelope)
             if args.json:
                 print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
@@ -2286,8 +2586,8 @@ def main(*, request_started: float | None = None) -> None:
                 ),
                 "literal_command": _literal_fallback_command(args),
             }
-            envelope = _error_envelope(
-                args.command,
+            envelope = _command_error_envelope(
+                args,
                 "semantic_unavailable",
                 error,
             )
@@ -2318,8 +2618,8 @@ def main(*, request_started: float | None = None) -> None:
                     "phase": "retrieve",
                     "message": detail,
                 }
-                envelope = _error_envelope(
-                    args.command,
+                envelope = _command_error_envelope(
+                    args,
                     "deadline_exceeded",
                     error,
                 )
@@ -2332,7 +2632,7 @@ def main(*, request_started: float | None = None) -> None:
                 "phase": "done",
                 "message": detail,
             }
-            envelope = _error_envelope(args.command, "internal_failure", error)
+            envelope = _command_error_envelope(args, "internal_failure", error)
             progress_stream.terminal(envelope)
             if args.json:
                 print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))

@@ -6,7 +6,7 @@ allowed-tools: ["Bash(cc-search-chats:*)"]
 
 # Search Chat History
 
-Use the PostgreSQL-backed CLI with `--json`. Require `schema_version: 3` before
+Use the PostgreSQL-backed CLI with `--json`. Require `schema_version: 4` before
 interpreting stdout. Progress is an independent NDJSON stream on stderr.
 
 ## Execution boundary
@@ -24,15 +24,15 @@ host probe established the corresponding host fact.
 ## Choose the smallest search
 
 ```console
-# Topic or natural-language search (hybrid FTS + semantic)
-cc-search-chats search "query" --json
+# Topic or natural-language search (model-ranked hybrid)
+cc-search-chats search "query" --semantic --json
 
 # Exact words, filters, or semantic runtime unavailable
 cc-search-chats search "query" --literal --json
 cc-search-chats search "query" --literal --provider codex --days 7 --json
 
 # Include agent and unknown sessions
-cc-search-chats search "query" --agents --json
+cc-search-chats search "query" --semantic --agents --json
 
 # Lexical tool names/inputs/outputs; reasoning and instructions stay excluded
 cc-search-chats search "query" --literal --tools --json
@@ -55,19 +55,22 @@ cc-search-chats index --json
 cc-search-chats index --status --json
 ```
 
-Search opens the currently selected coherent corpus without admitting,
-launching, joining, or waiting for index work. Use `index` intentionally when a
-newer corpus is required. A miss merits alternate terms, `--literal`, and
-careful filter review. Add `--project` only when `list` or prior results show the
-exact recorded repository/cwd; missing project metadata cannot match it.
+Search requires exactly one mode. `--literal` is exact full-text search with no
+model or GPU; `--semantic` is model-ranked hybrid fusion of full-text and
+embedding candidates. Search opens the currently selected coherent corpus
+without admitting, launching, joining, or waiting for index work. Use `index`
+intentionally when a newer corpus is required. A miss merits alternate terms,
+`--literal`, and careful filter review. Add `--project` only when `list` or
+prior results show the exact recorded repository/cwd; missing project metadata
+cannot match it.
 
-Default search is visible primary-session prose. `--agents` adds agent and
+Both modes search visible primary-session prose. `--agents` adds agent and
 unknown sessions. `--tools` requires `--literal`; `--exhaustive` also requires
 literal mode and is the only complete occurrence mode. Ranked results are
 bounded top results. No flag exposes reasoning/thinking, system/developer
 instructions, injected context, or unrecognized record shapes.
 
-## Interpret schema v3
+## Interpret schema v4
 
 Every command object contains `command`, terminal `status`, `coverage`,
 `refresh`, `semantic`, `indexed_at`, `corpus_age_ms`, and `warnings`. Read the
@@ -75,7 +78,13 @@ selected identity from `refresh.corpus_generation` and the
 coherent semantic identity from `semantic.semantic_build` plus
 `semantic.corpus_generation`.
 
-- `search`: read `results`; retain `identity.provider`,
+For `search`, read requested `mode` before delivered `retrieval_mode`. A
+semantic request may deliver `literal_fallback`; require the
+`semantic_search_degraded` warning and report those as literal results. A
+post-retrieval deadline returns retained hits with `status: partial` and
+`deadline_degraded`.
+
+- `search`: read `index_state` and `results`; retain `identity.provider`,
   `identity.source_session_id`, `identity.canonical_locator`, physical aliases,
   timestamp, role, session kind, content class, text, and ranking evidence.
 - `list`: read `sessions`; retain provider, source session ID, kind, latest
@@ -83,11 +92,15 @@ coherent semantic identity from `semantic.semantic_build` plus
 - `extract` and `context`: read ordered `messages`.
 - Single `resolve`: read `status` and `messages`; batched `resolve --stdin` reads
   `resolutions` in input order. `--reference-only` deliberately omits text.
-- `index --status`: read `completed`, `total`, `selected`, and the shared
-  semantic/refresh objects.
+- `index --status`: read `index_state`, `completed`, `total`, `selected`, and
+  the shared semantic/refresh objects.
 - `events`: read `source_corpus_generation`, `population`, and `events`; each
   retained event repeats `source_corpus_generation` and contains no message
   body.
+
+Human search output places the mode line first and the index made/now/age plus
+missing-chat header before results. `index_state.unindexed: null` means the
+bounded scan did not complete; report `unindexed_reason` instead of guessing.
 
 Treat `coverage.completeness != "complete"`, unreadable files, pending bytes,
 unrecognized records, warnings, or stale semantic state as evidence limits—not
@@ -99,5 +112,5 @@ Exact resolution statuses are `resolved`, `no_match`, `multiple_matches`,
 `unsupported_provider_schema`. Report the status rather than turning every
 non-result into “not found.”
 
-If `schema_version` is missing or not `3`, stop: the plugin instructions and CLI
+If `schema_version` is missing or not `4`, stop: the plugin instructions and CLI
 are out of sync.

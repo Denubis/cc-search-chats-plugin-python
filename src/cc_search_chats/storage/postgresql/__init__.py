@@ -41,6 +41,10 @@ from cc_search_chats.storage.postgresql.semantic import (
     index_embeddings,
     semantic_search,
 )
+from cc_search_chats.storage.postgresql.staleness import (
+    UnindexedSourceCounts,
+    unindexed_sources,
+)
 
 __all__ = [
     "EventExport",
@@ -58,6 +62,7 @@ __all__ = [
     "StoredMessage",
     "StoredAlias",
     "StoredSession",
+    "UnindexedSourceCounts",
     "context_messages",
     "extract_session",
     "export_human_message_events",
@@ -74,4 +79,5 @@ __all__ = [
     "resolve_messages",
     "search_messages",
     "semantic_search",
+    "unindexed_sources",
 ]

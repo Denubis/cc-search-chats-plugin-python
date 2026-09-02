@@ -117,14 +117,14 @@ maintenance still exits nonzero when its required model work cannot run.
 # Explicit schema maintenance before using a newly installed schema version
 cc-search-chats index --migrate --json
 
-# Hybrid natural-language search over the committed snapshot
-cc-search-chats search "database migration"
+# Model-ranked hybrid natural-language search over the committed snapshot
+cc-search-chats search "database migration" --semantic
 
 # Exact lexical search without the model
 cc-search-chats search "schema_migration" --literal
 
-# Include agent/unknown sessions
-cc-search-chats search "the earlier runner work" --agents
+# Include agent/unknown sessions in model-ranked hybrid search
+cc-search-chats search "the earlier runner work" --semantic --agents
 
 # Lexical tool content; reasoning and instructions remain excluded
 cc-search-chats search "git diff" --literal --tools
@@ -147,9 +147,14 @@ Ranked `search` measures a provisional five-second deadline from executable
 invocation and opens its repeatable-read snapshot without indexing, launching
 a service, joining index work, or waiting for publication. It reads the
 currently selected coherent corpus even when newer native records exist.
-Output names `corpus_generation`, `semantic_build`, `indexed_at`,
-`corpus_age_ms`, staleness reasons, retrieval mode, and deadline. Run
-`cc-search-chats index` intentionally when the selected corpus is too old.
+Every search requires exactly one of `--literal` or `--semantic`. Literal is
+exact full-text search and loads no model; semantic is model-ranked hybrid
+search over full-text and embedding candidates. Human output states the
+requested mode first, then the index time, current time, age, and unindexed
+chat count. JSON names `mode`, delivered `retrieval_mode`, `index_state`,
+`corpus_generation`, `semantic_build`, `indexed_at`, `corpus_age_ms`, and the
+deadline. Run `cc-search-chats index` intentionally when the selected corpus is
+too old.
 
 `index --migrate` is the only CLI path that applies pending schema migrations.
 Search and routine index/status commands report `maintenance_required` without
@@ -165,10 +170,11 @@ PostgreSQL searches all configured roots by default. Filters narrow that corpus:
 - `--agents` for agent and unknown sessions
 - `--literal --tools` for persisted tool names, inputs, and outputs
 
-Default and literal ranked searches return at most `--limit` results (1–200).
-Hybrid search fuses bounded lexical and semantic component rankings with exact
-reciprocal-rank-fusion arithmetic. Only `--literal --exhaustive` claims complete
-occurrence coverage; it pages through PostgreSQL and ignores the ranked limit.
+Literal and semantic ranked searches return at most `--limit` results (1–200).
+Semantic search fuses bounded lexical and semantic component rankings with
+exact reciprocal-rank-fusion arithmetic. Only `--literal --exhaustive` claims
+complete occurrence coverage; it pages through PostgreSQL and ignores the
+ranked limit. `--tools` and `--exhaustive` require `--literal`.
 
 No supported search mode indexes or returns reasoning/thinking, system or
 developer instructions, injected context, or unrecognized content shapes.
@@ -229,17 +235,28 @@ checkpoint.
 
 ## JSON and Progress Contract
 
-The default PostgreSQL surface emits JSON schema version 3. Each `--json`
+The default PostgreSQL surface emits JSON schema version 4. Each `--json`
 command writes one stdout object containing:
 
 - `schema_version`, `command`, and terminal `status`
 - `coverage` with roots, repositories, file counts, diagnostics, and watermarks
 - `refresh.corpus_generation`, `semantic.semantic_build`,
   `semantic.corpus_generation`, and their state/progress fields
-- top-level `indexed_at`, database-computed `corpus_age_ms`, and `warnings`
-- ranked-search `deadline_ms`, `elapsed_ms`, `retrieval_mode`, `indexed_at`, and
-  `stale_reasons`
+- top-level `indexed_at`, clock-derived `corpus_age_ms`, and `warnings`
+- search `mode` for the requested literal/semantic mode and `retrieval_mode`
+  for the delivered literal, exhaustive-literal, hybrid, or literal-fallback
+  result
+- search and `index --status` `index_state`, including one-clock `made_at`,
+  `now`, `age_ms`, selected corpus/build identity, and bounded unindexed
+  file/directory/byte counts or a closed unknown reason
+- ranked-search `deadline_ms`, `elapsed_ms`, and `stale_reasons`; a post-retrieval
+  deadline returns `status: partial` with `deadline_degraded` instead of
+  discarding hits
 - command-specific `results`, `sessions`, `messages`, `resolutions`, or `events`
+
+A semantic request that cannot complete model ranking returns literal results
+with `retrieval_mode: literal_fallback` and a `semantic_search_degraded` warning.
+Human output prints an equally explicit warning before those results.
 
 Search/extract/context/resolve messages carry provider-qualified canonical
 identity plus verified physical source coordinates. Exact resolution statuses
@@ -256,7 +273,7 @@ messages with retained, excluded, and unresolved authorship counts. The export
 and every event carry `source_corpus_generation`.
 
 Progress never contaminates JSON stdout. JSON or non-TTY execution writes
-ordered schema-v3 NDJSON events to stderr, including periodic heartbeats and
+ordered schema-v4 NDJSON events to stderr, including periodic heartbeats and
 exactly one terminal event. Use `--progress human` for concise terminal text.
 
 ## Scheduled Maintenance
