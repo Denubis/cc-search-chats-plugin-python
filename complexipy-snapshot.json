@@ -17,7 +17,7 @@
       },
       {
         "name": "_handle_postgres",
-        "complexity": 175
+        "complexity": 174
       }
     ]
   },

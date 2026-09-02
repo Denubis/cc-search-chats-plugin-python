@@ -110,10 +110,6 @@ ignore = [
 "src/cc_search_chats/providers/claude.py" = [
     "TC001",  # RecordEnvelope annotates a dataclass field evaluated at runtime
 ]
-"src/cc_search_chats/providers/source_discovery.py" = [
-    "S603",  # git is a fixed executable invoked without a shell
-    "S607",  # git intentionally resolves through the operator's PATH
-]
 "src/cc_search_chats/semantic/model.py" = [
     "N818",  # public name; rename is a contract change
 ]
@@ -154,11 +150,6 @@ ignore = [
     "S603",     # drives fish, codex, and sys.executable as a user would
     "S607",     # the bare executable name on PATH is the contract under test, guarded by shutil.which skipif
 ]
-"tests/test_source_discovery.py" = [
-    "S603",     # drives git init to build a real repository fixture
-    "S607",     # git on PATH is the contract under test, guarded by shutil.which skipif
-]
-
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -177,6 +168,15 @@ ignore_names = [
     "pair",                    # Tokenizer Protocol keyword parameter
     "add_special_tokens",      # Tokenizer Protocol keyword parameter
     "return_offsets_mapping",  # Tokenizer Protocol keyword parameter
+    "HUMAN",                   # Closed SubmittedBy vocabulary member
+    "use_cache",               # Transformers configuration attribute assignment
+    "row_factory",             # sqlite3 Connection attribute assignment
+    "search_full_content",     # Tested legacy CC_SEARCH_DB_PATH compatibility API
+    "corpus_revision_id",      # Tested legacy-prune result field
+    "semantic_revision_id",    # Tested legacy-prune result field
+    "scanned_rows",            # Tested legacy-import result field
+    "new_pool_rows",           # Tested legacy-import result field
+    "pool_rows_after",         # Tested legacy-import result field
 ]
 
 [tool.complexipy]

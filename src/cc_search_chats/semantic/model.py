@@ -1,10 +1,13 @@
 """Offline-only adapter for the pinned local Nemotron embedding model."""
 
 import os
+import re
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import import_module
+from io import StringIO
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +21,7 @@ MAX_MODEL_TOKENS = 1024
 CHUNK_OVERLAP_TOKENS = 96
 CHUNKER_ID = "nemotron-token-chunks-768-1024-96:v1"
 type ModelProgress = Callable[[str, str], None]
+_COMMIT_HASH = re.compile(r"[0-9a-f]{40}").fullmatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +69,7 @@ class ModelUnavailable(RuntimeError):
         self.total_vram_bytes = total_vram_bytes
 
 
-def _model_path() -> Path:
+def _configured_model_path() -> Path:
     configured = os.environ.get("CC_SEARCH_MODEL_PATH")
     cache = Path(
         os.environ.get(
@@ -74,7 +78,7 @@ def _model_path() -> Path:
             / "huggingface",
         )
     )
-    path = (
+    return (
         Path(
             configured
             or cache
@@ -86,6 +90,49 @@ def _model_path() -> Path:
         .expanduser()
         .resolve()
     )
+
+
+def local_snapshot_revision(path: Path) -> str | None:
+    """Return a commit revision only for an existing commit-named directory."""
+    return path.name if path.is_dir() and _COMMIT_HASH(path.name) is not None else None
+
+
+def local_model_revision() -> str | None:
+    """Read the configured local snapshot revision without loading the model."""
+    return local_snapshot_revision(_configured_model_path())
+
+
+def _silence_model_libraries() -> None:
+    try:
+        transformers = import_module("transformers")
+    except ImportError:
+        transformers = None
+    if transformers is not None:
+        transformers.utils.logging.disable_progress_bar()
+        transformers.utils.logging.set_verbosity_error()
+
+    try:
+        huggingface_hub = import_module("huggingface_hub")
+    except ImportError:
+        huggingface_hub = None
+    if huggingface_hub is not None:
+        huggingface_hub.utils.disable_progress_bars()
+        huggingface_hub.logging.set_verbosity_error()
+
+
+@contextmanager
+def model_output_scope(*, quiet: bool):
+    """Keep third-party model stderr out of a machine-readable progress stream."""
+    if not quiet:
+        yield
+        return
+    with redirect_stderr(StringIO()):
+        _silence_model_libraries()
+        yield
+
+
+def _model_path() -> Path:
+    path = _configured_model_path()
     if not path.is_dir() or path.name != MODEL_REVISION:
         raise ModelUnavailable(
             f"model path must be the local {MODEL_ID} snapshot {MODEL_REVISION}",

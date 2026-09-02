@@ -8,7 +8,6 @@ from enum import StrEnum
 from typing import TypeIs
 
 from cc_search_chats.core.canonicalization import (
-    CanonicalizationDiagnostic,
     CanonicalizationDiagnosticCode,
     CanonicalizationResult,
     CodexRecordFamily,
@@ -550,10 +549,8 @@ class CodexParseResult:
     source_session_id: str | None
     session_kind: SessionKind
     messages: tuple[NativeMessage, ...]
-    physical_candidates: tuple[PhysicalMessageCandidate, ...]
     boundaries: tuple[SessionEpochBoundary, ...]
     diagnostics: tuple[CodexDiagnostic, ...]
-    canonicalization_diagnostics: tuple[CanonicalizationDiagnostic, ...]
     next_state: CodexParserState
 
 
@@ -1449,19 +1446,6 @@ def _messages_touching_new_candidates(
     )
 
 
-def _diagnostics_touching_new_candidates(
-    canonical: CanonicalizationResult,
-    candidates: tuple[PhysicalMessageCandidate, ...],
-) -> tuple[CanonicalizationDiagnostic, ...]:
-    """Avoid re-emitting a prior suffix's already-recorded non-pairing outcome."""
-    aliases = {_candidate_alias(candidate) for candidate in candidates}
-    return tuple(
-        diagnostic
-        for diagnostic in canonical.diagnostics
-        if aliases.intersection(diagnostic.physical_aliases)
-    )
-
-
 def _next_trailing_candidate(
     canonical: CanonicalizationResult,
     candidates: tuple[PhysicalMessageCandidate, ...],
@@ -1551,7 +1535,6 @@ def parse_codex_session(
             source_session_id=None,
             session_kind=SessionKind.UNKNOWN,
             messages=(),
-            physical_candidates=(),
             boundaries=(),
             diagnostics=tuple(
                 sorted(
@@ -1565,7 +1548,6 @@ def parse_codex_session(
                     ),
                 )
             ),
-            canonicalization_diagnostics=(),
             next_state=state,
         )
     if state.trailing_candidate is not None:
@@ -1696,7 +1678,6 @@ def parse_codex_session(
         source_session_id=source_session_id,
         session_kind=session_kind,
         messages=_messages_touching_new_candidates(canonical, new_candidates),
-        physical_candidates=new_candidates,
         boundaries=tuple(boundaries),
         diagnostics=tuple(
             sorted(
@@ -1707,9 +1688,6 @@ def parse_codex_session(
                     value.detail,
                 ),
             )
-        ),
-        canonicalization_diagnostics=_diagnostics_touching_new_candidates(
-            canonical, new_candidates
         ),
         next_state=CodexParserState(
             next_conversation_epoch=conversation_epoch,

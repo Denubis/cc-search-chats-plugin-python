@@ -30,7 +30,6 @@ import pytest
 from tests.conftest import SESSION_ID_A, SESSION_ID_B, _make_session_lines
 
 from cc_search_chats import __version__
-from cc_search_chats import cli as cli_module
 from cc_search_chats.cli import (
     _bounded_query_embedding,
     _contain_semantic_index,
@@ -345,18 +344,16 @@ def test_index_age_renders_minutes_hours_and_days(age_ms: int, rendered: str) ->
 
 def test_progress_heartbeat_tracks_the_active_phase() -> None:
     args = build_parser().parse_args(["list", "--json"])
-    progress = _ProgressStream(args)
     stderr = io.StringIO()
 
-    with (
-        redirect_stderr(stderr),
-        progress.heartbeat(
+    with redirect_stderr(stderr):
+        progress = _ProgressStream(args)
+        with progress.heartbeat(
             "scan",
             interval_seconds=0.01,
-        ) as update,
-    ):
-        update("model_load", 12, 3, 7)
-        Event().wait(timeout=0.04)
+        ) as update:
+            update("model_load", 12, 3, 7)
+            Event().wait(timeout=0.04)
 
     events = [json.loads(line) for line in stderr.getvalue().splitlines()]
     assert events
@@ -372,10 +369,10 @@ def test_human_progress_renders_one_live_rate_line(
     clock = iter((0.0, 1.0, 3.0, 4.0))
     monkeypatch.setattr("cc_search_chats.cli.monotonic", lambda: next(clock))
     args = build_parser().parse_args(["list", "--progress", "human"])
-    progress = _ProgressStream(args)
     stderr = io.StringIO()
 
     with redirect_stderr(stderr):
+        progress = _ProgressStream(args)
         progress.emit(
             "semantic_embed",
             "running",
@@ -399,33 +396,6 @@ def test_human_progress_renders_one_live_rate_line(
     assert "\rsemantic_embed: running 80/100 (80.0%) 30.0 units/s" in rendered
     assert rendered.count("\n") == 1
     assert rendered.endswith("\n")
-
-
-def test_embedding_rate_alarm_is_disarmed_during_first_five_seconds() -> None:
-    guard = cli_module._EmbeddingRateGuard()
-
-    guard.start(100.0)
-    guard.observe(1, 104.999)
-
-
-def test_embedding_rate_alarm_compares_sustained_rate_with_target() -> None:
-    guard = cli_module._EmbeddingRateGuard()
-    guard.start(100.0)
-
-    with pytest.raises(ModelUnavailable, match=r"11\.8 passages/s") as raised:
-        guard.observe(59, 105.0)
-
-    assert raised.value.code == "gpu_performance_unavailable"
-    assert raised.value.phase == "semantic_embed"
-    assert "desired 16.0 passages/s" in str(raised.value)
-    assert "minimum acceptable 12.0 passages/s" in str(raised.value)
-
-
-def test_embedding_rate_alarm_accepts_the_minimum_sustained_rate() -> None:
-    guard = cli_module._EmbeddingRateGuard()
-    guard.start(100.0)
-
-    guard.observe(60, 105.0)
 
 
 # ============================================================

@@ -10,7 +10,6 @@ Codex schema classification remains the responsibility of their pure adapters.
 import hashlib
 import json
 import os
-import subprocess
 from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
@@ -23,7 +22,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 _ARTIFACT_PROBE_LIMIT = 64 * 1024
-_GIT_ROUTING_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 DEFAULT_MAX_RECORDS_PER_BATCH = 1_024
 DEFAULT_MAX_BATCH_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_SINGLE_RECORD_BYTES = 16 * 1024 * 1024
@@ -43,7 +41,6 @@ class SourceDiagnosticCode(StrEnum):
     UNREADABLE_PATH = "unreadable_path"
     NON_NATIVE_AGY = "non_native_agy"
     NON_NATIVE_TRANSPORT_ARCHIVE = "non_native_transport_archive"
-    GIT_PROBE_FAILED = "git_probe_failed"
 
 
 class BoundedReadStopReason(StrEnum):
@@ -129,14 +126,6 @@ class DiscoveryResult:
     provider: Provider
     resolved_root: Path
     sources: tuple[DiscoveredSource, ...]
-    diagnostics: tuple[SourceDiagnostic, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class GitProbeResult:
-    """A resolved repository root or a named probe failure."""
-
-    repository_root: Path | None
     diagnostics: tuple[SourceDiagnostic, ...]
 
 
@@ -765,51 +754,3 @@ def discover_codex_sources(
 def inspect_non_native_artifact(path: Path) -> SourceDiagnostic | None:
     """Inspect a changed candidate for an explicit non-native signature."""
     return _positive_non_native_diagnostic(path)
-
-
-def probe_git_repository(
-    candidate: Path, *, timeout_seconds: float = 5.0
-) -> GitProbeResult:
-    """Resolve a Git repository without trusting ambient Git routing state."""
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be positive")
-    environment = os.environ.copy()
-    for variable in _GIT_ROUTING_VARIABLES:
-        environment.pop(variable, None)
-
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
-            shell=False,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return GitProbeResult(
-            repository_root=None,
-            diagnostics=(
-                _diagnostic(
-                    SourceDiagnosticCode.GIT_PROBE_FAILED,
-                    candidate,
-                    f"Git repository probe failed: {error}",
-                ),
-            ),
-        )
-
-    output = completed.stdout.strip()
-    if completed.returncode != 0 or not output:
-        detail = completed.stderr.strip() or "Git did not return a repository root"
-        return GitProbeResult(
-            repository_root=None,
-            diagnostics=(
-                _diagnostic(
-                    SourceDiagnosticCode.GIT_PROBE_FAILED,
-                    candidate,
-                    detail,
-                ),
-            ),
-        )
-    return GitProbeResult(repository_root=Path(output).resolve(), diagnostics=())

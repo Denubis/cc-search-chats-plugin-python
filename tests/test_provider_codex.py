@@ -8,7 +8,6 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-from cc_search_chats.core.canonicalization import CanonicalizationDiagnosticCode
 from cc_search_chats.core.identity import (
     ContentClass,
     LocatorKeyKind,
@@ -1007,7 +1006,6 @@ class TestCodexSchemaFamilies:
         assert suffix.session_kind is SessionKind.PRIMARY
         assert len(suffix.messages) == 1
         assert len(suffix.messages[0].identity.physical_aliases) == 2
-        assert suffix.canonicalization_diagnostics == ()
         assert suffix.next_state.trailing_candidate is None
 
     @pytest.mark.parametrize("response_first", [True, False])
@@ -1071,7 +1069,6 @@ class TestCodexSchemaFamilies:
             alias.record_ordinal
             for alias in suffix.messages[0].identity.physical_aliases
         ] == [1, 2]
-        assert suffix.canonicalization_diagnostics == ()
         assert suffix.next_state.trailing_candidate is None
 
     def test_compaction_clears_cross_append_pairing_carry(self) -> None:
@@ -1260,7 +1257,7 @@ class TestCodexSchemaFamilies:
         assert suffix.next_state.session_kind is SessionKind.PRIMARY
         assert suffix.next_state.trailing_candidate is None
 
-    def test_append_ambiguity_is_diagnostic_and_not_carried_forward(self) -> None:
+    def test_append_ambiguity_is_not_carried_forward(self) -> None:
         prefix = parse_codex_session(
             sequential_envelopes(
                 {
@@ -1310,9 +1307,6 @@ class TestCodexSchemaFamilies:
         )
 
         assert len(suffix.messages) == 2
-        assert CanonicalizationDiagnosticCode.MULTIPLE_COMPATIBLE_PARTNERS in {
-            diagnostic.code for diagnostic in suffix.canonicalization_diagnostics
-        }
         assert suffix.next_state.trailing_candidate is None
 
     def test_rejects_malformed_codex_continuation(self) -> None:
@@ -1474,9 +1468,6 @@ class TestCodexSchemaFamilies:
 
         assert result.session_kind is SessionKind.UNKNOWN
         assert result.messages[0].submitted_by is SubmittedBy.UNKNOWN
-        assert result.canonicalization_diagnostics[0].code is (
-            CanonicalizationDiagnosticCode.NO_COMPATIBLE_PARTNER
-        )
 
     def test_unallowlisted_legacy_subagent_cannot_mint_agent_provenance(
         self,

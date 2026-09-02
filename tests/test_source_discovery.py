@@ -3,7 +3,6 @@
 import hashlib
 import json
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,6 @@ from cc_search_chats.providers.source_discovery import (
     configured_source_roots,
     discover_claude_sources,
     discover_codex_sources,
-    probe_git_repository,
     read_bounded_jsonl,
 )
 
@@ -667,25 +665,3 @@ class TestConfiguredSourceRoots:
             (Provider.CLAUDE, claude),
             (Provider.CODEX, codex),
         )
-
-
-def test_git_probe_ignores_ambient_git_routing_variables(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    subprocess.run(
-        ["git", "init", "--quiet", str(repository)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    poison = tmp_path / "poison"
-    for variable in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
-        monkeypatch.setenv(variable, str(poison))
-
-    result = probe_git_repository(repository)
-
-    assert result.repository_root == repository.resolve()
-    assert result.diagnostics == ()
-    assert all(variable in os.environ for variable in ("GIT_DIR", "GIT_WORK_TREE"))

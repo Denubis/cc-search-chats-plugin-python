@@ -398,8 +398,9 @@ def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
     vector = [0.0] * 1024
     vector[0] = 1.0
 
-    def query_embedding(_query, *, timeout_seconds, progress):
+    def query_embedding(_query, *, timeout_seconds, progress, quiet):
         assert timeout_seconds > 0
+        assert quiet is False
         progress("model_load", "complete")
         return vector
 
@@ -584,8 +585,9 @@ def test_deadline_after_retrieval_returns_hits_as_partial(
         monkeypatch.setattr("cc_search_chats.cli._SEARCH_DEADLINE_SECONDS", 0.5)
         monkeypatch.setattr("cc_search_chats.cli._SEARCH_RENDER_RESERVE_SECONDS", 0.05)
 
-        def outlive_budget(_query, *, timeout_seconds, progress):
+        def outlive_budget(_query, *, timeout_seconds, progress, quiet):
             assert timeout_seconds > 0
+            assert quiet is True
             progress("model_load", "running")
             Event().wait(timeout_seconds + 0.02)
             raise TimeoutError("fixture embedding child exceeded its deadline")

@@ -585,8 +585,9 @@ def test_postgresql_cli_journey_with_events(
         embedded_texts.extend(texts)
         return [vector for _ in texts]
 
-    def bounded_query_embedding(_query, *, timeout_seconds, progress):
+    def bounded_query_embedding(_query, *, timeout_seconds, progress, quiet):
         assert 0 < timeout_seconds <= 5
+        assert quiet is True
         if progress is not None:
             progress("model_preflight", "running")
             progress("model_preflight", "complete")

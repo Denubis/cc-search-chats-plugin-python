@@ -1,12 +1,98 @@
 """Semantic runtime failure remains explicit and offline."""
 
+import io
 import subprocess
+import sys
+from contextlib import redirect_stderr
 from pathlib import Path
 
 import pytest
 
 from cc_search_chats.semantic import ModelUnavailable, embed_passages, embed_query
 from cc_search_chats.semantic import model as semantic_model
+
+
+@pytest.mark.parametrize(
+    ("directory_name", "expected"),
+    [
+        (semantic_model.MODEL_REVISION, semantic_model.MODEL_REVISION),
+        ("local-model-copy", None),
+    ],
+)
+def test_local_model_revision_reads_only_configured_commit_named_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    directory_name: str,
+    expected: str | None,
+) -> None:
+    snapshot = tmp_path / directory_name
+    snapshot.mkdir()
+    monkeypatch.setenv("CC_SEARCH_MODEL_PATH", str(snapshot))
+
+    assert semantic_model.local_model_revision() == expected
+
+
+def test_ndjson_model_output_scope_disables_library_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Logging:
+        @staticmethod
+        def disable_progress_bar() -> None:
+            calls.append("transformers:disable_progress")
+
+        @staticmethod
+        def set_verbosity_error() -> None:
+            calls.append("transformers:error_only")
+
+    class HubLogging:
+        @staticmethod
+        def set_verbosity_error() -> None:
+            calls.append("hub:error_only")
+
+    class HubUtils:
+        @staticmethod
+        def disable_progress_bars() -> None:
+            calls.append("hub:disable_progress")
+
+    class TransformersUtils:
+        logging = Logging()
+
+    class Transformers:
+        utils = TransformersUtils()
+
+    class Hub:
+        logging = HubLogging()
+        utils = HubUtils()
+
+    modules = {"transformers": Transformers(), "huggingface_hub": Hub()}
+    monkeypatch.setattr(semantic_model, "import_module", modules.__getitem__)
+    stderr = io.StringIO()
+
+    with redirect_stderr(stderr), semantic_model.model_output_scope(quiet=True):
+        sys.stderr.write("Loading weights: 0%|\n")
+
+    assert stderr.getvalue() == ""
+    assert calls == [
+        "transformers:disable_progress",
+        "transformers:error_only",
+        "hub:disable_progress",
+        "hub:error_only",
+    ]
+
+
+def test_ndjson_model_output_scope_propagates_real_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(semantic_model, "_silence_model_libraries", lambda: None)
+
+    with (
+        pytest.raises(RuntimeError, match="model load failed"),
+        semantic_model.model_output_scope(quiet=True),
+    ):
+        raise RuntimeError("model load failed")
 
 
 def test_pooled_embeddings_are_normalized_in_float32() -> None:

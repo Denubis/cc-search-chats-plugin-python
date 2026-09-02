@@ -14,6 +14,12 @@
   the single intentional joint literal-and-semantic builder.
 - PostgreSQL migration 9 removes the retired automatic-refresh state table.
 - The obsolete `cc-search-chats-refresh.service` unit is no longer packaged.
+- Semantic indexing no longer aborts on the misleading whole-pipeline embedding
+  rate guard, and unused message-attribution Git probing has been removed.
+- Semantic index and search preflight now compare the stored embedding profile
+  with the configured local snapshot revision and fail closed on a mismatch.
+- Machine-readable model work suppresses third-party progress and warning noise,
+  preserving schema-v4 NDJSON stderr output.
 
 ## cc-search-chats 2.0.5
 

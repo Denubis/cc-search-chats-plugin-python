@@ -49,6 +49,8 @@ from cc_search_chats.semantic import (
     chunk_passages,
     embed_passages,
     embed_query,
+    local_model_revision,
+    model_output_scope,
 )
 from cc_search_chats.storage.index import (
     ProjectRebuildError,
@@ -106,7 +108,11 @@ from cc_search_chats.storage.postgresql.migrations import (
     MaintenanceRequired,
     require_current_schema,
 )
-from cc_search_chats.storage.postgresql.semantic import fuse_hybrid, semantic_search
+from cc_search_chats.storage.postgresql.semantic import (
+    fuse_hybrid,
+    semantic_search,
+    verify_model_revision,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -126,9 +132,6 @@ _SEMANTIC_MODE_HELP = (
     "model-ranked search: hybrid fusion of full-text and embedding candidates by "
     "reciprocal rank; loads the embedding model"
 )
-_EMBEDDING_RATE_WINDOW_SECONDS = 5.0
-_EMBEDDING_DESIRED_PASSAGES_PER_SECOND = 16.0
-_EMBEDDING_MINIMUM_RATE_RATIO = 0.75
 
 
 class SearchDeadlineExceeded(TimeoutError):
@@ -147,40 +150,6 @@ class _ArgumentParser(argparse.ArgumentParser):
         super().error(message)
 
 
-class _EmbeddingRateGuard:
-    """Reject indexing that cannot sustain the benchmarked passage rate."""
-
-    def __init__(self) -> None:
-        self._window_started_at: float | None = None
-        self._completed_passages = 0
-
-    def start(self, now: float) -> None:
-        self._window_started_at = now
-        self._completed_passages = 0
-
-    def observe(self, completed_passages: int, now: float) -> None:
-        if self._window_started_at is None:
-            raise RuntimeError("embedding rate guard was not started")
-        self._completed_passages += completed_passages
-        elapsed = now - self._window_started_at
-        if elapsed < _EMBEDDING_RATE_WINDOW_SECONDS:
-            return
-        current_rate = self._completed_passages / elapsed
-        minimum_rate = (
-            _EMBEDDING_DESIRED_PASSAGES_PER_SECOND * _EMBEDDING_MINIMUM_RATE_RATIO
-        )
-        if current_rate < minimum_rate:
-            raise ModelUnavailable(
-                f"semantic indexing sustained {current_rate:.1f} passages/s "
-                f"for {elapsed:.1f}s; desired "
-                f"{_EMBEDDING_DESIRED_PASSAGES_PER_SECOND:.1f} passages/s; "
-                f"minimum acceptable {minimum_rate:.1f} passages/s",
-                code="gpu_performance_unavailable",
-                phase="semantic_embed",
-            )
-        self.start(now)
-
-
 def _remaining_search_seconds(args: argparse.Namespace) -> float:
     return args.answer_deadline - monotonic()
 
@@ -188,12 +157,13 @@ def _remaining_search_seconds(args: argparse.Namespace) -> float:
 def _query_embedding_child(pipe: Connection) -> None:
     """Run one query embedding in an isolated process without argv disclosure."""
     try:
-        query = pipe.recv()
+        query, quiet = pipe.recv()
 
         def progress(phase: str, state: str) -> None:
             pipe.send(("progress", (phase, state)))
 
-        pipe.send(("result", embed_query(query, progress=progress)))
+        with model_output_scope(quiet=quiet):
+            pipe.send(("result", embed_query(query, progress=progress)))
     except ModelUnavailable as error:
         pipe.send(
             (
@@ -219,6 +189,7 @@ def _bounded_query_embedding(
     *,
     timeout_seconds: float,
     progress: Callable[[str, str], None],
+    quiet: bool = False,
 ) -> Sequence[float]:
     """Return one embedding or stop and reap its child at the deadline."""
     if timeout_seconds <= 0:
@@ -234,7 +205,7 @@ def _bounded_query_embedding(
     child.close()
     deadline = monotonic() + timeout_seconds
     try:
-        parent.send(query)
+        parent.send((query, quiet))
         while True:
             remaining = deadline - monotonic()
             if remaining <= 0 or not parent.poll(remaining):
@@ -275,6 +246,7 @@ class _ProgressStream:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self._started = getattr(args, "request_started", monotonic())
+        self._stderr = sys.stderr
         self._sequence = 0
         self._terminal = False
         self._emit_lock = Lock()
@@ -346,14 +318,14 @@ class _ProgressStream:
             if self._ndjson:
                 print(
                     json.dumps(value, ensure_ascii=False, sort_keys=True),
-                    file=sys.stderr,
+                    file=self._stderr,
                 )
             elif completed_units is not None and total_units is not None:
                 if (
                     self._human_active_phase is not None
                     and self._human_active_phase != phase
                 ):
-                    print(file=sys.stderr)
+                    print(file=self._stderr)
                     self._human_phase_samples.pop(self._human_active_phase, None)
                     self._human_active_phase = None
                 started_at, started_units = self._human_phase_samples.setdefault(
@@ -378,7 +350,7 @@ class _ProgressStream:
                     f"\x1b[2K\r{phase}: {state} {completed_units}/{total_units} "
                     f"({percent:.1f}%){rate_text}{eta_text}",
                     end=end,
-                    file=sys.stderr,
+                    file=self._stderr,
                     flush=True,
                 )
                 self._human_active_phase = phase if state == "running" else None
@@ -386,10 +358,10 @@ class _ProgressStream:
                     self._human_phase_samples.pop(phase, None)
             else:
                 if self._human_active_phase is not None:
-                    print(file=sys.stderr)
+                    print(file=self._stderr)
                     self._human_phase_samples.pop(self._human_active_phase, None)
                     self._human_active_phase = None
-                print(f"{phase}: {state}", file=sys.stderr)
+                print(f"{phase}: {state}", file=self._stderr)
 
     @contextmanager
     def heartbeat(
@@ -991,12 +963,6 @@ def _applied_schema_version(connection: psycopg.Connection) -> int:
     return int(version)
 
 
-def _eta(seconds: float) -> str:
-    minutes, seconds = divmod(max(0, round(seconds)), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{seconds:02d}s"
-
-
 def _index_timestamp(value: object) -> str:
     parsed = datetime.fromisoformat(str(value))
     offset = parsed.strftime("%z")
@@ -1400,6 +1366,11 @@ def _handle_postgres(
                 return 0
 
             acquire_index_session(connection)
+            verify_model_revision(
+                connection,
+                local_model_revision(),
+                adopt_unknown=True,
+            )
 
             scan_complete = False
             parse_seen = False
@@ -1429,25 +1400,29 @@ def _handle_postgres(
                     owner=event.owner_pid,
                 )
 
-            embedding_rate = _EmbeddingRateGuard()
             report_model_progress = True
 
             def model_progress(phase: str, state: str) -> None:
                 if refresh_heartbeat is not None:
                     refresh_heartbeat(phase, None, None, None)
                 progress_stream.emit(phase, state)
-                if phase == "model_load" and state == "complete":
-                    embedding_rate.start(monotonic())
-                    if refresh_heartbeat is not None:
-                        refresh_heartbeat("semantic_embed", None, None, None)
+                if (
+                    phase == "model_load"
+                    and state == "complete"
+                    and refresh_heartbeat is not None
+                ):
+                    refresh_heartbeat("semantic_embed", None, None, None)
 
             def passage_embed(texts):
                 nonlocal report_model_progress
                 model_callback = model_progress if report_model_progress else None
                 report_model_progress = False
-                vectors = embed_passages(texts, progress=model_callback)
-                embedding_rate.observe(len(texts), monotonic())
-                return vectors
+                with model_output_scope(quiet=progress_stream.ndjson):
+                    return embed_passages(texts, progress=model_callback)
+
+            def passage_chunks(texts):
+                with model_output_scope(quiet=progress_stream.ndjson):
+                    return chunk_passages(texts)
 
             def embedding_progress(completed: int, total: int) -> None:
                 if refresh_heartbeat is not None:
@@ -1471,7 +1446,7 @@ def _handle_postgres(
                 result = index_corpus(
                     connection,
                     passage_embed,
-                    chunker=chunk_passages,
+                    chunker=passage_chunks,
                     source_roots=configured_source_roots(),
                     progress=progress,
                     embedding_progress=embedding_progress,
@@ -1791,6 +1766,19 @@ def _handle_postgres(
         if not args.literal and not args.exhaustive:
             assert answer_deadline is not None  # noqa: S101  # ranked-search invariant
 
+            revision_warning = verify_model_revision(
+                connection,
+                local_model_revision(),
+                adopt_unknown=False,
+            )
+            if revision_warning is not None:
+                search_warnings.append(
+                    {
+                        "code": "model_revision_unverified",
+                        "detail": revision_warning,
+                    }
+                )
+
             def search_model_progress(phase: str, state: str) -> None:
                 progress_stream.emit(phase, state)
 
@@ -1801,6 +1789,7 @@ def _handle_postgres(
                     args.query,
                     timeout_seconds=semantic_budget,
                     progress=search_model_progress,
+                    quiet=progress_stream.ndjson,
                 )
                 progress_stream.emit("query_embed", "complete")
                 semantic_hits = semantic_search(

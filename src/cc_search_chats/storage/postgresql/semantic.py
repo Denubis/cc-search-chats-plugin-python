@@ -3,6 +3,7 @@
 import hashlib
 import math
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from fractions import Fraction
 from time import monotonic
@@ -25,6 +26,7 @@ _PROFILE_ID = "nemotron-3-embed-8b-bf16:chunks-v1"
 _EMBEDDABLE_PROSE = "content_class = 'prose' AND prose_content ~ '[^[:space:]]'"
 _RUN_HEARTBEAT_SECONDS = 5.0
 _PROGRESS_CHECKPOINT_SECONDS = 1.0
+_MODEL_REVISION_RUNBOOK = "docs/runbooks/postgresql-index-maintenance.md"
 type Chunker = Callable[[Sequence[str]], tuple[tuple[SemanticChunk, ...], ...]]
 
 
@@ -47,6 +49,55 @@ class CandidateSemanticBuild:
 
     semantic_build: int
     embedded_count: int
+
+
+def _model_revision_mismatch(stored: str, observed: str | None) -> ModelUnavailable:
+    observed_value = observed if observed is not None else "unavailable"
+    return ModelUnavailable(
+        f"stored model revision {stored!r} does not match local model revision "
+        f"{observed_value!r}; a full semantic rebuild under the new revision is "
+        f"required; see {_MODEL_REVISION_RUNBOOK}",
+        code="model_revision_mismatch",
+        phase="model_preflight",
+    )
+
+
+def verify_model_revision(
+    connection: psycopg.Connection,
+    observed: str | None,
+    *,
+    adopt_unknown: bool,
+) -> str | None:
+    """Adopt an index revision or return a read-only search warning detail."""
+    transaction = connection.transaction() if adopt_unknown else nullcontext()
+    with transaction:
+        statement = (
+            "SELECT model_revision FROM cc_search_chats.embedding_profile "
+            "WHERE profile_id = %s FOR UPDATE"
+            if adopt_unknown
+            else "SELECT model_revision FROM cc_search_chats.embedding_profile "
+            "WHERE profile_id = %s"
+        )
+        row = next(
+            connection.execute(statement, (_PROFILE_ID,)),
+            None,
+        )
+        if row is None:
+            raise RuntimeError(f"embedding profile {_PROFILE_ID!r} is unavailable")
+        stored = str(row[0])
+        if stored == "unknown":
+            if adopt_unknown and observed is not None:
+                connection.execute(
+                    "UPDATE cc_search_chats.embedding_profile "
+                    "SET model_revision = %s WHERE profile_id = %s",
+                    (observed, _PROFILE_ID),
+                )
+                return None
+            detail = observed if observed is not None else "no local revision available"
+            return f"{detail}; run cc-search-chats index to record it"
+        if stored != observed:
+            raise _model_revision_mismatch(stored, observed)
+        return None
 
 
 def _vector(value: Sequence[float]) -> str:

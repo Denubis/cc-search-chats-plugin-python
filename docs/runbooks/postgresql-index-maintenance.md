@@ -126,6 +126,19 @@ work is unavailable; status must not claim the failed candidate is current.
 - **Database/storage unavailable:** restore the configured boundary. Do not use
   the legacy local backend or root filesystem as fallback.
 
+### Model revision mismatch
+
+The observed revision is the resolved configured model directory's leaf name,
+accepted only when it is a 40-character lowercase hexadecimal commit hash. Index
+records that revision only when the stored value is literally `unknown`; semantic
+search warns without writing in the same case. Any other stored value, including
+the schema's seeded revision, is compared as authoritative profile state.
+
+A mismatch requires a full semantic rebuild under a new model profile, but the
+current CLI has no supported path to perform that rebuild. Do not edit
+`embedding_profile` by hand; schedule and review the rebuild mechanism as a
+separate change before changing the pinned model.
+
 ## 6. Legacy prune gate
 
 Legacy relations are quarantine, not query state. There is intentionally no

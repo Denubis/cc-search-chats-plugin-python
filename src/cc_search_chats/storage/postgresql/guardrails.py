@@ -164,33 +164,6 @@ def queued_read_operation[**P, R](
     return guarded
 
 
-@contextmanager
-def queued_index(connection: psycopg.Connection) -> Iterator[None]:
-    """Serialize a refresh transaction across every client of the database."""
-    with connection.transaction():
-        connection.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-            (INDEX_QUEUE_LOCK,),
-        )
-        connection.execute(
-            "SELECT set_config('lock_timeout', %s, true)", (_LOCK_TIMEOUT,)
-        )
-        yield
-
-
-def queued_index_operation[**P, R](
-    operation: Callable[Concatenate[psycopg.Connection, P], R],
-) -> Callable[Concatenate[psycopg.Connection, P], R]:
-    """Apply the database index queue to one complete refresh operation."""
-
-    @wraps(operation)
-    def guarded(connection: psycopg.Connection, *args: P.args, **kwargs: P.kwargs) -> R:
-        with queued_index(connection):
-            return operation(connection, *args, **kwargs)
-
-    return guarded
-
-
 def acquire_index_session(connection: psycopg.Connection) -> None:
     """Hold the index queue until the caller-owned connection closes."""
     connection.execute(
