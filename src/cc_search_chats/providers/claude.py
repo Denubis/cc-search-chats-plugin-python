@@ -468,7 +468,26 @@ _CLAUDE_METADATA_KEYSETS = {
     },
     "queue-operation": {
         frozenset({"type", "content", "operation", "sessionId", "timestamp"}),
+        frozenset({"type", "content", "operation", "reason", "sessionId", "timestamp"}),
         frozenset({"type", "operation", "sessionId", "timestamp"}),
+    },
+    "cost-state": {
+        frozenset(
+            {
+                "type",
+                "hasUnknownModelCost",
+                "modelUsage",
+                "sessionId",
+                "startTime",
+                "totalAPIDuration",
+                "totalAPIDurationWithoutRetries",
+                "totalCostUSD",
+                "totalDuration",
+                "totalLinesAdded",
+                "totalLinesRemoved",
+                "totalToolDuration",
+            }
+        )
     },
     "started": {frozenset({"type", "agentId", "key"})},
     "ai-title": {frozenset({"type", "aiTitle", "sessionId"})},

@@ -130,6 +130,18 @@ _LIFECYCLE_EVENT_KEYSETS = {
                 "type",
                 "completed_at",
                 "duration_ms",
+                "error",
+                "last_agent_message",
+                "started_at",
+                "time_to_first_token_ms",
+                "turn_id",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "completed_at",
+                "duration_ms",
                 "last_agent_message",
                 "started_at",
                 "time_to_first_token_ms",

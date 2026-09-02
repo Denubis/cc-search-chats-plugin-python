@@ -85,17 +85,14 @@ _TRAVERSAL_FAILURES = {
     SourceDiagnosticCode.UNREADABLE_PATH,
 }
 _UNSUPPORTED_CLAUDE_DIAGNOSTICS = {
-    ClaudeDiagnosticCode.MALFORMED_JSON,
     ClaudeDiagnosticCode.MISSING_MESSAGE,
     ClaudeDiagnosticCode.NON_OBJECT_MESSAGE,
     ClaudeDiagnosticCode.UNKNOWN_ROLE,
     ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
     ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD,
     ClaudeDiagnosticCode.MISSING_MESSAGE_UUID,
-    ClaudeDiagnosticCode.INVALID_UNICODE,
 }
 _UNSUPPORTED_CODEX_DIAGNOSTICS = {
-    CodexDiagnosticCode.MALFORMED_JSON,
     CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE,
     CodexDiagnosticCode.UNKNOWN_ROLE,
     CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
@@ -103,8 +100,15 @@ _UNSUPPORTED_CODEX_DIAGNOSTICS = {
     CodexDiagnosticCode.UNKNOWN_EVENT,
     CodexDiagnosticCode.UNKNOWN_OUTER_TYPE,
     CodexDiagnosticCode.INVALID_PAYLOAD,
-    CodexDiagnosticCode.INVALID_UNICODE,
     CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
+}
+_SKIPPABLE_CLAUDE_DIAGNOSTICS = {
+    ClaudeDiagnosticCode.MALFORMED_JSON,
+    ClaudeDiagnosticCode.INVALID_UNICODE,
+}
+_SKIPPABLE_CODEX_DIAGNOSTICS = {
+    CodexDiagnosticCode.MALFORMED_JSON,
+    CodexDiagnosticCode.INVALID_UNICODE,
 }
 
 
@@ -181,6 +185,7 @@ class _Checkpoint:
     parser_state_version: int
     parser_state: object
     source_status: str
+    skipped_record_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +210,7 @@ class _SourcePlan:
     next_record_ordinal: int
     next_source_line: int
     prior_state: ClaudeParserState | CodexParserState | None
+    prior_skipped_record_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,6 +604,7 @@ def _load_checkpoints(
             parser_state_version=state_version,
             parser_state=state,
             source_status=status,
+            skipped_record_count=skipped_record_count,
         )
         for (
             source_root,
@@ -612,12 +619,13 @@ def _load_checkpoints(
             state_version,
             state,
             status,
+            skipped_record_count,
         ) in connection.execute(
             """
             SELECT source_root_id, source_file_relative, file_device, file_inode,
                    observed_size, observed_mtime_ns, complete_byte_offset,
                    next_record_ordinal, next_source_line, parser_state_version,
-                   parser_state, source_status
+                   parser_state, source_status, skipped_record_count
             FROM cc_search_chats.source_file_current
             """
         )
@@ -761,7 +769,7 @@ def _plan_source(
 ) -> _SourcePlan | None:
     version = _PARSER_STATE_VERSIONS[observed.root.provider]
     if checkpoint is None:
-        return _SourcePlan(observed, "replace", 0, 0, 1, None)
+        return _SourcePlan(observed, "replace", 0, 0, 1, None, 0)
     same_identity = (
         observed.file_device == checkpoint.file_device
         and observed.file_inode == checkpoint.file_inode
@@ -793,8 +801,9 @@ def _plan_source(
                 next_record_ordinal=checkpoint.next_record_ordinal,
                 next_source_line=checkpoint.next_source_line,
                 prior_state=prior_state,
+                prior_skipped_record_count=checkpoint.skipped_record_count,
             )
-    return _SourcePlan(observed, "replace", 0, 0, 1, None)
+    return _SourcePlan(observed, "replace", 0, 0, 1, None, 0)
 
 
 def _failed_observation_matches(
@@ -889,6 +898,7 @@ def _create_stage_tables(connection: psycopg.Connection) -> None:
             parser_state jsonb NOT NULL,
             source_status text NOT NULL,
             pending_bytes bigint NOT NULL,
+            skipped_record_count bigint NOT NULL,
             advanced boolean NOT NULL,
             PRIMARY KEY (source_root_id, source_file_relative)
         ) ON COMMIT PRESERVE ROWS
@@ -1075,6 +1085,97 @@ def _parse_batch(
     return parsed
 
 
+def _skipped_record_diagnostics(
+    plan: _SourcePlan,
+    parsed: ClaudeParseResult | CodexParseResult,
+    source_diagnostics: tuple[SourceDiagnostic, ...],
+) -> tuple[dict[str, object], ...]:
+    """Describe each intentionally omitted physical record exactly once."""
+    provider = plan.observed.root.provider
+    candidates: list[tuple[str, str, int | None, int | None, int | None]] = []
+    if provider is Provider.CLAUDE:
+        if not isinstance(parsed, ClaudeParseResult):
+            raise _SourceRefreshError("Claude source produced a non-Claude result")
+        candidates.extend(
+            (
+                diagnostic.code.value,
+                diagnostic.detail,
+                diagnostic.record_ordinal,
+                diagnostic.source_line,
+                diagnostic.source_byte_offset,
+            )
+            for diagnostic in parsed.diagnostics
+            if diagnostic.code in _SKIPPABLE_CLAUDE_DIAGNOSTICS
+        )
+    else:
+        if not isinstance(parsed, CodexParseResult):
+            raise _SourceRefreshError("Codex source produced a non-Codex result")
+        candidates.extend(
+            (
+                diagnostic.code.value,
+                diagnostic.detail,
+                diagnostic.record_ordinal,
+                diagnostic.source_line,
+                diagnostic.source_byte_offset,
+            )
+            for diagnostic in parsed.diagnostics
+            if diagnostic.code in _SKIPPABLE_CODEX_DIAGNOSTICS
+        )
+    candidates.extend(
+        (
+            diagnostic.code.value,
+            diagnostic.detail,
+            diagnostic.record_ordinal,
+            diagnostic.source_line,
+            diagnostic.source_byte_offset,
+        )
+        for diagnostic in source_diagnostics
+        if diagnostic.code is SourceDiagnosticCode.OVERSIZED_RECORD
+    )
+
+    by_ordinal: dict[int, dict[str, object]] = {}
+    for reason, detail, record_ordinal, source_line, source_byte_offset in candidates:
+        if record_ordinal is None or source_line is None or source_byte_offset is None:
+            raise _SourceRefreshError(
+                f"skipped record {reason} lacks complete source coordinates"
+            )
+        existing = by_ordinal.get(record_ordinal)
+        if existing is not None:
+            if existing["reason"] != reason:
+                raise _SourceRefreshError(
+                    "one skipped record has conflicting diagnostic reasons"
+                )
+            continue
+        by_ordinal[record_ordinal] = {
+            "code": "record_skipped",
+            "provider": provider.value,
+            "source_root_id": plan.observed.root.source_root_id,
+            "source_file_relative": (
+                plan.observed.source.source_file_relative.as_posix()
+            ),
+            "record_ordinal": record_ordinal,
+            "source_line": source_line,
+            "source_byte_offset": source_byte_offset,
+            "reason": reason,
+            "detail": detail,
+        }
+    return tuple(by_ordinal[ordinal] for ordinal in sorted(by_ordinal))
+
+
+def _messages_without_skipped_records(
+    messages: tuple[NativeMessage, ...], skipped_ordinals: frozenset[int]
+) -> tuple[NativeMessage, ...]:
+    """Suppress every projection whose physical record was skipped."""
+    return tuple(
+        message
+        for message in messages
+        if all(
+            alias.record_ordinal not in skipped_ordinals
+            for alias in message.identity.physical_aliases
+        )
+    )
+
+
 def _stage_source_checkpoint(
     connection: psycopg.Connection,
     plan: _SourcePlan,
@@ -1085,6 +1186,7 @@ def _stage_source_checkpoint(
     parser_state: object,
     source_status: str,
     final_size: int,
+    skipped_record_count: int,
 ) -> tuple[bool, int]:
     observed = plan.observed
     advanced = final_size > observed.size
@@ -1096,9 +1198,10 @@ def _stage_source_checkpoint(
             file_device, file_inode, observed_size, observed_mtime_ns,
             complete_byte_offset, next_record_ordinal, next_source_line,
             parser_state_version, parser_state, source_status, pending_bytes,
-            advanced
+            skipped_record_count, advanced
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s
         )
         ON CONFLICT (source_root_id, source_file_relative) DO UPDATE SET
             disposition = EXCLUDED.disposition,
@@ -1113,6 +1216,7 @@ def _stage_source_checkpoint(
             parser_state = EXCLUDED.parser_state,
             source_status = EXCLUDED.source_status,
             pending_bytes = EXCLUDED.pending_bytes,
+            skipped_record_count = EXCLUDED.skipped_record_count,
             advanced = EXCLUDED.advanced
         """,
         (
@@ -1130,6 +1234,7 @@ def _stage_source_checkpoint(
             Jsonb(parser_state),
             source_status,
             pending_bytes,
+            skipped_record_count,
             advanced,
         ),
     )
@@ -1138,7 +1243,7 @@ def _stage_source_checkpoint(
 
 def _parse_and_stage_source(
     connection: psycopg.Connection, plan: _SourcePlan
-) -> tuple[bool, int, int]:
+) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
     observed = plan.observed
     artifact = inspect_non_native_artifact(observed.source.path)
     if artifact is not None:
@@ -1171,13 +1276,15 @@ def _parse_and_stage_source(
             },
             source_status="excluded",
             final_size=observed.size,
+            skipped_record_count=0,
         )
-        return advanced, pending, 0
+        return advanced, pending, 0, ()
 
     offset = plan.start_byte_offset
     ordinal = plan.next_record_ordinal
     source_line = plan.next_source_line
     state: ClaudeParserState | CodexParserState | None = plan.prior_state
+    skipped_diagnostics: list[dict[str, object]] = []
     if observed.size == offset and state is None:
         state = (
             ClaudeParserState()
@@ -1223,7 +1330,21 @@ def _parse_and_stage_source(
                 batch.next_source_byte_offset - plan.start_byte_offset,
             )
             raise
-        _stage_messages(connection, plan, parsed.messages)
+        batch_skips = _skipped_record_diagnostics(
+            plan,
+            parsed,
+            batch.diagnostics,
+        )
+        skipped_diagnostics.extend(batch_skips)
+        skipped_ordinals = frozenset(
+            _required_integer(diagnostic, "record_ordinal")
+            for diagnostic in batch_skips
+        )
+        _stage_messages(
+            connection,
+            plan,
+            _messages_without_skipped_records(parsed.messages, skipped_ordinals),
+        )
         state = parsed.next_state
         next_offset = batch.next_source_byte_offset
         ordinal = batch.next_record_ordinal
@@ -1261,8 +1382,16 @@ def _parse_and_stage_source(
         parser_state=_serialize_parser_state(observed.root.provider, state),
         source_status="indexed",
         final_size=final.st_size,
+        skipped_record_count=(
+            plan.prior_skipped_record_count + len(skipped_diagnostics)
+        ),
     )
-    return advanced, pending, max(0, offset - plan.start_byte_offset)
+    return (
+        advanced,
+        pending,
+        max(0, offset - plan.start_byte_offset),
+        tuple(skipped_diagnostics),
+    )
 
 
 def _clear_staged_source(connection: psycopg.Connection, plan: _SourcePlan) -> None:
@@ -1697,13 +1826,14 @@ def _publish_coherent_candidate(
                 source_root_id, source_file_relative, file_device, file_inode,
                 observed_size, observed_mtime_ns, complete_byte_offset,
                 next_record_ordinal, next_source_line, parser_state_version,
-                parser_state, source_status, pending_bytes,
+                parser_state, source_status, pending_bytes, skipped_record_count,
                 updated_corpus_generation
             )
             SELECT source_root_id, source_file_relative, file_device, file_inode,
                    observed_size, observed_mtime_ns, complete_byte_offset,
                    next_record_ordinal, next_source_line, parser_state_version,
-                   parser_state, source_status, pending_bytes, %s
+                   parser_state, source_status, pending_bytes,
+                   skipped_record_count, %s
             FROM pg_temp.refresh_stage_source
             ON CONFLICT (source_root_id, source_file_relative) DO UPDATE SET
                 file_device = EXCLUDED.file_device,
@@ -1717,6 +1847,7 @@ def _publish_coherent_candidate(
                 parser_state = EXCLUDED.parser_state,
                 source_status = EXCLUDED.source_status,
                 pending_bytes = EXCLUDED.pending_bytes,
+                skipped_record_count = EXCLUDED.skipped_record_count,
                 updated_corpus_generation =
                     EXCLUDED.updated_corpus_generation
             """,
@@ -2400,12 +2531,14 @@ def _publish_staged_refresh(
                 source_root_id, source_file_relative, file_device, file_inode,
                 observed_size, observed_mtime_ns, complete_byte_offset,
                 next_record_ordinal, next_source_line, parser_state_version,
-                parser_state, source_status, pending_bytes, updated_revision_id
+                parser_state, source_status, pending_bytes, skipped_record_count,
+                updated_revision_id
             )
             SELECT source_root_id, source_file_relative, file_device, file_inode,
                    observed_size, observed_mtime_ns, complete_byte_offset,
                    next_record_ordinal, next_source_line, parser_state_version,
-                   parser_state, source_status, pending_bytes, %s
+                   parser_state, source_status, pending_bytes,
+                   skipped_record_count, %s
             FROM pg_temp.refresh_stage_source
             ON CONFLICT (source_root_id, source_file_relative) DO UPDATE SET
                 file_device = EXCLUDED.file_device,
@@ -2419,6 +2552,7 @@ def _publish_staged_refresh(
                 parser_state = EXCLUDED.parser_state,
                 source_status = EXCLUDED.source_status,
                 pending_bytes = EXCLUDED.pending_bytes,
+                skipped_record_count = EXCLUDED.skipped_record_count,
                 updated_revision_id = EXCLUDED.updated_revision_id
             """,
             (revision_id,),
@@ -2709,9 +2843,12 @@ def refresh_native_sources(
             )
             for plan in plans:
                 try:
-                    advanced, source_pending, source_attempted_bytes = (
-                        _parse_and_stage_source(connection, plan)
-                    )
+                    (
+                        advanced,
+                        source_pending,
+                        source_attempted_bytes,
+                        source_skipped_diagnostics,
+                    ) = _parse_and_stage_source(connection, plan)
                 except _SourceRefreshError as error:
                     _clear_staged_source(connection, plan)
                     attempted_content_bytes += error.attempted_content_bytes
@@ -2748,6 +2885,7 @@ def refresh_native_sources(
                     attempted_content_bytes += source_attempted_bytes
                     advanced_source_count += int(advanced)
                     pending_bytes += source_pending
+                    diagnostics.extend(source_skipped_diagnostics)
                 completed += 1
                 _update_run_progress(
                     connection,

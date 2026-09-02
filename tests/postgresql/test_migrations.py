@@ -291,6 +291,7 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
         (5, "semantic_chunk_schema.sql", 64),
         (6, "incremental_refresh_schema.sql", 64),
         (7, "coherent_corpus_schema.sql", 64),
+        (8, "skipped_record_coverage_schema.sql", 64),
     )
     assert next(
         postgres_connection.execute(
@@ -317,7 +318,7 @@ def test_pending_migrations_is_read_only_and_reports_the_packaged_suffix(
     assert tuple(
         migration.version
         for migration in migrations.pending_migrations(postgres_connection)
-    ) == (1, 2, 3, 4, 5, 6, 7)
+    ) == (1, 2, 3, 4, 5, 6, 7, 8)
     assert (
         next(postgres_connection.execute("SELECT to_regnamespace('cc_search_chats')"))[
             0
@@ -352,7 +353,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
     monkeypatch.setattr(
         migrations,
         "_MIGRATIONS",
-        (*migrations._MIGRATIONS, migrations.Migration(8, "missing-migration.sql")),
+        (*migrations._MIGRATIONS, migrations.Migration(9, "missing-migration.sql")),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -362,7 +363,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
         postgres_connection.execute(
             "SELECT version FROM cc_search_chats.schema_migration ORDER BY version"
         )
-    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,))
+    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,))
 
 
 def _upgrade_seeded_v6_schema(
@@ -427,6 +428,7 @@ def _upgrade_seeded_v6_schema(
         5,
         6,
         7,
+        8,
     )
     migrations.apply_migrations(connection)
 

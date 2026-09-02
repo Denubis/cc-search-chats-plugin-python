@@ -24,6 +24,7 @@ _GIT_ROUTING_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 DEFAULT_MAX_RECORDS_PER_BATCH = 1_024
 DEFAULT_MAX_BATCH_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_SINGLE_RECORD_BYTES = 16 * 1024 * 1024
+_OVERSIZED_STREAM_CHUNK_BYTES = 64 * 1024
 
 
 class SourceDiagnosticCode(StrEnum):
@@ -340,6 +341,7 @@ def read_bounded_jsonl(
     offset = start_byte_offset
     ordinal = next_record_ordinal
     source_line = next_source_line
+    records_consumed = 0
     batch_raw_bytes = 0
     stop_reason = BoundedReadStopReason.TARGET_REACHED
 
@@ -347,7 +349,7 @@ def read_bounded_jsonl(
         with path.open("rb") as handle:
             handle.seek(start_byte_offset)
             while offset < target_size:
-                if len(envelopes) >= max_records_per_batch:
+                if records_consumed >= max_records_per_batch:
                     stop_reason = BoundedReadStopReason.BATCH_LIMIT_REACHED
                     break
 
@@ -360,9 +362,50 @@ def read_bounded_jsonl(
                     detail = "source ended before the captured target size"
                 elif not line.endswith(b"\n"):
                     if len(line) == read_limit and read_limit < remaining:
-                        code = SourceDiagnosticCode.OVERSIZED_RECORD
-                        stop_reason = BoundedReadStopReason.OVERSIZED_RECORD
-                        detail = "complete record exceeds the single-record byte limit"
+                        consumed = len(line)
+                        found_newline = False
+                        source_ended = False
+                        while consumed < remaining:
+                            chunk_limit = min(
+                                remaining - consumed, _OVERSIZED_STREAM_CHUNK_BYTES
+                            )
+                            chunk = handle.readline(chunk_limit)
+                            if not chunk:
+                                source_ended = True
+                                break
+                            consumed += len(chunk)
+                            if chunk.endswith(b"\n"):
+                                found_newline = True
+                                break
+                            if len(chunk) < chunk_limit:
+                                source_ended = True
+                                break
+                        if found_newline:
+                            diagnostics.append(
+                                _record_diagnostic(
+                                    SourceDiagnosticCode.OVERSIZED_RECORD,
+                                    path,
+                                    "complete record exceeds the single-record byte limit",
+                                    ordinal,
+                                    source_line,
+                                    offset,
+                                )
+                            )
+                            offset += consumed
+                            ordinal += 1
+                            source_line += 1
+                            records_consumed += 1
+                            continue
+                        if source_ended:
+                            code = SourceDiagnosticCode.SOURCE_TRUNCATED
+                            stop_reason = BoundedReadStopReason.SOURCE_TRUNCATED
+                            detail = "source ended before the captured target size"
+                        else:
+                            code = SourceDiagnosticCode.PARTIAL_TAIL
+                            stop_reason = BoundedReadStopReason.PARTIAL_TAIL
+                            detail = (
+                                "captured target ends with an incomplete JSONL record"
+                            )
                     elif len(line) < remaining:
                         code = SourceDiagnosticCode.SOURCE_TRUNCATED
                         stop_reason = BoundedReadStopReason.SOURCE_TRUNCATED
@@ -374,9 +417,21 @@ def read_bounded_jsonl(
                 else:
                     record_bytes = line[:-1].removesuffix(b"\r")
                     if len(record_bytes) > max_single_record_bytes:
-                        code = SourceDiagnosticCode.OVERSIZED_RECORD
-                        stop_reason = BoundedReadStopReason.OVERSIZED_RECORD
-                        detail = "complete record exceeds the single-record byte limit"
+                        diagnostics.append(
+                            _record_diagnostic(
+                                SourceDiagnosticCode.OVERSIZED_RECORD,
+                                path,
+                                "complete record exceeds the single-record byte limit",
+                                ordinal,
+                                source_line,
+                                offset,
+                            )
+                        )
+                        offset += len(line)
+                        ordinal += 1
+                        source_line += 1
+                        records_consumed += 1
+                        continue
                     elif (
                         envelopes
                         and batch_raw_bytes + len(record_bytes) > max_batch_bytes
@@ -394,6 +449,7 @@ def read_bounded_jsonl(
                             )
                         )
                         batch_raw_bytes += len(record_bytes)
+                        records_consumed += 1
                         diagnostic = _invalid_json_diagnostic(
                             record_bytes,
                             path=path,

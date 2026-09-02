@@ -140,6 +140,37 @@ class TestClaudeRecognizedShapes:
                 "sessionId": "session",
                 "timestamp": "2026-08-29T00:00:00Z",
             },
+            {
+                "type": "queue-operation",
+                "content": "queued",
+                "operation": "enqueue",
+                "reason": "session limit",
+                "sessionId": "session",
+                "timestamp": "2026-09-01T00:00:00Z",
+            },
+            {
+                "type": "cost-state",
+                "hasUnknownModelCost": False,
+                "modelUsage": {
+                    "claude-opus-5": {
+                        "cacheCreationInputTokens": 3,
+                        "cacheReadInputTokens": 2,
+                        "costUSD": 0.01,
+                        "inputTokens": 1,
+                        "outputTokens": 4,
+                        "webSearchRequests": 0,
+                    }
+                },
+                "sessionId": "session",
+                "startTime": 0,
+                "totalAPIDuration": 1,
+                "totalAPIDurationWithoutRetries": 1,
+                "totalCostUSD": 0.01,
+                "totalDuration": 1,
+                "totalLinesAdded": 0,
+                "totalLinesRemoved": 0,
+                "totalToolDuration": 0,
+            },
             {"type": "started", "agentId": "agent", "key": "key"},
             {"type": "ai-title", "aiTitle": "title", "sessionId": "session"},
             {

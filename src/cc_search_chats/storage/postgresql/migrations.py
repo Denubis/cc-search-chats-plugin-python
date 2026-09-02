@@ -27,6 +27,7 @@ _MIGRATIONS = (
     Migration(5, "semantic_chunk_schema.sql"),
     Migration(6, "incremental_refresh_schema.sql"),
     Migration(7, "coherent_corpus_schema.sql"),
+    Migration(8, "skipped_record_coverage_schema.sql"),
 )
 
 

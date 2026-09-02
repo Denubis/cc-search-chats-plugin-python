@@ -47,6 +47,7 @@ def _assert_v3_envelope(
         "read_files",
         "indexed_files",
         "skipped_files",
+        "skipped_records",
         "excluded_files",
         "unreadable_files",
         "unknown_sessions",
@@ -249,6 +250,7 @@ def test_postgresql_cli_journey_with_events(
     assert coverage["read_files"] == 4
     assert coverage["indexed_files"] == 4
     assert coverage["skipped_files"] == 0
+    assert coverage["skipped_records"] == 0
     assert coverage["excluded_files"] == 0
     assert coverage["unreadable_files"] == 0
     assert coverage["unknown_sessions"] == 1
@@ -289,6 +291,7 @@ def test_postgresql_cli_journey_with_events(
     assert unchanged_coverage["content_read_files"] == 0
     assert unchanged_coverage["content_read_bytes"] == 0
     assert unchanged_coverage["read_files"] == 0
+    assert unchanged_coverage["skipped_records"] == 0
     assert unchanged_coverage["completeness"] == "complete"
     assert unchanged_refresh["run_id"] is None
     assert unchanged_refresh["state"] == "unchanged"

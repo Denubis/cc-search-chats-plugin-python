@@ -694,6 +694,7 @@ def _error_envelope(
             "transient_failure_files": 0,
             "indexed_files": 0,
             "skipped_files": 0,
+            "skipped_records": 0,
             "excluded_files": 0,
             "unreadable_files": 0,
             "unknown_sessions": 0,
@@ -823,6 +824,10 @@ def _postgres_envelope(
                    COALESCE((
                        SELECT sum(source.pending_bytes)
                        FROM cc_search_chats.source_file_current AS source
+                   ), 0)::bigint,
+                   COALESCE((
+                       SELECT sum(source.skipped_record_count)
+                       FROM cc_search_chats.source_file_current AS source
                    ), 0)::bigint
             FROM cc_search_chats.corpus_state AS state
             LEFT JOIN LATERAL (
@@ -929,6 +934,7 @@ def _postgres_envelope(
     blocked_files = int(refresh_row[12] or 0)
     transient_failure_files = int(refresh_row[13] or 0)
     pending_bytes = int(refresh_row[15] or 0)
+    skipped_records = int(refresh_row[16] or 0)
     refresh_run_id = refresh_row[1]
     refresh_state = refresh_row[2] or "unchanged"
     corpus_generation = refresh_row[0]
@@ -980,6 +986,7 @@ def _postgres_envelope(
         "transient_failure_files": transient_failure_files,
         "indexed_files": sum(int(root["indexed_files"]) for root in roots),
         "skipped_files": max(0, discovered_files - changed_files),
+        "skipped_records": skipped_records,
         "excluded_files": sum(int(root["excluded_files"]) for root in roots),
         "unreadable_files": transient_failure_files,
         "unknown_sessions": unknown_sessions,
@@ -992,6 +999,7 @@ def _postgres_envelope(
             or blocked_files
             or transient_failure_files
             or pending_bytes
+            or skipped_records
             else "complete"
         ),
     }

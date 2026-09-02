@@ -1040,6 +1040,7 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
         _postgres_envelope(postgres_connection, "index")["coverage"],
     )
     assert failed_coverage["unrecognized_conversation_records"] == 1
+    assert failed_coverage["skipped_records"] == 0
     assert failed_coverage["completeness"] == "partial"
 
     run_count = next(
@@ -1080,6 +1081,7 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
     assert unchanged_coverage["content_read_bytes"] == 0
     assert unchanged_coverage["read_files"] == 0
     assert unchanged_coverage["blocked_files"] == 1
+    assert unchanged_coverage["skipped_records"] == 0
     assert unchanged_coverage["completeness"] == "partial"
     assert unchanged_refresh["run_id"] is None
     assert unchanged_refresh["state"] == "unchanged"
@@ -1113,6 +1115,326 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
         )[0]
         == 2
     )
+
+
+@pytest.mark.parametrize(
+    ("reason", "bad_record", "record_limit"),
+    [
+        (
+            "invalid_unicode",
+            _claude_message_bytes(uuid="bad-nul", text="bad\x00text"),
+            None,
+        ),
+        ("malformed_json", b'{"type":\n', None),
+        (
+            "oversized_record",
+            b'{"padding":"' + (b"x" * 1_024) + b'"}\n',
+            512,
+        ),
+    ],
+)
+def test_first_parse_skips_unstorable_record_and_publishes_neighbors(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    bad_record: bytes,
+    record_limit: int | None,
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    before = _claude_message_bytes(uuid="before-skip", text="visible before skip")
+    after = _claude_message_bytes(uuid="after-skip", text="visible after skip")
+    source.write_bytes(before + bad_record + after)
+    root = _source_root(Provider.CLAUDE, claude_root)
+    stat = source.stat()
+    postgres_connection.execute(
+        """
+        INSERT INTO cc_search_chats.source_root_current (
+            source_root_id, provider, resolved_path, configured_order
+        ) VALUES (%s, 'claude', %s, 0)
+        """,
+        (root.source_root_id, str(root.path)),
+    )
+    postgres_connection.execute(
+        """
+        INSERT INTO cc_search_chats.source_failure_current (
+            source_root_id, source_file_relative, provider,
+            file_device, file_inode, observed_size, observed_mtime_ns,
+            parser_state_version, failure_record_ordinal,
+            failure_source_line, failure_source_byte_offset,
+            failure_code, failure_detail, failure_class,
+            attempted_content_bytes, consecutive_failures
+        ) VALUES (
+            %s, 'session.jsonl', 'claude', %s, %s, %s, %s,
+            %s, 1, 2, %s, %s, 'previous deterministic failure',
+            'deterministic', 0, 1
+        )
+        """,
+        (
+            root.source_root_id,
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+            refresh_module._PARSER_STATE_VERSIONS[Provider.CLAUDE],
+            len(before),
+            reason,
+        ),
+    )
+    if record_limit is not None:
+        original_reader = refresh_module.read_bounded_jsonl
+
+        def bounded_reader(path: Path, **kwargs):
+            return original_reader(
+                path,
+                max_single_record_bytes=record_limit,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(refresh_module, "read_bounded_jsonl", bounded_reader)
+
+    result = refresh_native_sources(
+        postgres_connection,
+        source_roots=(root,),
+        force_retry=True,
+    )
+
+    assert {row.text for row in search_messages(postgres_connection, "visible")} == {
+        "visible after skip",
+        "visible before skip",
+    }
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT complete_byte_offset, next_record_ordinal, next_source_line,
+                   skipped_record_count
+            FROM cc_search_chats.source_file_current
+            """
+        )
+    ) == (source.stat().st_size, 3, 4, 1)
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.source_failure_current"
+            )
+        )[0]
+        == 0
+    )
+    diagnostics = next(
+        postgres_connection.execute(
+            "SELECT diagnostics FROM cc_search_chats.refresh_run WHERE run_id = %s",
+            (result.run_id,),
+        )
+    )[0]
+    skipped = [value for value in diagnostics if value["code"] == "record_skipped"]
+    assert len(skipped) == 1
+    expected_detail = {
+        "invalid_unicode": "message text contains a non-scalar Unicode value",
+        "malformed_json": "complete record is not valid JSON",
+        "oversized_record": "complete record exceeds the single-record byte limit",
+    }[reason]
+    assert skipped == [
+        {
+            "code": "record_skipped",
+            "detail": expected_detail,
+            "provider": "claude",
+            "reason": reason,
+            "record_ordinal": 1,
+            "source_byte_offset": len(before),
+            "source_file_relative": "session.jsonl",
+            "source_line": 2,
+            "source_root_id": root.source_root_id,
+        }
+    ]
+    coverage = cast(
+        dict[str, object],
+        _postgres_envelope(
+            postgres_connection,
+            "index",
+            refresh_result=result,
+        )["coverage"],
+    )
+    assert coverage["blocked_files"] == 0
+    assert coverage["skipped_records"] == 1
+    assert coverage["completeness"] == "partial"
+
+
+@pytest.mark.parametrize(
+    ("reason", "bad_record", "record_limit"),
+    [
+        (
+            "invalid_unicode",
+            _claude_message_bytes(uuid="appended-bad-nul", text="bad\x00text"),
+            None,
+        ),
+        ("malformed_json", b'{"type":\n', None),
+        (
+            "oversized_record",
+            b'{"padding":"' + (b"x" * 1_024) + b'"}\n',
+            512,
+        ),
+    ],
+)
+def test_append_skips_unstorable_record_and_advances_checkpoint(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    bad_record: bytes,
+    record_limit: int | None,
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    before = _claude_message_bytes(uuid="append-before", text="append before skip")
+    source.write_bytes(before)
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    first = refresh_native_sources(postgres_connection, source_roots=roots)
+    after = _claude_message_bytes(uuid="append-after", text="append after skip")
+    with source.open("ab") as handle:
+        handle.write(bad_record + after)
+    if record_limit is not None:
+        original_reader = refresh_module.read_bounded_jsonl
+
+        def bounded_reader(path: Path, **kwargs):
+            return original_reader(
+                path,
+                max_single_record_bytes=record_limit,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(refresh_module, "read_bounded_jsonl", bounded_reader)
+
+    result = refresh_native_sources(
+        postgres_connection,
+        source_roots=roots,
+        force_retry=True,
+    )
+
+    assert result.corpus_generation > first.corpus_generation
+    assert {row.text for row in search_messages(postgres_connection, "append")} == {
+        "append after skip",
+        "append before skip",
+    }
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT complete_byte_offset, next_record_ordinal, next_source_line,
+                   skipped_record_count
+            FROM cc_search_chats.source_file_current
+            """
+        )
+    ) == (source.stat().st_size, 3, 4, 1)
+    diagnostics = next(
+        postgres_connection.execute(
+            "SELECT diagnostics FROM cc_search_chats.refresh_run WHERE run_id = %s",
+            (result.run_id,),
+        )
+    )[0]
+    skipped = [value for value in diagnostics if value["code"] == "record_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == reason
+    assert skipped[0]["record_ordinal"] == 1
+    assert skipped[0]["source_line"] == 2
+    assert skipped[0]["source_byte_offset"] == len(before)
+    coverage = cast(
+        dict[str, object],
+        _postgres_envelope(
+            postgres_connection,
+            "index",
+            refresh_result=result,
+        )["coverage"],
+    )
+    assert coverage["skipped_records"] == 1
+    assert coverage["completeness"] == "partial"
+
+
+def test_codex_invalid_unicode_record_is_skipped_without_losing_neighbors(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    codex_root = tmp_path / "codex"
+    source = codex_root / "2026" / "09" / "02" / "rollout-session.jsonl"
+    source.parent.mkdir(parents=True)
+    payloads = (
+        {
+            "timestamp": "2026-09-02T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "cli_version": "1.0.0",
+                "cwd": "/synthetic/repository",
+                "id": "codex-skip-session",
+                "source": "cli",
+                "timestamp": "2026-09-02T00:00:00Z",
+            },
+        },
+        {
+            "timestamp": "2026-09-02T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "codex before skip"}],
+            },
+        },
+        {
+            "timestamp": "2026-09-02T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call",
+                "output": "bad\x00tool output",
+            },
+        },
+        {
+            "timestamp": "2026-09-02T00:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "after-skip",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "codex after skip"}],
+            },
+        },
+    )
+    source.write_bytes(
+        b"".join(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+            for payload in payloads
+        )
+    )
+
+    result = refresh_native_sources(
+        postgres_connection,
+        source_roots=(_source_root(Provider.CODEX, codex_root),),
+    )
+
+    assert {row.text for row in search_messages(postgres_connection, "codex")} == {
+        "codex after skip",
+        "codex before skip",
+    }
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT skipped_record_count FROM cc_search_chats.source_file_current"
+            )
+        )[0]
+        == 1
+    )
+    diagnostics = next(
+        postgres_connection.execute(
+            "SELECT diagnostics FROM cc_search_chats.refresh_run WHERE run_id = %s",
+            (result.run_id,),
+        )
+    )[0]
+    skipped = [value for value in diagnostics if value["code"] == "record_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["provider"] == "codex"
+    assert skipped[0]["reason"] == "invalid_unicode"
+    assert skipped[0]["record_ordinal"] == 2
+    assert skipped[0]["source_line"] == 3
 
 
 def test_failed_publication_keeps_checkpoint_and_corpus_then_retry_cleans_stage(

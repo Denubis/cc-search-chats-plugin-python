@@ -128,35 +128,34 @@ class TestBoundedJsonlRead:
         assert result.batch_raw_bytes == len(record)
         assert result.stop_reason is BoundedReadStopReason.TARGET_REACHED
 
-    def test_oversized_record_is_named_and_consumes_no_coordinate(
+    def test_oversized_record_is_named_and_preserves_later_coordinates(
         self, tmp_path: Path
     ) -> None:
         source = tmp_path / "oversized.jsonl"
-        source.write_bytes(b'{"padding":"too long"}\n')
+        oversized = b'{"padding":"too long"}'
+        following = b'{"value":"after"}'
+        source.write_bytes(oversized + b"\n" + following + b"\n")
 
-        first = read_bounded_jsonl(
+        result = read_bounded_jsonl(
             source,
             source_file_relative=Path("oversized.jsonl"),
             target_size=source.stat().st_size,
-            max_single_record_bytes=8,
-        )
-        second = read_bounded_jsonl(
-            source,
-            source_file_relative=Path("oversized.jsonl"),
-            target_size=source.stat().st_size,
-            start_byte_offset=first.next_source_byte_offset,
-            next_record_ordinal=first.next_record_ordinal,
-            next_source_line=first.next_source_line,
-            max_single_record_bytes=8,
+            max_single_record_bytes=len(following),
         )
 
-        assert first.envelopes == second.envelopes == ()
-        assert first.next_source_byte_offset == second.next_source_byte_offset == 0
-        assert first.next_record_ordinal == second.next_record_ordinal == 0
-        assert first.next_source_line == second.next_source_line == 1
-        assert first.stop_reason is second.stop_reason
-        assert first.stop_reason is BoundedReadStopReason.OVERSIZED_RECORD
-        assert diagnostic_codes(first) == {SourceDiagnosticCode.OVERSIZED_RECORD}
+        assert [value.raw_bytes for value in result.envelopes] == [following]
+        assert result.envelopes[0].record_ordinal == 1
+        assert result.envelopes[0].source_line == 2
+        assert result.envelopes[0].source_byte_offset == len(oversized) + 1
+        assert result.next_source_byte_offset == source.stat().st_size
+        assert result.next_record_ordinal == 2
+        assert result.next_source_line == 3
+        assert result.stop_reason is BoundedReadStopReason.TARGET_REACHED
+        assert diagnostic_codes(result) == {SourceDiagnosticCode.OVERSIZED_RECORD}
+        diagnostic = result.diagnostics[0]
+        assert diagnostic.record_ordinal == 0
+        assert diagnostic.source_line == 1
+        assert diagnostic.source_byte_offset == 0
 
     @pytest.mark.parametrize("value", [0, -1, True, False])
     def test_rejects_invalid_batch_limits(self, tmp_path: Path, value: int) -> None:
