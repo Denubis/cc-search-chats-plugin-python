@@ -162,7 +162,7 @@ def test_event_export_folds_page_boundaries_before_timestamp_ordering(
     assert [event.physical_alias_count for event in exported.events] == [1, 1]
 
 
-def test_event_export_rejects_conflicting_logical_message_metadata(
+def test_event_export_nulls_conflicting_logical_message_cwd(
     postgres_connection: psycopg.Connection,
 ) -> None:
     _seed_wide_event_population(postgres_connection, logical_messages=1)
@@ -170,6 +170,30 @@ def test_event_export_rejects_conflicting_logical_message_metadata(
         """
         UPDATE cc_search_chats.message_current
         SET cwd = '/conflicting/cwd'
+        WHERE logical_message_id = 'message-000001'
+          AND content_class = 'tool_input'
+        """
+    )
+
+    exported = export_human_message_events(
+        postgres_connection,
+        from_utc=datetime(2026, 8, 11, tzinfo=UTC),
+        until_utc=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+
+    assert exported.population.retained == 1
+    assert len(exported.events) == 1
+    assert exported.events[0].cwd is None
+
+
+def test_event_export_rejects_other_conflicting_logical_message_metadata(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    _seed_wide_event_population(postgres_connection, logical_messages=1)
+    postgres_connection.execute(
+        """
+        UPDATE cc_search_chats.message_current
+        SET repository = '/conflicting/repository'
         WHERE logical_message_id = 'message-000001'
           AND content_class = 'tool_input'
         """

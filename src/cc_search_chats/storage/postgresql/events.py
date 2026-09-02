@@ -232,9 +232,24 @@ def export_human_message_events(
             current_metadata = metadata
             current_has_prose = False
             current_aliases = set()
+        elif current_metadata is None:
+            raise RuntimeError("event metadata state is missing for an active identity")
         elif metadata != current_metadata:
-            raise ValueError(
-                "event export found conflicting metadata for one logical message"
+            if (
+                metadata[:4] + metadata[5:]
+                != current_metadata[:4] + current_metadata[5:]
+            ):
+                raise ValueError(
+                    "event export found conflicting metadata for one logical message"
+                )
+            current_metadata = (
+                current_metadata[0],
+                current_metadata[1],
+                current_metadata[2],
+                current_metadata[3],
+                None,
+                current_metadata[5],
+                current_metadata[6],
             )
         content_counts[row[3]] += 1
         current_has_prose = current_has_prose or row[3] == "prose"
