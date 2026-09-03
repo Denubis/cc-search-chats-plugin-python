@@ -3,6 +3,11 @@
 ## Unreleased
 
 **Changed:**
+- Semantic search now has no answer deadline and reuses an ad hoc helper for
+  thirty seconds after each query by default. Schema-v4 search output adds
+  `semantic.model_load_ms`, `semantic.query_embed_ms`, and
+  `semantic.warm_reused`, and human/agent consumers state the cold-load cost
+  and warm-reuse behavior.
 - PostgreSQL migration 10 clears an already-incoherent selected pair when
   applied, then guards selection and demotion interleavings from making the
   selected corpus generation and semantic build incoherent.

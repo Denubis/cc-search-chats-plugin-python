@@ -86,10 +86,26 @@ event.
 The pinned snapshot and dependencies must already exist in operator-configured
 locations. Runtime remains offline and does not redirect caches.
 
+Query embedding uses an ad hoc helper in `CC_SEARCH_RUNTIME_DIR`, or
+`~/.cc-search-chats` when that variable is unset. Its socket is
+`query-embedder.sock`, and detached startup diagnostics go to
+`query-embedder.log` in the same directory. Each spawn truncates that file, so
+it contains only the current or most recent helper's diagnostics. The helper is
+not a systemd unit. Its default thirty-second idle window is operator-tunable
+with `CC_SEARCH_SEMANTIC_WARM_SECONDS`.
+
 ```console
 cc-search-chats index --json
 cc-search-chats index --status --json
 ```
+
+`cc-search-chats index` asks a live query helper to shut down and waits for it
+before acquiring the index session or starting model preflight. A semantic
+search issued later while the index is embedding can start a new helper; if
+VRAM pressure makes its query model unavailable, that search reports
+`semantic_search_degraded` and returns a named `literal_fallback`. This is an
+accepted coexistence limit, not permission for search to wait on or join the
+index.
 
 The first index after this release reparses every source from byte zero because
 both provider parser-state versions changed; expect a long run. Only messages
@@ -118,9 +134,10 @@ publishes literal and semantic state together.
 
 On candidate semantic failure, preserve its phase/code and verify that the
 previous corpus generation and semantic build remain selected. Run a positive
-literal control against that prior corpus. Ranked hybrid search must return the
-literal answer with named `literal_fallback` degradation if query-time semantic
-work is unavailable; status must not claim the failed candidate is current.
+literal control against that prior corpus. Semantic search must return the
+literal answer with named `literal_fallback` degradation if its query-time
+model/helper is unavailable; status must not claim the failed candidate is
+current.
 
 ## 5. Recovery
 

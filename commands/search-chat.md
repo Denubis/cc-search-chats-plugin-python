@@ -25,12 +25,14 @@ and do not invent connection or cache environment variables.
 - Semantic checkpoint: `cc-search-chats index --status --json`
 
 A search requires exactly one mode: `--literal` is exact full-text with no
-model or GPU, while `--semantic` is model-ranked hybrid full-text/embedding
-fusion. It opens the currently selected coherent corpus without admitting,
-launching, joining, or waiting for index work. Run `index` intentionally when a
-newer corpus is required. A miss merits alternate terms, `--literal`, and
-filter review before explicit maintenance. Both modes contain visible primary
-prose from configured standard and Ponytail roots;
+model or GPU and is the quick path, while `--semantic` is model-ranked hybrid
+full-text/embedding fusion with no deadline. First semantic use takes about ten
+seconds; another query inside the thirty-second burst window reuses the warm
+model and takes about a second. It opens the currently selected coherent corpus
+without admitting, launching, joining, or waiting for index work. Run `index`
+intentionally when a newer corpus is required. A miss merits alternate terms,
+`--literal`, and filter review before explicit maintenance. Both modes contain
+visible primary prose from configured standard and Ponytail roots;
 `--agents` adds agent/unknown sessions;
 `--literal --tools` adds persisted tool names and inputs. Tool results,
 reasoning, instructions, injected context, and unrecognized shapes are
@@ -45,5 +47,7 @@ results. A semantic `literal_fallback` must carry `semantic_search_degraded`
 and must be described as literal results. Also check `coverage`,
 `refresh.corpus_generation`, `semantic.semantic_build`,
 `semantic.corpus_generation`, `corpus_age_ms`, `warnings`, and terminal
-`status`; an empty result is not proof of absence when coverage is partial,
+`status`. For semantic search also read `semantic.model_load_ms`,
+`semantic.query_embed_ms`, `semantic.warm_reused`, and `deadline_ms: null`; an
+empty result is not proof of absence when coverage is partial,
 staleness is unknown, or filters exclude the intended corpus.

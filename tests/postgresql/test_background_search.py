@@ -6,7 +6,6 @@ import shutil
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event
 from time import monotonic
 from typing import cast
 
@@ -15,7 +14,8 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 
 from cc_search_chats.cli import main
-from cc_search_chats.semantic import SemanticChunk
+from cc_search_chats.semantic import SemanticChunk, query_embedder
+from cc_search_chats.semantic.query_embedder import QueryEmbeddingResult
 from cc_search_chats.storage.postgresql import migrate
 from cc_search_chats.storage.postgresql import search_messages as literal_search
 from cc_search_chats.storage.postgresql.guardrails import ReadDeadlineExceeded
@@ -142,6 +142,94 @@ def _passage_embeddings(texts, **kwargs):
 def _stub_semantic_index(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cc_search_chats.cli.embed_passages", _passage_embeddings)
     monkeypatch.setattr("cc_search_chats.cli.chunk_passages", _single_chunks)
+    monkeypatch.setattr("cc_search_chats.cli.shutdown_query_embedder", lambda: None)
+
+
+@pytest.mark.parametrize(
+    ("warm_reused", "expected_model_load_states"),
+    [
+        (False, ["running", "complete"]),
+        (True, []),
+    ],
+)
+def test_semantic_ndjson_model_load_events_match_helper_state(
+    postgres_cluster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    warm_reused: bool,
+    expected_model_load_states: list[str],
+) -> None:
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
+    )
+    _stub_semantic_index(monkeypatch)
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    shutil.copy(
+        FIXTURES / "claude_primary.jsonl",
+        claude_root / "claude-session-primary.jsonl",
+    )
+    codex_root = tmp_path / "codex"
+    codex_root.mkdir()
+    _configure_cli_connection(postgres_cluster, monkeypatch)
+    monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
+    monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
+    assert _run(monkeypatch, capsys, "index", "--migrate", "--json")[0] == 0
+    assert _run(monkeypatch, capsys, "index", "--json")[0] == 0
+    paths = query_embedder.query_embedder_paths(tmp_path / "helper-runtime")
+    monkeypatch.setattr(query_embedder, "query_embedder_paths", lambda: paths)
+    monkeypatch.setattr(
+        query_embedder,
+        "_ensure_compatible_helper",
+        lambda _paths: None,
+    )
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+
+    def exchange(_path, request, *, progress=None):
+        assert request["kind"] == "embed"
+        assert progress is not None
+        progress("query_embed", "running")
+        if not warm_reused:
+            progress("model_load", "running")
+            progress("model_load", "complete")
+        progress("query_embed", "complete")
+        return {
+            "kind": "result",
+            "embedding": vector,
+            "model_load_ms": 0 if warm_reused else 12,
+            "query_embed_ms": 3,
+            "warm_reused": warm_reused,
+        }
+
+    monkeypatch.setattr(query_embedder, "_exchange", exchange)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "cc-search-chats",
+            "search",
+            "visible assistant",
+            "--semantic",
+            "--json",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="0"):
+        main()
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    events = [json.loads(line) for line in captured.err.splitlines()]
+
+    assert payload["retrieval_mode"] == "hybrid"
+    if warm_reused:
+        assert all(event["phase"] != "model_load" for event in events)
+    assert [
+        event["state"]
+        for event in events
+        if event["event"] == "progress" and event["phase"] == "model_load"
+    ] == expected_model_load_states
 
 
 def test_search_reports_pending_migration_without_creating_schema(
@@ -398,11 +486,12 @@ def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
     vector = [0.0] * 1024
     vector[0] = 1.0
 
-    def query_embedding(_query, *, timeout_seconds, progress, quiet):
-        assert timeout_seconds > 0
-        assert quiet is False
+    def query_embedding(_query, *, progress, quiet):
+        assert isinstance(quiet, bool)
+        progress("query_embed", "running")
         progress("model_load", "complete")
-        return vector
+        progress("query_embed", "complete")
+        return QueryEmbeddingResult(tuple(vector), 12, 3, False)
 
     monkeypatch.setattr("cc_search_chats.cli._bounded_query_embedding", query_embedding)
 
@@ -437,21 +526,88 @@ def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
     assert semantic[0] == ("semantic search (hybrid model ranking): visible assistant")
     assert semantic[1].startswith("index made ")
     assert semantic[2] == "missing 0 chats"
-    assert "visible assistant" in "\n".join(semantic[3:])
+    assert semantic[3] == (
+        "semantic: loading model (first use takes about 10 s; stays warm 30 s "
+        "after each query)"
+    )
+    assert "visible assistant" in "\n".join(semantic[4:])
 
-    def timed_out_embedding(*_args, **_kwargs):
-        raise TimeoutError("fixture semantic deadline")
+    code, timed = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "visible assistant",
+        "--semantic",
+        "--json",
+    )
+    assert code == 0
+    assert timed["deadline_ms"] is None
+    semantic_state = cast("dict[str, object]", timed["semantic"])
+    assert semantic_state["model_load_ms"] == 12
+    assert semantic_state["query_embed_ms"] == 3
+    assert semantic_state["warm_reused"] is False
+
+    def warm_embedding(_query, *, progress, quiet):
+        assert isinstance(quiet, bool)
+        progress("query_embed", "running")
+        progress("query_embed", "complete")
+        return QueryEmbeddingResult(tuple(vector), 0, 2, True)
+
+    monkeypatch.setattr("cc_search_chats.cli._bounded_query_embedding", warm_embedding)
+    warm = human_search("--semantic")
+    assert warm[3] == "semantic: warm model reused"
+    assert "visible assistant" in "\n".join(warm[4:])
+
+    def failed_embedding(*_args, **_kwargs):
+        raise RuntimeError("fixture helper failed")
 
     monkeypatch.setattr(
-        "cc_search_chats.cli._bounded_query_embedding", timed_out_embedding
+        "cc_search_chats.cli._bounded_query_embedding", failed_embedding
     )
     degraded = human_search("--semantic")
     assert degraded[0] == ("semantic search (hybrid model ranking): visible assistant")
     assert degraded[3].startswith(
-        "WARNING: semantic ranking unavailable (TimeoutError: fixture semantic "
-        "deadline); these are literal results"
+        "WARNING: semantic ranking unavailable (RuntimeError: fixture helper failed); "
+        "these are literal results"
     )
     assert "visible assistant" in "\n".join(degraded[4:])
+
+    code, degraded_payload = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "visible assistant",
+        "--semantic",
+        "--json",
+    )
+    assert code == 0
+    assert degraded_payload["status"] == "complete"
+    assert degraded_payload["deadline_ms"] is None
+    assert degraded_payload["retrieval_mode"] == "literal_fallback"
+    assert all(
+        warning["code"] != "deadline_degraded"
+        for warning in cast("list[dict[str, object]]", degraded_payload["warnings"])
+    )
+
+    monkeypatch.setattr("cc_search_chats.cli._bounded_query_embedding", query_embedding)
+    monkeypatch.setattr(
+        "cc_search_chats.cli.semantic_search",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            psycopg.errors.QueryCanceled("fixture semantic retrieval cancellation")
+        ),
+    )
+    code, database_failure = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "visible assistant",
+        "--semantic",
+        "--json",
+    )
+    assert code == 1
+    assert database_failure["status"] == "internal_failure"
+    database_error = cast("dict[str, object]", database_failure["error"])
+    assert database_error["code"] == "postgresql_operation_failed"
 
     monkeypatch.setattr(
         "cc_search_chats.cli.unindexed_sources",
@@ -461,11 +617,16 @@ def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
     assert unknown[2] == "unindexed chats: unknown (scan_budget_exhausted)"
 
 
-def test_exhaustive_search_starts_a_fresh_staleness_scan_budget(
+@pytest.mark.parametrize(
+    "mode_arguments",
+    [("--literal", "--exhaustive"), ("--semantic",)],
+)
+def test_unbounded_search_starts_a_fresh_staleness_scan_budget(
     postgres_cluster,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    mode_arguments: tuple[str, ...],
 ) -> None:
     monkeypatch.setattr(
         "cc_search_chats.cli._contain_semantic_index", lambda _args: None
@@ -486,18 +647,24 @@ def test_exhaustive_search_starts_a_fresh_staleness_scan_budget(
     assert _run(monkeypatch, capsys, "index", "--json")[0] == 0
     monkeypatch.setattr("cc_search_chats.cli._SEARCH_DEADLINE_SECONDS", 0.0)
     monkeypatch.setattr("cc_search_chats.cli._SEARCH_RENDER_RESERVE_SECONDS", 0.0)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    monkeypatch.setattr(
+        "cc_search_chats.cli._bounded_query_embedding",
+        lambda *_args, **_kwargs: QueryEmbeddingResult(tuple(vector), 0, 1, True),
+    )
 
     code, payload = _run(
         monkeypatch,
         capsys,
         "search",
         "visible assistant",
-        "--literal",
-        "--exhaustive",
+        *mode_arguments,
         "--json",
     )
 
     assert code == 0
+    assert payload["deadline_ms"] is None
     index_state = cast("dict[str, object]", payload["index_state"])
     assert index_state["unindexed"] == {
         "files": 0,
@@ -545,14 +712,11 @@ def test_human_index_status_prints_staleness_before_checkpoint(
     assert lines[2].startswith("Semantic index: ")
 
 
-@pytest.mark.parametrize("resolution_expires", [False, True])
-def test_deadline_after_retrieval_returns_hits_as_partial(
+def test_literal_deadline_after_retrieval_returns_hits_as_partial(
     postgres_cluster,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    *,
-    resolution_expires: bool,
 ) -> None:
     monkeypatch.setattr(
         "cc_search_chats.cli._contain_semantic_index", lambda _args: None
@@ -573,43 +737,21 @@ def test_deadline_after_retrieval_returns_hits_as_partial(
     assert _run(monkeypatch, capsys, "index", "--json")[0] == 0
 
     arguments = ["search", "visible assistant", "--literal", "--json"]
-    if resolution_expires:
-        monkeypatch.setattr(
-            "cc_search_chats.cli.pg_resolve_messages",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                ReadDeadlineExceeded("fixture identity-resolution deadline")
-            ),
-        )
-    else:
-        arguments[2] = "--semantic"
-        monkeypatch.setattr("cc_search_chats.cli._SEARCH_DEADLINE_SECONDS", 0.5)
-        monkeypatch.setattr("cc_search_chats.cli._SEARCH_RENDER_RESERVE_SECONDS", 0.05)
-
-        def outlive_budget(_query, *, timeout_seconds, progress, quiet):
-            assert timeout_seconds > 0
-            assert quiet is True
-            progress("model_load", "running")
-            Event().wait(timeout_seconds + 0.02)
-            raise TimeoutError("fixture embedding child exceeded its deadline")
-
-        monkeypatch.setattr(
-            "cc_search_chats.cli._bounded_query_embedding", outlive_budget
-        )
+    monkeypatch.setattr(
+        "cc_search_chats.cli.pg_resolve_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ReadDeadlineExceeded("fixture identity-resolution deadline")
+        ),
+    )
 
     code, payload = _run(monkeypatch, capsys, *arguments)
 
     assert code == 0
     assert payload["status"] == "partial"
-    assert payload["mode"] == ("literal" if resolution_expires else "semantic")
+    assert payload["mode"] == "literal"
     results = cast("list[dict[str, object]]", payload["results"])
     assert results
     assert results[0]["logical_message_id"] == "claude-assistant-1"
     warnings = cast("list[dict[str, object]]", payload["warnings"])
     assert any(warning["code"] == "deadline_degraded" for warning in warnings)
-    if resolution_expires:
-        assert payload["retrieval_mode"] == "literal"
-    else:
-        assert payload["retrieval_mode"] == "literal_fallback"
-        assert any(
-            warning["code"] == "semantic_search_degraded" for warning in warnings
-        )
+    assert payload["retrieval_mode"] == "literal"

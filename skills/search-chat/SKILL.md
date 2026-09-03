@@ -56,8 +56,10 @@ cc-search-chats index --status --json
 ```
 
 Search requires exactly one mode. `--literal` is exact full-text search with no
-model or GPU; `--semantic` is model-ranked hybrid fusion of full-text and
-embedding candidates. Search opens the currently selected coherent corpus
+model or GPU and is the quick path. `--semantic` is model-ranked hybrid fusion
+of full-text and embedding candidates with no deadline: first use takes about
+ten seconds, while another query within the thirty-second burst window takes
+about a second by reusing the warm model. Search opens the currently selected coherent corpus
 without admitting, launching, joining, or waiting for index work. Use `index`
 intentionally when a newer corpus is required. A miss merits alternate terms,
 `--literal`, and careful filter review. Add `--project` only when `list` or
@@ -82,8 +84,10 @@ coherent semantic identity from `semantic.semantic_build` plus
 For `search`, read requested `mode` before delivered `retrieval_mode`. A
 semantic request may deliver `literal_fallback`; require the
 `semantic_search_degraded` warning and report those as literal results. A
-post-retrieval deadline returns retained hits with `status: partial` and
-`deadline_degraded`.
+post-retrieval literal deadline returns retained hits with `status: partial`
+and `deadline_degraded`; semantic has `deadline_ms: null`. Read
+`semantic.model_load_ms`, `semantic.query_embed_ms`, and
+`semantic.warm_reused` as the observed query-helper timing and reuse state.
 
 - `search`: read `index_state` and `results`; retain `identity.provider`,
   `identity.source_session_id`, `identity.canonical_locator`, physical aliases,

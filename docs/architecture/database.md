@@ -157,15 +157,25 @@ selected. Retry reuses already validated chunk vectors.
 Semantic retrieval validates selected corpus/profile completeness, applies
 filters before exact inner-product ranking, and keeps the best chunk per logical
 message. Hybrid retrieval fuses bounded literal and semantic components with
-exact reciprocal-rank-fusion arithmetic. Query-model or semantic-query failure
-returns a named `literal_fallback` from the same selected corpus.
+exact reciprocal-rank-fusion arithmetic. Query-time model or helper failure
+returns a named `literal_fallback` from the same selected corpus. PostgreSQL
+retrieval failure remains a database failure rather than being relabelled as
+semantic degradation.
 
-Ranked search starts its monotonic five-second clock in the console bootstrap,
-uses deadline-derived connection and statement budgets, opens the selected
-result snapshot immediately, reads literal results first, and runs query
-embedding in a terminable/reaped child. It reports a named deadline error only
-when no literal answer can be obtained; optional semantic failure degrades the
-committed literal answer.
+Ranked literal search starts its monotonic five-second clock in the console
+bootstrap, uses deadline-derived connection and statement budgets, opens the
+selected result snapshot immediately, and reports a named deadline error only
+when no literal answer can be obtained. A deadline after retrieval preserves
+those literal hits as a partial result.
+
+Semantic search has no answer deadline. It reads literal candidates first and
+sends the query over a same-user Unix socket to one ad hoc helper. The helper
+holds a lifetime `flock`, checks `SO_PEERCRED`, loads the model once, resets its
+idle window after every query, and exits thirty seconds after the last one by
+default. `CC_SEARCH_SEMANTIC_WARM_SECONDS` sets a different positive idle bound.
+Package/model mismatch replaces the helper before use. `index` shuts it down
+before acquiring index ownership or entering model preflight, preventing the
+query and index embedding paths from deliberately sharing VRAM.
 
 ## Storage, backup, and rebuild boundary
 

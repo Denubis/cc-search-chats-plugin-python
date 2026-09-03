@@ -16,7 +16,7 @@ The plugin supplies the agent workflow; it invokes an independently installed
 `cc-search-chats` executable. Python 3.14+, PostgreSQL 18, and pgvector are
 required.
 
-Install the CLI with the semantic extra for default hybrid search:
+Install the CLI with the semantic extra for hybrid search:
 
 ```console
 uv tool install \
@@ -106,10 +106,17 @@ special tokens, and 96-token overlap. Each prefixed chunk digest maps to one
 reusable normalized 1,024-dimensional vector. Retrieval keeps only the best
 chunk per logical message before hybrid rank fusion.
 
-If the model, dependencies, CUDA, VRAM, or request budget are unavailable,
-ranked search returns its already-computed literal answer with named semantic
-degradation. Literal search does not load the model. Explicit semantic
-maintenance still exits nonzero when its required model work cannot run.
+The first semantic search in a burst starts an ad hoc same-user helper and takes
+about ten seconds while it loads the model. Later semantic searches within
+thirty seconds of the last query reuse that warm model and take about a second.
+The helper then exits and releases the model; it has no systemd unit. Set
+`CC_SEARCH_SEMANTIC_WARM_SECONDS` to tune the default thirty-second window.
+
+Semantic search has no answer deadline. If its query-time model or helper is
+unavailable, it returns its already-computed literal answer with named semantic
+degradation. Literal search is the quick path and does not load the model.
+Explicit semantic maintenance still exits nonzero when its required model work
+cannot run.
 
 ## Quick Start
 
@@ -143,18 +150,18 @@ cc-search-chats index --json
 cc-search-chats index --status --json
 ```
 
-Ranked `search` measures a provisional five-second deadline from executable
-invocation and opens its repeatable-read snapshot without indexing, launching
-a service, joining index work, or waiting for publication. It reads the
-currently selected coherent corpus even when newer native records exist.
-Every search requires exactly one of `--literal` or `--semantic`. Literal is
-exact full-text search and loads no model; semantic is model-ranked hybrid
-search over full-text and embedding candidates. Human output states the
-requested mode first, then the index time, current time, age, and unindexed
-chat count. JSON names `mode`, delivered `retrieval_mode`, `index_state`,
-`corpus_generation`, `semantic_build`, `indexed_at`, `corpus_age_ms`, and the
-deadline. Run `cc-search-chats index` intentionally when the selected corpus is
-too old.
+Search opens its repeatable-read snapshot without indexing, launching an index
+service, joining index work, or waiting for publication. It reads the currently
+selected coherent corpus even when newer native records exist. Every search
+requires exactly one of `--literal` or `--semantic`. Literal is exact full-text
+search, loads no model, and keeps the five-second invocation-to-answer
+deadline. Semantic is model-ranked hybrid search over full-text and embedding
+candidates and has no deadline. Human output states the requested mode first,
+then the index time, current time, age, and unindexed chat count; semantic also
+states whether it loaded or reused the warm model. JSON names `mode`, delivered
+`retrieval_mode`, `index_state`, `corpus_generation`, `semantic_build`,
+`indexed_at`, `corpus_age_ms`, and the mode-specific deadline. Run
+`cc-search-chats index` intentionally when the selected corpus is too old.
 
 `index --migrate` is the only CLI path that applies pending schema migrations.
 Search and routine index/status commands report `maintenance_required` without
@@ -223,9 +230,10 @@ One PostgreSQL advisory owner serializes corpus work. Long phases
 publish owner, heartbeat, completed/total units, and named state. Committed
 state advances only when a corpus generation and its complete semantic build
 publish together. Candidate failure leaves the previous coherent corpus
-selected. If query embedding or semantic retrieval is unavailable, ranked
-search returns `literal_fallback` from that selected corpus rather than stale or
-partially mapped vectors.
+selected. If query-time model loading or the query helper fails, semantic
+search returns `literal_fallback` from that selected corpus rather than stale
+or partially mapped vectors. An index run first stops a live query helper so
+the two paths do not compete for VRAM.
 
 Deterministic source failures retain a separate observation fingerprint. An
 unchanged blocked file is metadata-checked without reopening JSONL bytes;
@@ -241,7 +249,9 @@ command writes one stdout object containing:
 - `schema_version`, `command`, and terminal `status`
 - `coverage` with roots, repositories, file counts, diagnostics, and watermarks
 - `refresh.corpus_generation`, `semantic.semantic_build`,
-  `semantic.corpus_generation`, and their state/progress fields
+  `semantic.corpus_generation`, and their state/progress fields; semantic
+  search also reports `semantic.model_load_ms`, `semantic.query_embed_ms`, and
+  `semantic.warm_reused`
 - top-level `indexed_at`, clock-derived `corpus_age_ms`, and `warnings`
 - search `mode` for the requested literal/semantic mode and `retrieval_mode`
   for the delivered literal, exhaustive-literal, hybrid, or literal-fallback
@@ -249,9 +259,9 @@ command writes one stdout object containing:
 - search and `index --status` `index_state`, including one-clock `made_at`,
   `now`, `age_ms`, selected corpus/build identity, and bounded unindexed
   file/directory/byte counts or a closed unknown reason
-- ranked-search `deadline_ms`, `elapsed_ms`, and `stale_reasons`; a post-retrieval
-  deadline returns `status: partial` with `deadline_degraded` instead of
-  discarding hits
+- ranked-search `deadline_ms`, `elapsed_ms`, and `stale_reasons`; semantic uses
+  `deadline_ms: null`, while a post-retrieval literal deadline returns `status:
+  partial` with `deadline_degraded` instead of discarding hits
 - command-specific `results`, `sessions`, `messages`, `resolutions`, or `events`
 
 A semantic request that cannot complete model ranking returns literal results
@@ -294,13 +304,16 @@ existing environment. The packaged unit supplies neither.
 
 ```console
 systemctl --user daemon-reload
-systemctl --user enable --now cc-search-chats-index.timer  # only after accepted UAT
+systemctl --user enable --now cc-search-chats-index.timer
 ```
 
 The timer runs the same intentional `cc-search-chats index` build nightly at
-03:00 with up to 30 minutes randomized delay. Keep it disabled through
-migration and UAT. A person or agent may run that command directly when a newer
-corpus is required. Search never starts it, and no resident daemon is required.
+03:00 with up to 30 minutes randomized delay. Keep it enabled through migration
+and UAT, and confirm that its next activation falls outside the planned UAT
+window. A person or agent may run that command directly when a newer corpus is
+required. Search never starts it, and no resident daemon is required. The query
+embedder is separate from systemd: the first semantic search starts it ad hoc,
+and it exits after the configured idle warm window.
 
 ## Recovery and Release Boundaries
 

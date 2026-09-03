@@ -7,11 +7,9 @@ Ponytail Claude/Codex native sessions. It does not authorize installation,
 production migration, or prune. Append actual results only after the human
 authorizes and performs UAT.
 
-As of 2.1.0, the 8B model does not load inside the five-second answer deadline,
-so each semantic case is expected to return `literal_fallback` until the pending
-semantic-deadline decision—which has not yet been ruled and which this UAT does
-not anticipate—lands; a `literal_fallback` here is a rejection of the candidate,
-not a pass.
+Semantic search has no answer deadline. This UAT requires one cold hybrid result,
+an immediate warm-helper reuse, and hybrid results for all four vendor/root
+controls; a `literal_fallback` is a rejection of the candidate, not a pass.
 
 ## Preconditions
 
@@ -49,6 +47,7 @@ the UAT script does not migrate.
 ```fish
 set -x CC_SEARCH_CLAUDE_ROOTS "$HOME/.claude/projects:$HOME/.claude-ponytail/projects"
 set -x CC_SEARCH_CODEX_ROOTS "$HOME/.codex/sessions:$HOME/.codex-ponytail/sessions"
+set -e CC_SEARCH_SEMANTIC_WARM_SECONDS
 
 set -x UAT_CLAUDE_STANDARD_SESSION 'REPLACE'
 set -x UAT_CLAUDE_STANDARD_QUERY 'REPLACE UNIQUE SENTINEL PHRASE'
@@ -73,9 +72,8 @@ directories; they do not point at either isolated home.
 
 Machine-readable invocations keep stdout JSON and stderr NDJSON separate. The
 script retains those artifacts, the user-unit and timer observations, two human
-staleness displays, the provenance rows, and a locator ledger in one evidence
-directory. It deliberately stops before positive semantic acceptance if the
-five-second semantic request degrades.
+staleness displays, the provenance rows, query-helper lifecycle evidence, and a
+locator ledger in one evidence directory.
 
 ```fish
 set -g uat_dir (mktemp -d)
@@ -183,7 +181,7 @@ function publish_intentionally
     or return 1
 end
 
-function run_case --argument-names label provider expected_root session query
+function run_case --argument-names label provider expected_root session query cold_check
     set -l literal "$uat_dir/$label.literal.json"
     set -l literal_progress "$uat_dir/$label.literal.ndjson"
     cc-search-chats search "$query" --literal --provider "$provider" --limit 200 --json >$literal 2>$literal_progress
@@ -228,9 +226,28 @@ function run_case --argument-names label provider expected_root session query
     assert_reviewed_coverage "$semantic"
     or return 1
 
-    # Invariant: semantic mode delivers timely hybrid RRF evidence rather than a degraded literal answer.
-    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; assert data["schema_version"]==4 and data["status"]=="complete"; assert data["mode"]=="semantic" and data["retrieval_mode"]=="hybrid"; matches=[result for result in data["results"] if result["identity"]["canonical_locator"]==locator]; assert matches; ranking=matches[0]["ranking"]; assert ranking["method"]=="rrf" and ranking["semantic_rank"] is not None and ranking["semantic_chunk_ordinal"] is not None; assert all(warning["code"]!="semantic_search_degraded" for warning in data["warnings"]); assert data["deadline_ms"]==5000 and data["elapsed_ms"]<=data["deadline_ms"]' "$semantic" "$locator"
+    # Invariant: semantic mode has no deadline, returns hybrid RRF evidence, and the first semantic call after index is cold.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; cold=sys.argv[3]=="cold"; timing=data["semantic"]; assert data["schema_version"]==4 and data["status"]=="complete" and data["deadline_ms"] is None; assert data["mode"]=="semantic" and data["retrieval_mode"]=="hybrid"; matches=[result for result in data["results"] if result["identity"]["canonical_locator"]==locator]; assert matches; ranking=matches[0]["ranking"]; assert ranking["method"]=="rrf" and ranking["semantic_rank"] is not None and ranking["semantic_chunk_ordinal"] is not None; assert all(warning["code"]!="semantic_search_degraded" for warning in data["warnings"]); assert (not cold) or (timing["warm_reused"] is False and isinstance(timing["model_load_ms"],int) and timing["model_load_ms"]>0)' "$semantic" "$locator" "$cold_check"
     or return 1
+
+    if test "$cold_check" = cold
+        set -l cold_finished (date +%s%N)
+        or return 1
+        set -l warm_semantic "$uat_dir/$label.semantic-warm.json"
+        set -l warm_progress "$uat_dir/$label.semantic-warm.ndjson"
+        set -l warm_started (date +%s%N)
+        or return 1
+        cc-search-chats search "$query" --semantic --provider "$provider" --limit 200 --json >$warm_semantic 2>$warm_progress
+        or return 1
+        assert_progress "$warm_progress"
+        or return 1
+        assert_reviewed_coverage "$warm_semantic"
+        or return 1
+
+        # Invariant: the immediate second semantic call starts inside thirty seconds and reuses the warm model without loading it again.
+        python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; gap_ms=(int(sys.argv[4])-int(sys.argv[3]))/1000000; timing=data["semantic"]; assert gap_ms<30000; assert data["schema_version"]==4 and data["status"]=="complete" and data["deadline_ms"] is None; assert data["mode"]=="semantic" and data["retrieval_mode"]=="hybrid"; assert timing["warm_reused"] is True and timing["model_load_ms"]==0; assert any(result["identity"]["canonical_locator"]==locator for result in data["results"])' "$warm_semantic" "$locator" "$cold_finished" "$warm_started"
+        or return 1
+    end
 
     printf '%s\n' "$locator"
 end
@@ -296,13 +313,13 @@ function execute_uat
     publish_intentionally
     or return 1
 
-    set -l claude_standard_locator (run_case claude-standard claude "$HOME/.claude/projects" "$UAT_CLAUDE_STANDARD_SESSION" "$UAT_CLAUDE_STANDARD_QUERY")
+    set -l claude_standard_locator (run_case claude-standard claude "$HOME/.claude/projects" "$UAT_CLAUDE_STANDARD_SESSION" "$UAT_CLAUDE_STANDARD_QUERY" cold)
     or return 1
-    set -l claude_ponytail_locator (run_case claude-ponytail claude "$HOME/.claude-ponytail/projects" "$UAT_CLAUDE_PONYTAIL_SESSION" "$UAT_CLAUDE_PONYTAIL_QUERY")
+    set -l claude_ponytail_locator (run_case claude-ponytail claude "$HOME/.claude-ponytail/projects" "$UAT_CLAUDE_PONYTAIL_SESSION" "$UAT_CLAUDE_PONYTAIL_QUERY" ordinary)
     or return 1
-    set -l codex_standard_locator (run_case codex-standard codex "$HOME/.codex/sessions" "$UAT_CODEX_STANDARD_SESSION" "$UAT_CODEX_STANDARD_QUERY")
+    set -l codex_standard_locator (run_case codex-standard codex "$HOME/.codex/sessions" "$UAT_CODEX_STANDARD_SESSION" "$UAT_CODEX_STANDARD_QUERY" ordinary)
     or return 1
-    set -l codex_ponytail_locator (run_case codex-ponytail codex "$HOME/.codex-ponytail/sessions" "$UAT_CODEX_PONYTAIL_SESSION" "$UAT_CODEX_PONYTAIL_QUERY")
+    set -l codex_ponytail_locator (run_case codex-ponytail codex "$HOME/.codex-ponytail/sessions" "$UAT_CODEX_PONYTAIL_SESSION" "$UAT_CODEX_PONYTAIL_QUERY" ordinary)
     or return 1
 
     probe_exhaustive
@@ -330,6 +347,18 @@ function execute_uat
     python -c 'from pathlib import Path; import sys; assert Path(sys.argv[1]).read_text(encoding="utf-8").strip()=="enabled"' "$uat_dir/final-index-timer-enabled.txt"
     or return 1
 
+    sleep 60
+    set -l helper_runtime "$HOME/.cc-search-chats"
+    if set -q CC_SEARCH_RUNTIME_DIR
+        set helper_runtime "$CC_SEARCH_RUNTIME_DIR"
+    end
+    ps -u (id -u) -o pid=,args= >$uat_dir/final-user-processes.txt
+    or return 1
+
+    # Invariant: sixty seconds after the final semantic call, no helper process or socket remains and its lifetime lock is acquirable.
+    python -c 'import fcntl,sys; from pathlib import Path; processes=Path(sys.argv[1]).read_text(encoding="utf-8"); rows=[line.split(None,2) for line in processes.splitlines() if line.strip()]; helpers=[row for row in rows if len(row)==3 and Path(row[1]).name.startswith("python") and " -m cc_search_chats.semantic.query_embedder" in row[2]]; socket_path=Path(sys.argv[2]); lock_path=Path(sys.argv[3]); assert processes.strip() and not helpers; assert not socket_path.exists(); lock_path.parent.mkdir(mode=0o700,parents=True,exist_ok=True); handle=lock_path.open("a+"); fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB); print("query embedder absent; socket absent; lifetime lock acquired")' "$uat_dir/final-user-processes.txt" "$helper_runtime/query-embedder.sock" "$helper_runtime/query-embedder.lock" >$uat_dir/final-query-embedder-state.txt
+    or return 1
+
     printf 'UAT evidence: %s\n' "$uat_dir"
 end
 
@@ -347,10 +376,12 @@ The human reviews:
 - literal and semantic ranking usefulness, including false positives;
 - staleness legibility in the retained human header and JSON `index_state`
   before and after the intentional index;
-- semantic latency against the five-second answer deadline;
+- cold semantic latency, immediate warm reuse, and the absence of a semantic
+  deadline;
 - coverage, warnings, and the exact roots associated with each control;
 - stdout JSON and stderr NDJSON purity, including exactly one terminal event;
 - the initial and final nightly timer state.
+- helper process/socket release after the final semantic call.
 
 Record an acceptance or rejection with the exact installed commit and evidence
 directory. Do not infer acceptance from script exit status. Prune remains a

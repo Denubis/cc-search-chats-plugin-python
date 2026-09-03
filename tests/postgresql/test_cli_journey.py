@@ -13,6 +13,7 @@ from psycopg.conninfo import conninfo_to_dict
 
 from cc_search_chats.cli import main
 from cc_search_chats.semantic import SemanticChunk
+from cc_search_chats.semantic.query_embedder import QueryEmbeddingResult
 from cc_search_chats.storage.postgresql import migrate
 
 pytestmark = pytest.mark.postgresql
@@ -71,6 +72,9 @@ def _assert_v4_envelope(
         "completed_units",
         "total_units",
         "fresh",
+        "model_load_ms",
+        "query_embed_ms",
+        "warm_reused",
     }
     assert semantic["corpus_generation"] == refresh["corpus_generation"]
     assert "indexed_at" in payload
@@ -238,6 +242,7 @@ def test_postgresql_cli_journey_with_events(
     monkeypatch.setattr(
         "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
+    monkeypatch.setenv("CC_SEARCH_RUNTIME_DIR", str(tmp_path / "runtime"))
     claude_root, codex_root = tmp_path / "claude", tmp_path / "codex"
     claude_root.mkdir()
     codex_day = codex_root / "2026" / "08" / "11"
@@ -607,15 +612,16 @@ def test_postgresql_cli_journey_with_events(
         embedded_texts.extend(texts)
         return [vector for _ in texts]
 
-    def bounded_query_embedding(_query, *, timeout_seconds, progress, quiet):
-        assert 0 < timeout_seconds <= 5
+    def bounded_query_embedding(_query, *, progress, quiet):
         assert quiet is True
         if progress is not None:
             progress("model_preflight", "running")
             progress("model_preflight", "complete")
             progress("model_load", "running")
             progress("model_load", "complete")
-        return vector
+            progress("query_embed", "running")
+            progress("query_embed", "complete")
+        return QueryEmbeddingResult(tuple(vector), 10, 2, False)
 
     monkeypatch.setattr("cc_search_chats.cli.embed_passages", embed_passages)
     monkeypatch.setattr(
@@ -851,6 +857,7 @@ def test_extract_requires_provider_when_native_session_ids_collide(
     monkeypatch.setattr(
         "cc_search_chats.cli._contain_semantic_index", lambda _args: None
     )
+    monkeypatch.setenv("CC_SEARCH_RUNTIME_DIR", str(tmp_path / "runtime"))
     claude_root, codex_root = tmp_path / "claude", tmp_path / "codex"
     claude_root.mkdir()
     codex_day = codex_root / "2026" / "08" / "11"

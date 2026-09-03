@@ -13,7 +13,6 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
-from multiprocessing import get_context
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -49,9 +48,14 @@ from cc_search_chats.semantic import (
     ModelUnavailable,
     chunk_passages,
     embed_passages,
-    embed_query,
     local_model_revision,
     model_output_scope,
+)
+from cc_search_chats.semantic.query_embedder import (
+    QueryEmbeddingResult,
+    request_query_embedding,
+    semantic_warm_seconds,
+    shutdown_query_embedder,
 )
 from cc_search_chats.storage.index import (
     ProjectRebuildError,
@@ -118,7 +122,6 @@ from cc_search_chats.storage.postgresql.semantic import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
-    from multiprocessing.connection import Connection
 
     from cc_search_chats.providers.source_discovery import ConfiguredSourceRoot
 
@@ -132,7 +135,7 @@ _INDEX_STATE_SCAN_BUDGET_SECONDS = (
 _LITERAL_MODE_HELP = "exact PostgreSQL full-text search; no model, no GPU"
 _SEMANTIC_MODE_HELP = (
     "model-ranked search: hybrid fusion of full-text and embedding candidates by "
-    "reciprocal rank; loads the embedding model"
+    "reciprocal rank; no deadline, and first use takes about 10 s"
 )
 
 
@@ -153,94 +156,20 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 
 def _remaining_search_seconds(args: argparse.Namespace) -> float:
-    return args.answer_deadline - monotonic()
-
-
-def _query_embedding_child(pipe: Connection) -> None:
-    """Run one query embedding in an isolated process without argv disclosure."""
-    try:
-        query, quiet = pipe.recv()
-
-        def progress(phase: str, state: str) -> None:
-            pipe.send(("progress", (phase, state)))
-
-        with model_output_scope(quiet=quiet):
-            pipe.send(("result", embed_query(query, progress=progress)))
-    except ModelUnavailable as error:
-        pipe.send(
-            (
-                "model_unavailable",
-                {
-                    "message": str(error),
-                    "code": error.code,
-                    "phase": error.phase,
-                    "available_vram_bytes": error.available_vram_bytes,
-                    "required_vram_bytes": error.required_vram_bytes,
-                    "total_vram_bytes": error.total_vram_bytes,
-                },
-            )
-        )
-    except Exception as error:  # noqa: BLE001  # converts child failure to diagnostic
-        pipe.send(("error", f"{type(error).__name__}: {error}"))
-    finally:
-        pipe.close()
+    answer_deadline = args.answer_deadline
+    if answer_deadline is None:
+        raise RuntimeError("this search mode has no answer deadline")
+    return answer_deadline - monotonic()
 
 
 def _bounded_query_embedding(
     query: str,
     *,
-    timeout_seconds: float,
     progress: Callable[[str, str], None],
     quiet: bool = False,
-) -> Sequence[float]:
-    """Return one embedding or stop and reap its child at the deadline."""
-    if timeout_seconds <= 0:
-        raise TimeoutError("no request budget remains for semantic query work")
-    context = get_context("spawn")
-    parent, child = context.Pipe(duplex=True)
-    process = context.Process(
-        target=_query_embedding_child,
-        args=(child,),
-        name="cc-search-query-embedding",
-    )
-    process.start()
-    child.close()
-    deadline = monotonic() + timeout_seconds
-    try:
-        parent.send((query, quiet))
-        while True:
-            remaining = deadline - monotonic()
-            if remaining <= 0 or not parent.poll(remaining):
-                raise TimeoutError("semantic query embedding exceeded its deadline")
-            try:
-                kind, payload = parent.recv()
-            except EOFError as error:
-                raise RuntimeError(
-                    "semantic query child exited without a result"
-                ) from error
-            if kind == "progress":
-                progress(*payload)
-            elif kind == "result":
-                return payload
-            elif kind == "model_unavailable":
-                raise ModelUnavailable(
-                    payload["message"],
-                    code=payload["code"],
-                    phase=payload["phase"],
-                    available_vram_bytes=payload["available_vram_bytes"],
-                    required_vram_bytes=payload["required_vram_bytes"],
-                    total_vram_bytes=payload["total_vram_bytes"],
-                )
-            else:
-                raise RuntimeError(payload)
-    finally:
-        parent.close()
-        if process.is_alive():
-            process.terminate()
-        process.join(timeout=0.2)
-        if process.is_alive():
-            process.kill()
-            process.join(timeout=0.2)
+) -> QueryEmbeddingResult:
+    """Return one embedding from the same-user warm helper."""
+    return request_query_embedding(query, progress=progress, quiet=quiet)
 
 
 class _ProgressStream:
@@ -565,6 +494,9 @@ def _error_envelope(
             "completed_units": 0,
             "total_units": 0,
             "fresh": False,
+            "model_load_ms": None,
+            "query_embed_ms": None,
+            "warm_reused": None,
         },
         "indexed_at": None,
         "corpus_age_ms": None,
@@ -1033,6 +965,9 @@ def _postgres_semantic(connection: psycopg.Connection) -> dict[str, object]:
         "completed_units": row[4] or 0,
         "total_units": row[5] or 0,
         "fresh": row[6] is True,
+        "model_load_ms": None,
+        "query_embed_ms": None,
+        "warm_reused": None,
     }
 
 
@@ -1181,6 +1116,16 @@ def _print_human_search(
         else f"semantic search (hybrid model ranking): {args.query}"
     )
     _print_index_state_header(envelope)
+    semantic = cast("Mapping[str, object]", envelope["semantic"])
+    if not args.literal and isinstance(semantic["warm_reused"], bool):
+        if semantic["warm_reused"]:
+            print("semantic: warm model reused")
+        else:
+            warm_seconds = f"{semantic_warm_seconds():g}"
+            print(
+                "semantic: loading model (first use takes about 10 s; stays warm "
+                f"{warm_seconds} s after each query)"
+            )
     degraded = next(
         (
             warning
@@ -1603,6 +1548,7 @@ def _postgres_index_status(context: _PostgresContext) -> int:
 
 
 def _postgres_index_run(context: _PostgresContext) -> int:
+    shutdown_query_embedder()
     acquire_index_session(context.connection)
     verify_model_revision(
         context.connection,
@@ -1890,6 +1836,9 @@ class _SearchState:
     retrieval_mode: str
     hybrid_rankings: dict[str, HybridHit]
     warnings: list[dict[str, str]]
+    model_load_ms: int | None = None
+    query_embed_ms: int | None = None
+    warm_reused: bool | None = None
 
 
 def _begin_search_snapshot(connection: psycopg.Connection) -> None:
@@ -1982,53 +1931,23 @@ def _append_revision_warning(
 def _semantic_search_state(
     context: _PostgresContext,
     state: _SearchState,
-    answer_deadline: float | None,
 ) -> None:
     if context.args.literal or context.args.exhaustive:
         return
-    assert answer_deadline is not None  # noqa: S101  # ranked-search invariant
     _append_revision_warning(context.connection, state.warnings)
-    semantic_budget = answer_deadline - monotonic()
-    context.progress_stream.emit("query_embed", "running")
     try:
-        query_embedding = _bounded_query_embedding(
-            context.args.query,
-            timeout_seconds=semantic_budget,
-            progress=context.progress_stream.emit,
-            quiet=context.progress_stream.ndjson,
-        )
-        context.progress_stream.emit("query_embed", "complete")
-        semantic_hits = semantic_search(
-            context.connection,
-            query_embedding,
-            limit=state.component_depth,
-            provider=context.args.provider,
-            role=context.args.role,
-            project=context.args.project,
-            since=_since_days(context.args.days),
-            epoch=context.args.epoch,
-            include_agents=context.args.agents,
-            allow_partial=True,
-        )
-        hybrid_hits = fuse_hybrid(
-            state.literal_hits,
-            semantic_hits,
-            limit=context.args.limit,
-            rank_constant=60,
-            component_depth=state.component_depth,
-        )
-        state.hits = tuple(value.message for value in hybrid_hits)
-        state.hybrid_rankings = {
-            value.message.canonical_locator: value for value in hybrid_hits
-        }
-        state.retrieval_mode = "hybrid"
-    except (
-        ModelUnavailable,
-        TimeoutError,
-        psycopg.Error,
-        RuntimeError,
-        ValueError,
-    ) as error:
+        with context.progress_stream.heartbeat("model_load") as heartbeat_update:
+
+            def report_progress(phase: str, progress_state: str) -> None:
+                heartbeat_update(phase, None, None, None)
+                context.progress_stream.emit(phase, progress_state)
+
+            query_embedding = _bounded_query_embedding(
+                context.args.query,
+                progress=report_progress,
+                quiet=context.progress_stream.ndjson,
+            )
+    except (ModelUnavailable, RuntimeError, TypeError, ValueError) as error:
         state.retrieval_mode = "literal_fallback"
         state.warnings.append(
             {
@@ -2041,25 +1960,55 @@ def _semantic_search_state(
             "degraded",
             warning=state.warnings[-1],
         )
+        return
+    state.model_load_ms = query_embedding.model_load_ms
+    state.query_embed_ms = query_embedding.query_embed_ms
+    state.warm_reused = query_embedding.warm_reused
+    semantic_hits = semantic_search(
+        context.connection,
+        query_embedding.embedding,
+        limit=state.component_depth,
+        provider=context.args.provider,
+        role=context.args.role,
+        project=context.args.project,
+        since=_since_days(context.args.days),
+        epoch=context.args.epoch,
+        include_agents=context.args.agents,
+        allow_partial=True,
+    )
+    hybrid_hits = fuse_hybrid(
+        state.literal_hits,
+        semantic_hits,
+        limit=context.args.limit,
+        rank_constant=60,
+        component_depth=state.component_depth,
+    )
+    state.hits = tuple(value.message for value in hybrid_hits)
+    state.hybrid_rankings = {
+        value.message.canonical_locator: value for value in hybrid_hits
+    }
+    state.retrieval_mode = "hybrid"
 
 
 def _search_envelope(
     context: _PostgresContext,
     state: _SearchState,
 ) -> dict[str, object]:
-    return _postgres_envelope(
+    envelope = _postgres_envelope(
         context.connection,
         "search",
         index_state_roots=configured_source_roots(),
         index_state_deadline=(
             monotonic() + _INDEX_STATE_SCAN_BUDGET_SECONDS
-            if context.args.exhaustive
+            if context.args.answer_deadline is None
             else context.args.answer_deadline
         ),
         exhaustive=context.args.exhaustive,
         result_limit=None if context.args.exhaustive else context.args.limit,
         deadline_ms=(
-            None if context.args.exhaustive else round(_SEARCH_DEADLINE_SECONDS * 1000)
+            None
+            if context.args.answer_deadline is None
+            else round(_SEARCH_DEADLINE_SECONDS * 1000)
         ),
         elapsed_ms=round((monotonic() - context.args.request_started) * 1000),
         retrieval_mode=state.retrieval_mode,
@@ -2067,6 +2016,13 @@ def _search_envelope(
         stale_reasons=[],
         additional_warnings=state.warnings,
     )
+    semantic = cast("dict[str, object]", envelope["semantic"])
+    semantic.update(
+        model_load_ms=state.model_load_ms,
+        query_embed_ms=state.query_embed_ms,
+        warm_reused=state.warm_reused,
+    )
+    return envelope
 
 
 def _apply_search_staleness(
@@ -2105,6 +2061,8 @@ def _resolve_or_degrade_search(
         psycopg.errors.LockNotAvailable,
         psycopg.errors.QueryCanceled,
     ) as error:
+        if answer_deadline is None:
+            raise
         deadline_warning = {
             "code": "deadline_degraded",
             "detail": f"{type(error).__name__}: {error}",
@@ -2143,7 +2101,7 @@ def _postgres_search(context: _PostgresContext) -> int:
     _begin_search_snapshot(context.connection)
     context.progress_stream.emit("retrieve", "running")
     state = _literal_search_state(context)
-    _semantic_search_state(context, state, answer_deadline)
+    _semantic_search_state(context, state)
     context.progress_stream.emit(
         "retrieve",
         "complete",
@@ -2167,7 +2125,7 @@ def _postgres_connection(
     args: argparse.Namespace,
     dsn: str,
 ) -> Iterator[psycopg.Connection]:
-    if args.command == "search" and not args.exhaustive:
+    if args.command == "search" and args.answer_deadline is not None:
         remaining = _remaining_search_seconds(args)
         if remaining <= 0:
             raise SearchDeadlineExceeded("search deadline expired before connection")
@@ -2186,7 +2144,7 @@ def _configure_postgres_connection(
     args: argparse.Namespace,
     connection: psycopg.Connection,
 ) -> None:
-    if args.command != "search" or args.exhaustive:
+    if args.command != "search" or args.answer_deadline is None:
         return
     remaining = _remaining_search_seconds(args)
     if remaining <= 0:
@@ -2789,6 +2747,8 @@ def _validate_search_args(
         return
     args.answer_deadline = (
         request_started + _SEARCH_DEADLINE_SECONDS - _SEARCH_RENDER_RESERVE_SECONDS
+        if args.literal and not args.exhaustive
+        else None
     )
     if args.everything:
         parser.error(
@@ -2826,7 +2786,7 @@ def _postgres_dsn() -> str:
 
 
 def _postgres_read_scope(args: argparse.Namespace):
-    if args.command != "search" or args.exhaustive:
+    if args.command != "search" or args.answer_deadline is None:
         return nullcontext()
     remaining = _remaining_search_seconds(args)
     if remaining <= 0:
@@ -2888,9 +2848,13 @@ def _exit_postgres_operation_error(
     error: OSError | psycopg.Error | RuntimeError | ValueError,
 ) -> Never:
     detail = _postgres_error_detail(error)
-    if args.command == "search" and isinstance(
-        error,
-        (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled),
+    if (
+        args.command == "search"
+        and args.answer_deadline is not None
+        and isinstance(
+            error,
+            (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled),
+        )
     ):
         _exit_with_error(
             args,

@@ -10,9 +10,11 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
+from cc_search_chats import cli
 from cc_search_chats.cli import main
 from cc_search_chats.semantic import SemanticChunk
 from cc_search_chats.semantic.model import MODEL_REVISION
+from cc_search_chats.semantic.query_embedder import QueryEmbeddingResult
 from cc_search_chats.storage.postgresql import migrate
 
 pytestmark = pytest.mark.postgresql
@@ -87,12 +89,14 @@ def _passage_embeddings(texts, **kwargs):
 def _stub_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cc_search_chats.cli.embed_passages", _passage_embeddings)
     monkeypatch.setattr("cc_search_chats.cli.chunk_passages", _single_chunks)
+    monkeypatch.setattr("cc_search_chats.cli.shutdown_query_embedder", lambda: None)
 
-    def query_embedding(_query, *, timeout_seconds, progress, quiet):
-        assert timeout_seconds > 0
+    def query_embedding(_query, *, progress, quiet):
         assert progress is not None
         assert quiet is True
-        return _vector()
+        progress("query_embed", "running")
+        progress("query_embed", "complete")
+        return QueryEmbeddingResult(tuple(_vector()), 0, 1, True)
 
     monkeypatch.setattr("cc_search_chats.cli._bounded_query_embedding", query_embedding)
 
@@ -115,6 +119,24 @@ def test_index_adopts_unknown_revision_once(
 ) -> None:
     _configure_cli(postgres_cluster, tmp_path, monkeypatch)
     _stub_semantics(monkeypatch)
+    sequence: list[str] = []
+    acquire_index_session = cli.acquire_index_session
+    verify_model_revision = cli.verify_model_revision
+
+    def shutdown_helper() -> None:
+        sequence.append("shutdown_helper")
+
+    def acquire_session(connection: psycopg.Connection) -> None:
+        sequence.append("acquire_index_session")
+        acquire_index_session(connection)
+
+    def verify_revision(*args, **kwargs):
+        sequence.append("verify_model_revision")
+        return verify_model_revision(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "shutdown_query_embedder", shutdown_helper)
+    monkeypatch.setattr(cli, "acquire_index_session", acquire_session)
+    monkeypatch.setattr(cli, "verify_model_revision", verify_revision)
     monkeypatch.setattr(
         "cc_search_chats.cli.local_model_revision",
         lambda: OBSERVED_REVISION,
@@ -130,6 +152,11 @@ def test_index_adopts_unknown_revision_once(
 
     first_code, _ = _run(monkeypatch, capsys, "index", "--json")
     assert first_code == 0
+    assert sequence[:3] == [
+        "shutdown_helper",
+        "acquire_index_session",
+        "verify_model_revision",
+    ]
     with psycopg.connect(postgres_cluster.dsn, autocommit=True) as connection:
         first = _profile_version(connection)
     assert first[0] == OBSERVED_REVISION

@@ -113,6 +113,10 @@ ignore = [
 "src/cc_search_chats/semantic/model.py" = [
     "N818",  # public name; rename is a contract change
 ]
+"src/cc_search_chats/semantic/query_embedder.py" = [
+    "S603",  # fixed interpreter/module command launches the detached local helper
+    "T201",  # detached helper reports fatal startup failures only to its log stream
+]
 "src/cc_search_chats/storage/index.py" = [
     "PLC0415",  # late imports preserve patchable discovery and query-builder seams
     "T201",  # the legacy CLI adapter reports source warnings on stderr
@@ -149,6 +153,9 @@ ignore = [
 "tests/test_plugin_packaging.py" = [
     "S603",     # drives fish, codex, and sys.executable as a user would
     "S607",     # the bare executable name on PATH is the contract under test, guarded by shutil.which skipif
+]
+"tests/test_query_embedder.py" = [
+    "S603",  # fixed interpreter/module command exercises the guarded helper boundary
 ]
 [tool.ruff.format]
 quote-style = "double"

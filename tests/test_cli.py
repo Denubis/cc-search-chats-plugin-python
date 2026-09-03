@@ -20,15 +20,15 @@ import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, redirect_stderr, redirect_stdout, suppress
-from multiprocessing import active_children, get_context
 from pathlib import Path
 from threading import Event
-from time import monotonic, sleep
+from time import monotonic
 from typing import TYPE_CHECKING, Literal
 
 import pytest
 from tests.conftest import SESSION_ID_A, SESSION_ID_B, _make_session_lines
 
+import cc_search_chats.cli as cli_module
 from cc_search_chats import __version__
 from cc_search_chats.cli import (
     _bounded_query_embedding,
@@ -41,7 +41,9 @@ from cc_search_chats.cli import (
 from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.queueing import client_admission
-from cc_search_chats.semantic import ModelUnavailable
+from cc_search_chats.semantic import ModelUnavailable, query_embedder
+from cc_search_chats.semantic.model import DIMENSIONS
+from cc_search_chats.semantic.query_embedder import query_embedder_paths
 from cc_search_chats.storage.index import (
     ProjectRebuildError,
     close_db,
@@ -51,6 +53,7 @@ from cc_search_chats.storage.index import (
 )
 
 if TYPE_CHECKING:
+    import subprocess
     from collections.abc import Generator
 
 # ============================================================
@@ -149,7 +152,7 @@ def test_search_read_deadline_uses_the_single_reserved_answer_deadline(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["cc-search-chats", "search", "needle", "--semantic", "--json"],
+        ["cc-search-chats", "search", "needle", "--literal", "--json"],
     )
     monkeypatch.setattr("cc_search_chats.cli.monotonic", lambda: 100.25)
     observed_timeouts: list[int] = []
@@ -173,6 +176,65 @@ def test_search_read_deadline_uses_the_single_reserved_answer_deadline(
     assert observed_timeouts == [4650]
 
 
+def test_semantic_search_has_no_answer_or_postgres_read_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PGSERVICE", "fixture")
+    monkeypatch.delenv("CC_SEARCH_DB_PATH", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "needle", "--semantic", "--json"],
+    )
+    observed_timeouts: list[int] = []
+    observed_deadlines: list[float | None] = []
+
+    def observed_read_deadline(timeout_ms: int):
+        observed_timeouts.append(timeout_ms)
+        return nullcontext()
+
+    def observed_handle(args, _dsn, _progress_stream):
+        observed_deadlines.append(args.answer_deadline)
+        return 0
+
+    monkeypatch.setattr("cc_search_chats.cli.read_deadline", observed_read_deadline)
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
+    )
+    monkeypatch.setattr("cc_search_chats.cli._handle_postgres", observed_handle)
+
+    with pytest.raises(SystemExit, match="0"):
+        main(request_started=100.0)
+
+    assert observed_timeouts == []
+    assert observed_deadlines == [None]
+
+
+def test_semantic_connection_has_no_deadline_derived_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = build_parser().parse_args(["search", "needle", "--semantic", "--json"])
+    cli_module._validate_search_args(args, build_parser(), request_started=100.0)
+    connect_calls: list[dict[str, object]] = []
+
+    class Connection:
+        def execute(self, _query, *_args, **_kwargs):
+            raise AssertionError("semantic connection configured a SQL timeout")
+
+    connection = Connection()
+
+    def connect(_dsn: str, **kwargs):
+        connect_calls.append(kwargs)
+        return nullcontext(connection)
+
+    monkeypatch.setattr(cli_module.psycopg, "connect", connect)
+
+    with cli_module._postgres_connection(args, "fixture") as opened:
+        cli_module._configure_postgres_connection(args, opened)
+
+    assert connect_calls == [{"autocommit": True}]
+
+
 @pytest.mark.parametrize(
     "retired_flag",
     ["--background-refresh", "--literal-only", "--semantic-only"],
@@ -191,29 +253,58 @@ def test_explicit_postgresql_migration_is_an_index_maintenance_mode() -> None:
     assert args.migrate is True
 
 
-def test_semantic_query_timeout_terminates_and_reaps_child(
+def test_cli_query_embedding_seam_reuses_helper_and_observes_idle_exit(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    context = get_context("fork")
+    token = "cli-process-boundary-token"
+    monkeypatch.setenv("CC_SEARCH_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("CC_SEARCH_SEMANTIC_WARM_SECONDS", "0.2")
+    monkeypatch.setenv("CC_SEARCH_QUERY_EMBEDDER_TEST_TOKEN", token)
+    monkeypatch.setenv("CC_SEARCH_MODEL_PATH", str(tmp_path / "missing-model"))
+    monkeypatch.setattr(
+        query_embedder,
+        "_query_embedder_command",
+        lambda: [
+            sys.executable,
+            "-m",
+            "cc_search_chats.semantic.query_embedder",
+            "--test-embedder-token",
+            token,
+        ],
+    )
+    spawned: list[subprocess.Popen[bytes]] = []
+    spawn_detached_helper = query_embedder._spawn_detached_helper
 
-    def never_respond(pipe) -> None:
-        pipe.recv()
-        sleep(5)
+    def observed_spawn(paths):
+        process = spawn_detached_helper(paths)
+        spawned.append(process)
+        return process
 
-    monkeypatch.setattr("cc_search_chats.cli.get_context", lambda _method: context)
-    monkeypatch.setattr("cc_search_chats.cli._query_embedding_child", never_respond)
-    children_before = {child.pid for child in active_children()}
-    started = monotonic()
+    monkeypatch.setattr(query_embedder, "_spawn_detached_helper", observed_spawn)
 
-    with pytest.raises(TimeoutError, match="exceeded its deadline"):
-        _bounded_query_embedding(
-            "private query text",
-            timeout_seconds=0.05,
-            progress=lambda _phase, _state: None,
-        )
+    first = _bounded_query_embedding(
+        "private query text",
+        progress=lambda _phase, _state: None,
+        quiet=True,
+    )
+    second = _bounded_query_embedding(
+        "second private query",
+        progress=lambda _phase, _state: None,
+        quiet=True,
+    )
 
-    assert monotonic() - started < 1
-    assert {child.pid for child in active_children()} == children_before
+    assert len(first.embedding) == len(second.embedding) == DIMENSIONS
+    assert first.warm_reused is False
+    assert second.warm_reused is True
+    assert len(spawned) == 1
+    deadline = monotonic() + 2
+    socket_path = query_embedder_paths().socket
+    while socket_path.exists() and monotonic() < deadline:
+        Event().wait(0.01)
+    spawned[0].wait(timeout=2)
+    assert spawned[0].returncode == 0
+    assert not socket_path.exists()
 
 
 def test_search_scope_flags_are_explicit_and_everything_is_rejected(
@@ -291,7 +382,7 @@ def test_search_requires_one_explicit_described_mode(
     assert "--semantic" in error
     assert (
         "model-ranked search: hybrid fusion of full-text and embedding candidates "
-        "by reciprocal rank; loads the embedding model"
+        "by reciprocal rank; no deadline, and first use takes about 10 s"
     ) in error
 
 
@@ -307,7 +398,7 @@ def test_required_search_mode_error_does_not_depend_on_argparse_prose(
     assert "exact PostgreSQL full-text search; no model, no GPU" in error
     assert (
         "model-ranked search: hybrid fusion of full-text and embedding candidates "
-        "by reciprocal rank; loads the embedding model"
+        "by reciprocal rank; no deadline, and first use takes about 10 s"
     ) in error
 
 
