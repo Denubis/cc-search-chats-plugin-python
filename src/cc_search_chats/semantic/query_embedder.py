@@ -25,6 +25,7 @@ from cc_search_chats.semantic.model import (
     embed_query,
     local_model_revision,
     model_output_scope,
+    release_model,
 )
 
 SEMANTIC_WARM_SECONDS = 30.0
@@ -32,6 +33,8 @@ _TEST_GUARD_ENV = "CC_SEARCH_QUERY_EMBEDDER_TEST_TOKEN"
 _MAX_REQUEST_BYTES = 8 * 1024 * 1024
 _LIFETIME_LOCK_WAIT_SECONDS = 2.0
 _LIFETIME_LOCK_RETRY_SECONDS = 0.01
+_PROCESS_EXIT_WAIT_SECONDS = 10.0
+_PROCESS_EXIT_POLL_SECONDS = 0.02
 _SPAWN_THREAD_LOCK = Lock()
 type EmbedCallable = Callable[..., Sequence[float]]
 type ProgressCallable = Callable[[str, str], None]
@@ -375,6 +378,10 @@ def serve_query_embedder(
         paths.lock.chmod(0o600)
         if not _acquire_lifetime_lock(lock.fileno()):
             return False
+        lock.seek(0)
+        lock.truncate()
+        lock.write(f"{os.getpid()}\n")
+        lock.flush()
         paths.socket.unlink(missing_ok=True)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         socket_identity: tuple[int, int] | None = None
@@ -402,7 +409,12 @@ def serve_query_embedder(
             if socket_identity is not None:
                 _unlink_owned_socket(paths.socket, socket_identity)
             listener.close()
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            try:
+                release_model()
+                sys.stdout.flush()
+                sys.stderr.flush()
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
     return True
 
 
@@ -480,7 +492,7 @@ def main() -> int:
     except (OSError, RuntimeError, ValueError) as error:
         print(f"query embedder failed: {error}", file=sys.stderr)
         return 1
-    return 0
+    os._exit(0)
 
 
 def request_query_embedding(
@@ -511,17 +523,21 @@ def request_query_embedding(
 def shutdown_query_embedder() -> None:
     """Ask a live helper to exit and wait until it releases its resources."""
     paths = query_embedder_paths()
+    helper_pid = _recorded_helper_pid(paths.lock)
     try:
         response = _exchange(paths.socket, {"kind": "shutdown"})
     except OSError:
         if _lifetime_lock_free(paths):
             paths.socket.unlink(missing_ok=True)
-        return
-    if response.get("kind") != "shutdown":
+            return
+        helper_pid = _recorded_helper_pid(paths.lock)
+        response = None
+    if response is not None and response.get("kind") != "shutdown":
         raise RuntimeError("query embedder rejected shutdown")
     while not _lifetime_lock_free(paths):
         sleep(0.02)
     paths.socket.unlink(missing_ok=True)
+    _wait_for_process_exit(helper_pid, paths.log)
 
 
 def _decode_response(line: str) -> dict[str, object]:
@@ -596,11 +612,46 @@ def _descriptor_lifetime_lock_free(file_descriptor: int) -> bool:
     return True
 
 
+def _recorded_helper_pid(path: Path) -> int | None:
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+        pid = int(content)
+    except OSError, ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_process_exit(pid: int | None, log: Path) -> None:
+    if pid is None or pid == os.getpid():
+        return
+    deadline = monotonic() + _PROCESS_EXIT_WAIT_SECONDS
+    while _process_exists(pid):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"query embedder process {pid} did not exit within "
+                f"{_PROCESS_EXIT_WAIT_SECONDS:g} seconds after releasing its "
+                f"lifetime lock; inspect {log}"
+            )
+        sleep(min(_PROCESS_EXIT_POLL_SECONDS, remaining))
+
+
 def _stop_incompatible_helper(
     paths: QueryEmbedderPaths,
     *,
     lock_descriptor: int,
 ) -> None:
+    helper_pid = _recorded_helper_pid(paths.lock)
     try:
         response = _exchange(paths.socket, {"kind": "shutdown"})
     except OSError:
@@ -610,6 +661,7 @@ def _stop_incompatible_helper(
     while not _descriptor_lifetime_lock_free(lock_descriptor):
         sleep(0.02)
     paths.socket.unlink(missing_ok=True)
+    _wait_for_process_exit(helper_pid, paths.log)
 
 
 def _spawn_detached_helper(paths: QueryEmbedderPaths) -> subprocess.Popen[bytes]:

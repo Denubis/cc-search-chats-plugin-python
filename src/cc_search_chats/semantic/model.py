@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass
@@ -104,12 +105,12 @@ def local_model_revision() -> str | None:
 
 def _silence_model_libraries() -> None:
     try:
-        transformers = import_module("transformers")
+        transformers_logging = import_module("transformers.utils.logging")
     except ImportError:
-        transformers = None
-    if transformers is not None:
-        transformers.utils.logging.disable_progress_bar()
-        transformers.utils.logging.set_verbosity_error()
+        transformers_logging = None
+    if transformers_logging is not None:
+        transformers_logging.disable_progress_bar()
+        transformers_logging.set_verbosity_error()
 
     try:
         huggingface_hub = import_module("huggingface_hub")
@@ -209,6 +210,15 @@ def _runtime():
         ) from error
     model.config.use_cache = False
     return torch, tokenizer, model
+
+
+def release_model() -> None:
+    """Drop cached model state and release Torch's unused CUDA allocations."""
+    _runtime.cache_clear()
+    _tokenizer.cache_clear()
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        torch.cuda.empty_cache()
 
 
 def _normalize_pooled_embeddings(torch, pooled):

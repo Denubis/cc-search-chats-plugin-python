@@ -4,12 +4,47 @@ import io
 import subprocess
 import sys
 from contextlib import redirect_stderr
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
 
 from cc_search_chats.semantic import ModelUnavailable, embed_passages, embed_query
 from cc_search_chats.semantic import model as semantic_model
+
+
+def test_release_model_drops_cached_runtime_and_tokenizer_and_empties_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeCuda:
+        @staticmethod
+        def empty_cache() -> None:
+            events.append("empty_cache")
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    @lru_cache(maxsize=1)
+    def cached_runtime() -> object:
+        return object()
+
+    @lru_cache(maxsize=1)
+    def cached_tokenizer() -> object:
+        return object()
+
+    cached_runtime()
+    cached_tokenizer()
+    monkeypatch.setattr(semantic_model, "_runtime", cached_runtime)
+    monkeypatch.setattr(semantic_model, "_tokenizer", cached_tokenizer)
+    monkeypatch.setitem(sys.modules, "torch", FakeTorch())
+
+    semantic_model.release_model()
+
+    assert cached_runtime.cache_info().currsize == 0
+    assert cached_tokenizer.cache_info().currsize == 0
+    assert events == ["empty_cache"]
 
 
 @pytest.mark.parametrize(
@@ -57,17 +92,11 @@ def test_ndjson_model_output_scope_disables_library_noise(
         def disable_progress_bars() -> None:
             calls.append("hub:disable_progress")
 
-    class TransformersUtils:
-        logging = Logging()
-
-    class Transformers:
-        utils = TransformersUtils()
-
     class Hub:
         logging = HubLogging()
         utils = HubUtils()
 
-    modules = {"transformers": Transformers(), "huggingface_hub": Hub()}
+    modules = {"transformers.utils.logging": Logging(), "huggingface_hub": Hub()}
     monkeypatch.setattr(semantic_model, "import_module", modules.__getitem__)
     stderr = io.StringIO()
 

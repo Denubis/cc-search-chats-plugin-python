@@ -49,6 +49,14 @@ def _socket_ready(path: Path) -> bool:
         return False
 
 
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def _request(path: Path, request: dict[str, object]) -> list[dict[str, object]]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.connect(str(path))
@@ -475,6 +483,85 @@ def test_two_concurrent_clients_spawn_one_helper_and_reuse_it(
     assert not query_embedder_paths().socket.exists()
 
 
+def test_shutdown_returns_only_after_recorded_helper_pid_is_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "shutdown-pid-test-token"
+    monkeypatch.setenv("CC_SEARCH_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("CC_SEARCH_SEMANTIC_WARM_SECONDS", "5")
+    monkeypatch.setenv("CC_SEARCH_QUERY_EMBEDDER_TEST_TOKEN", token)
+    monkeypatch.setenv("CC_SEARCH_MODEL_PATH", str(tmp_path / "missing-model"))
+    monkeypatch.setattr(
+        query_embedder,
+        "_query_embedder_command",
+        lambda: _guarded_helper_command(token),
+    )
+    spawned: list[subprocess.Popen[bytes]] = []
+    spawn_detached_helper = query_embedder._spawn_detached_helper
+
+    def observed_spawn(paths: query_embedder.QueryEmbedderPaths):
+        process = spawn_detached_helper(paths)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr(query_embedder, "_spawn_detached_helper", observed_spawn)
+
+    try:
+        result = request_query_embedding(
+            "recorded helper pid",
+            progress=lambda _phase, _state: None,
+            quiet=True,
+        )
+        assert len(result.embedding) == DIMENSIONS
+        assert len(spawned) == 1
+        recorded_pid = int(query_embedder_paths().lock.read_text().strip())
+        assert recorded_pid == spawned[0].pid
+        assert _process_exists(recorded_pid)
+
+        shutdown_query_embedder()
+
+        _wait_for(lambda: not _process_exists(recorded_pid), timeout=1)
+        assert spawned[0].wait(timeout=1) == 0
+    finally:
+        if spawned and spawned[0].poll() is None:
+            spawned[0].terminate()
+            spawned[0].wait(timeout=2)
+
+
+def test_shutdown_names_recorded_pid_and_log_if_process_does_not_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CC_SEARCH_RUNTIME_DIR", str(tmp_path))
+    paths = query_embedder_paths()
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    paths.lock.write_text(f"{process.pid}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        query_embedder,
+        "_exchange",
+        lambda _path, _request: {"kind": "shutdown"},
+    )
+    monkeypatch.setattr(query_embedder, "_lifetime_lock_free", lambda _paths: True)
+    monkeypatch.setattr(query_embedder, "_PROCESS_EXIT_WAIT_SECONDS", 0.02)
+
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            shutdown_query_embedder()
+
+        detail = str(raised.value)
+        assert str(process.pid) in detail
+        assert str(paths.log) in detail
+    finally:
+        process.terminate()
+        process.wait(timeout=2)
+
+
 def test_client_replaces_a_test_helper_with_a_different_guard_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -496,6 +583,11 @@ def test_client_replaces_a_test_helper_with_a_different_guard_token(
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    Thread(
+        target=old_process.wait,
+        name="old-test-helper-reaper",
+        daemon=True,
+    ).start()
     path = query_embedder_paths(tmp_path).socket
     _wait_for(lambda: _socket_ready(path))
     monkeypatch.setenv("CC_SEARCH_RUNTIME_DIR", str(tmp_path))
