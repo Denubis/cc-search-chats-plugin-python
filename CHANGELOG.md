@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## cc-search-chats 2.2.1
 
 **Fixed:**
 - Codex lifecycle and inter-agent metadata now remain excluded when native
