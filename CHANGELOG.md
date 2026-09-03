@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## cc-search-chats 2.2.0
 
 **Changed:**
 - Semantic search now has no answer deadline and reuses an ad hoc helper for
