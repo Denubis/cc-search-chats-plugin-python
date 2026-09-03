@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Fixed:**
+- Exact semantic retrieval now ranks a bounded, narrow candidate set before
+  loading message payloads and uses semantic-only transaction-local `work_mem`.
+  This prevents the full-set window sort and hash-join spill that exceeded the
+  unchanged 64 MB temporary-file guardrail on production-scale corpora, and
+  the same statement now reports candidate exhaustion without a second full
+  eligible-chunk join.
+
 ## cc-search-chats 2.2.0
 
 **Changed:**

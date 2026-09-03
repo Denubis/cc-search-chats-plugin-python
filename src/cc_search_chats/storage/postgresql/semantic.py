@@ -27,6 +27,11 @@ _EMBEDDABLE_PROSE = "content_class = 'prose' AND prose_content ~ '[^[:space:]]'"
 _RUN_HEARTBEAT_SECONDS = 5.0
 _PROGRESS_CHECKPOINT_SECONDS = 1.0
 _MODEL_REVISION_RUNBOOK = "docs/runbooks/postgresql-index-maintenance.md"
+_SEMANTIC_WORK_MEM = "256MB"
+_SEMANTIC_CANDIDATE_MINIMUM = 2000
+_SEMANTIC_CANDIDATE_MULTIPLIER = 8
+_SEMANTIC_CANDIDATE_RETRY_MULTIPLIER = 8
+_SEMANTIC_CANDIDATE_MAXIMUM = 64_000
 type Chunker = Callable[[Sequence[str]], tuple[tuple[SemanticChunk, ...], ...]]
 
 
@@ -1271,6 +1276,87 @@ def _index_embeddings(
         heartbeat.stop()
 
 
+def _semantic_search_statement(where: sql.Composable) -> sql.Composed:
+    return sql.SQL(
+        """
+        WITH candidate AS (
+            SELECT chunk.provider, chunk.source_session_id,
+                   chunk.logical_message_id, chunk.content_class,
+                   -(value.embedding <#> %s::vector) AS score,
+                   chunk.chunk_ordinal
+            FROM cc_search_chats.semantic_chunk_current AS chunk
+            JOIN cc_search_chats.embedding_value AS value
+              ON (value.profile_id, value.input_digest) =
+                 (chunk.profile_id, chunk.input_digest)
+            JOIN cc_search_chats.message_current AS message
+              USING (provider, source_session_id,
+                     logical_message_id, content_class)
+            WHERE chunk.profile_id = %s
+              AND chunk.chunker_id = %s
+              AND chunk.source_text_digest = message.embedding_input_digest
+              AND {where}
+            ORDER BY value.embedding <#> %s::vector,
+                     chunk.provider, chunk.source_session_id,
+                     chunk.logical_message_id, chunk.content_class,
+                     chunk.chunk_ordinal
+            LIMIT %s
+        ), best AS (
+            SELECT DISTINCT ON (
+                       provider, source_session_id,
+                       logical_message_id, content_class
+                   )
+                   provider, source_session_id, logical_message_id,
+                   content_class, score, chunk_ordinal
+            FROM candidate
+            ORDER BY provider, source_session_id,
+                     logical_message_id, content_class,
+                     score DESC, chunk_ordinal
+        )
+        SELECT message.provider, message.source_session_id,
+               message.logical_message_id, message.canonical_locator,
+               message.timestamp_text, message.role, message.session_kind,
+               message.conversation_epoch, message.content_class,
+               message.prose_content, message.repository, message.cwd,
+               best.score, best.chunk_ordinal,
+               (SELECT count(*) FROM candidate) AS candidate_rows
+        FROM best
+        JOIN cc_search_chats.message_current AS message
+          USING (provider, source_session_id, logical_message_id, content_class)
+        ORDER BY best.score DESC, message.provider,
+                 message.source_session_id, message.logical_message_id
+        LIMIT %s
+        """
+    ).format(where=where)
+
+
+def _semantic_search_filters(
+    *,
+    provider: str | None,
+    role: str | None,
+    project: str | None,
+    since: str | None,
+    epoch: int | None,
+    include_agents: bool,
+) -> tuple[sql.Composed, tuple[object, ...]]:
+    filters = [
+        sql.SQL("message.session_kind IN ('primary', 'agent', 'unknown')")
+        if include_agents
+        else sql.SQL("message.session_kind = 'primary'")
+    ]
+    params: list[object] = []
+    for value, clause in (
+        (provider, sql.SQL("message.provider = %s")),
+        (role, sql.SQL("message.role = %s")),
+        (project, sql.SQL("COALESCE(message.repository, message.cwd) = %s")),
+        (since, sql.SQL("message.timestamp_text >= %s")),
+        (epoch, sql.SQL("message.conversation_epoch = %s")),
+    ):
+        if value is not None:
+            filters.append(clause)
+            params.append(value)
+    return sql.SQL(" AND ").join(filters), tuple(params)
+
+
 @queued_read_operation
 def semantic_search(
     connection: psycopg.Connection,
@@ -1285,7 +1371,15 @@ def semantic_search(
     include_agents: bool = False,
     allow_partial: bool = False,
 ) -> tuple[SearchHit, ...]:
-    """Return one best-chunk exact inner-product hit per logical message."""
+    """Return bounded exact best-chunk inner-product hits.
+
+    A message is ranked by its best chunk. The top-K chunk set is deterministic
+    because its score boundary uses the same total message-key order as the final
+    result, followed by chunk ordinal. Once it contains ``limit`` messages, each
+    absent message either has a worse best score or ties and loses to every
+    included boundary message under that same key order. The first ``limit``
+    messages therefore have their true best scores and exact final order.
+    """
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("limit must be positive")
     vector = _vector(embedding)
@@ -1313,69 +1407,58 @@ def semantic_search(
         raise ValueError("semantic revision is unavailable or stale")
     if not allow_partial and state[1] is not True:
         raise ValueError("semantic revision is unavailable or stale")
+    connection.execute(
+        "SELECT set_config('work_mem', %s, true)",
+        (_SEMANTIC_WORK_MEM,),
+    )
     if not allow_partial and not _semantic_chunks_complete(connection):
         raise ValueError("semantic chunks are unavailable or stale")
-    filters = [
-        sql.SQL("message.session_kind IN ('primary', 'agent', 'unknown')")
-        if include_agents
-        else sql.SQL("message.session_kind = 'primary'")
-    ]
-    params: list[object] = [vector, vector, _PROFILE_ID, CHUNKER_ID]
-    for value, clause in (
-        (provider, sql.SQL("message.provider = %s")),
-        (role, sql.SQL("message.role = %s")),
-        (project, sql.SQL("COALESCE(message.repository, message.cwd) = %s")),
-        (since, sql.SQL("message.timestamp_text >= %s")),
-        (epoch, sql.SQL("message.conversation_epoch = %s")),
-    ):
-        if value is not None:
-            filters.append(clause)
-            params.append(value)
-    params.append(limit)
-    where = sql.SQL(" AND ").join(filters)
-    rows = connection.execute(
-        sql.SQL(
-            """
-        WITH ranked_chunk AS (
-            SELECT message.provider, message.source_session_id,
-                   message.logical_message_id, message.canonical_locator,
-                   message.timestamp_text, message.role, message.session_kind,
-                   message.conversation_epoch, message.content_class,
-                   message.prose_content, message.repository, message.cwd,
-                   -(value.embedding <#> %s::vector) AS score,
-                   chunk.chunk_ordinal,
-                   row_number() OVER (
-                       PARTITION BY message.provider, message.source_session_id,
-                                    message.logical_message_id,
-                                    message.content_class
-                       ORDER BY value.embedding <#> %s::vector,
-                                chunk.chunk_ordinal
-                   ) AS chunk_rank
-            FROM cc_search_chats.semantic_chunk_current AS chunk
-            JOIN cc_search_chats.embedding_value AS value
-              ON (value.profile_id, value.input_digest) =
-                 (chunk.profile_id, chunk.input_digest)
-            JOIN cc_search_chats.message_current AS message
-              USING (provider, source_session_id,
-                     logical_message_id, content_class)
-            WHERE chunk.profile_id = %s
-              AND chunk.chunker_id = %s
-              AND chunk.source_text_digest = message.embedding_input_digest
-              AND {where}
-        )
-        SELECT provider, source_session_id, logical_message_id,
-               canonical_locator, timestamp_text, role, session_kind,
-               conversation_epoch, content_class, prose_content,
-               repository, cwd, score, chunk_ordinal
-        FROM ranked_chunk
-        WHERE chunk_rank = 1
-        ORDER BY score DESC, provider, source_session_id, logical_message_id
-        LIMIT %s
-        """
-        ).format(where=where),
-        params,
+    where, filter_params = _semantic_search_filters(
+        provider=provider,
+        role=role,
+        project=project,
+        since=since,
+        epoch=epoch,
+        include_agents=include_agents,
     )
-    return tuple(SearchHit(*row) for row in rows)
+    candidate_limit = max(
+        _SEMANTIC_CANDIDATE_MINIMUM,
+        _SEMANTIC_CANDIDATE_MULTIPLIER * limit,
+    )
+    statement = _semantic_search_statement(where)
+
+    def retrieve(bound: int) -> tuple[tuple[SearchHit, ...], bool]:
+        rows = tuple(
+            connection.execute(
+                statement,
+                (
+                    vector,
+                    _PROFILE_ID,
+                    CHUNKER_ID,
+                    *filter_params,
+                    vector,
+                    bound,
+                    limit,
+                ),
+            )
+        )
+        candidate_count = int(rows[0][-1]) if rows else 0
+        return (
+            tuple(SearchHit(*row[:-1]) for row in rows),
+            candidate_count == bound,
+        )
+
+    hits, candidate_limit_reached = retrieve(candidate_limit)
+    if len(hits) >= limit:
+        return hits
+    if not candidate_limit_reached:
+        return hits
+    # One bounded retry prevents a message with many top chunks starving the result.
+    retry_limit = min(
+        _SEMANTIC_CANDIDATE_MAXIMUM,
+        candidate_limit * _SEMANTIC_CANDIDATE_RETRY_MULTIPLIER,
+    )
+    return retrieve(retry_limit)[0]
 
 
 def _ranked_component_depth(limit: int) -> int:

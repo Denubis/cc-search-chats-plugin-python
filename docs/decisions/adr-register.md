@@ -11,3 +11,4 @@ ruling.
 | [0002](0002-explicit-search-modes-no-search-triggered-refresh.md) | Search never refreshes; the caller names the mode; the index stays joint | Accepted | 2026-09-02 |
 | [0003](0003-native-record-policy.md) | Persist visible conversation and bounded tool metadata | Accepted | 2026-09-03 |
 | [0004](0004-semantic-search-no-deadline-warm-window.md) | Semantic search has no deadline and reuses one short-lived warm model | Accepted | 2026-09-03 |
+| [0005](0005-candidate-first-semantic-retrieval.md) | Bound exact semantic retrieval before loading payloads | Accepted | 2026-09-03 |

@@ -162,6 +162,18 @@ returns a named `literal_fallback` from the same selected corpus. PostgreSQL
 retrieval failure remains a database failure rather than being relabelled as
 semantic degradation.
 
+### Read guardrails
+
+Every PostgreSQL read runs in the cross-process advisory read queue. Its default
+transaction-local settings are a 30-second lock timeout, a 60-second statement
+timeout, and a 64 MB temporary-file limit; deadline-bounded literal reads reduce
+the first two to their remaining request budget. Semantic retrieval additionally
+sets transaction-local `work_mem` to 256 MB before its exact vector query. The
+semantic setting returns to the server default when that read transaction ends
+and does not affect literal retrieval or raise the temporary-file limit. Because
+the queue admits only one read transaction at a time, only one queued semantic
+read receives this application setting at once.
+
 Ranked literal search starts its monotonic five-second clock in the console
 bootstrap, uses deadline-derived connection and statement budgets, opens the
 selected result snapshot immediately, and reports a named deadline error only
