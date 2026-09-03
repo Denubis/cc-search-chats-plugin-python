@@ -7,49 +7,44 @@ Ponytail Claude/Codex native sessions. It does not authorize installation,
 production migration, or prune. Append actual results only after the human
 authorizes and performs UAT.
 
+As of 2.1.0, the 8B model does not load inside the five-second answer deadline,
+so each semantic case is expected to return `literal_fallback` until the pending
+semantic-deadline decision—which has not yet been ruled and which this UAT does
+not anticipate—lands; a `literal_fallback` here is a rejection of the candidate,
+not a pass.
+
 ## Preconditions
 
-- The release gate in the PostgreSQL maintenance runbook proves the installed
-  CLI is the exact accepted clean-main commit with the semantic extra.
-- PostgreSQL migration/storage preflight passed and legacy snapshot relations
-  remain quarantined.
-- The pinned model snapshot is already present in the configured cache; network
-  access is disabled for runtime checks.
+- Run PostgreSQL maintenance runbook §1 and prove that the installed CLI is the
+  exact accepted clean-main commit with the semantic extra.
+- Under separate human migration authority, complete runbook §3, including the
+  selected-pair inspection before migration. Retain the separate stdout JSON
+  and stderr NDJSON from `index --migrate --json`; the JSON must report
+  `applied_schema_version == 10`.
+- The pinned model snapshot is already present in the configured cache and
+  runtime network access is disabled.
 - These four session directories exist and remain read-only to the tool:
   `~/.claude/projects`, `~/.claude-ponytail/projects`, `~/.codex/sessions`, and
   `~/.codex-ponytail/sessions`.
-- A previous full `index` completed before the append actions below. Record that
-  baseline's corpus generation and `indexed_at`; it must be at least five
-  minutes old when the first search begins so automatic admission is eligible.
-- Record the reviewed baseline's exact deterministic blocked-source count.
-  Coverage must remain partial with zero transient failures; a different count
-  requires a new structural reconciliation before UAT continues.
-- `cc-search-chats-refresh.service` is installed, while
-  `cc-search-chats-index.timer` is disabled and inactive. Keep the timer in that
-  state through human acceptance.
+- `cc-search-chats-index.timer` is enabled. Record its next activation and
+  confirm that it falls outside the planned UAT window.
+- This UAT proves `cc-search-chats-refresh.service` is absent from the user unit
+  inventory rather than merely inactive.
+- Record the reviewed baseline's exact `coverage.completeness`, `blocked_files`,
+  and `skipped_records` in the environment below. A different value requires a
+  new structural reconciliation before UAT continues, and
+  `transient_failure_files` must be zero.
 
-## Create four positive append controls
+## Configure the exact four roots and controls
 
-Through each native client—not by editing JSONL—send one benign, unique visible
-message containing a newly generated sentinel phrase. Wait until the native
-writer has completed a newline-terminated record. Record the provider, expected
-session root, native session ID, and exact phrase for:
+Choose four unique benign sentinel phrases and identify the four native sessions
+that will receive them. Do not send the messages yet: the acceptance script first
+records the selected baseline and the UTC lower bound, then pauses for the four
+native-client submissions. Never edit JSONL.
 
-1. standard Claude;
-2. Claude Ponytail;
-3. standard Codex;
-4. Codex Ponytail.
-
-Do not run `index` after creating these controls. The first ranked search below
-must durably request one full background update and return inside its deadline.
-If the update publishes in time, the answer may use the new completed corpus;
-otherwise it must use the recorded baseline, explicitly omit the new sentinel,
-and report the baseline's time/age plus the continuing update. A literal-only
-candidate must never become visible without matching fresh semantic state.
-
-## Configure the exact four roots
-
-Run in fish after replacing the four session IDs and sentinel phrases:
+Run this environment block in fish after replacing every placeholder. The two
+migration evidence paths refer to the already-authorized runbook §3 artifacts;
+the UAT script does not migrate.
 
 ```fish
 set -x CC_SEARCH_CLAUDE_ROOTS "$HOME/.claude/projects:$HOME/.claude-ponytail/projects"
@@ -63,7 +58,12 @@ set -x UAT_CODEX_STANDARD_SESSION 'REPLACE'
 set -x UAT_CODEX_STANDARD_QUERY 'REPLACE UNIQUE SENTINEL PHRASE'
 set -x UAT_CODEX_PONYTAIL_SESSION 'REPLACE'
 set -x UAT_CODEX_PONYTAIL_QUERY 'REPLACE UNIQUE SENTINEL PHRASE'
+
+set -x UAT_EXPECTED_COMPLETENESS 'REPLACE REVIEWED BASELINE VALUE'
 set -x UAT_EXPECTED_BLOCKED_SOURCES 'REPLACE REVIEWED BASELINE COUNT'
+set -x UAT_EXPECTED_SKIPPED_RECORDS 'REPLACE REVIEWED BASELINE COUNT'
+set -x UAT_MIGRATION_JSON '/REPLACE/WITH/index-migrate.stdout.json'
+set -x UAT_MIGRATION_NDJSON '/REPLACE/WITH/index-migrate.stderr.ndjson'
 ```
 
 The explicit plural roots are part of the test. They include only session
@@ -71,115 +71,115 @@ directories; they do not point at either isolated home.
 
 ## Acceptance script
 
-This script keeps stdout JSON and stderr NDJSON separate. It first proves the
-bounded wait, coherent-corpus fallback, and durable systemd handoff; waits for
-the full-update oneshot without starting it a second time; then pauses for one
-additional native-client message in each root. A second ranked search must stay
-inside the post-completion quiet period, retain the same request/corpus/build,
-and leave the systemd invocation unchanged even though every native root grew.
-The remaining cases positively locate the original four appended messages with
-exact native resolution and fresh hybrid ranking over the partial-coverage
-corpus. There is no separate semantic catch-up step.
+Machine-readable invocations keep stdout JSON and stderr NDJSON separate. The
+script retains those artifacts, the user-unit and timer observations, two human
+staleness displays, the provenance rows, and a locator ledger in one evidence
+directory. It deliberately stops before positive semantic acceptance if the
+five-second semantic request degrades.
 
 ```fish
 set -g uat_dir (mktemp -d)
+or exit 1
 
 function assert_progress --argument-names path
-    python -c 'import json,sys; e=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]; assert e and all(x["schema_version"]==3 for x in e); assert [x["sequence"] for x in e]==list(range(1,len(e)+1)); assert sum(x["event"]=="terminal" for x in e)==1; assert e[-1]["event"]=="terminal"' "$path"
+    # Invariant: stderr is pure ordered schema-v4 NDJSON with exactly one final terminal event.
+    python -c 'import json,sys; lines=open(sys.argv[1],encoding="utf-8").read().splitlines(); assert lines and all(line.strip() for line in lines); events=[json.loads(line) for line in lines]; assert all(event["schema_version"]==4 for event in events); assert [event["sequence"] for event in events]==list(range(1,len(events)+1)); assert sum(event["event"]=="terminal" for event in events)==1; assert events[-1]["event"]=="terminal"' "$path"
 end
 
-function assert_reviewed_partial_coverage --argument-names path
-    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); expected=int(sys.argv[2]); assert d["schema_version"]==3; c=d["coverage"]; r=d["refresh"]; assert c["completeness"]=="partial" and c["blocked_files"]==expected and c["transient_failure_files"]==0; assert r["blocked_sources"]==expected and r["transient_failure_sources"]==0' "$path" "$UAT_EXPECTED_BLOCKED_SOURCES"
+function assert_reviewed_coverage --argument-names path
+    # Invariant: coverage stays at the reviewed baseline and has no transient source failures.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); coverage=data["coverage"]; refresh=data["refresh"]; expected_completeness=sys.argv[2]; expected_blocked=int(sys.argv[3]); expected_skipped=int(sys.argv[4]); assert data["schema_version"]==4; assert coverage["completeness"]==expected_completeness; assert coverage["blocked_files"]==expected_blocked; assert coverage["skipped_records"]==expected_skipped; assert coverage["transient_failure_files"]==0; assert refresh["blocked_sources"]==expected_blocked; assert refresh["transient_failure_sources"]==0' "$path" "$UAT_EXPECTED_COMPLETENESS" "$UAT_EXPECTED_BLOCKED_SOURCES" "$UAT_EXPECTED_SKIPPED_RECORDS"
 end
 
-function probe_coherent_refresh
-    test (systemctl --user is-enabled cc-search-chats-index.timer 2>/dev/null) = disabled
+function assert_complete_status --argument-names path
+    # Invariant: status selects one complete joint corpus with legible bounded staleness and four roots.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); state=data["index_state"]; semantic=data["semantic"]; refresh=data["refresh"]; assert data["schema_version"]==4 and data["command"]=="index" and data["status"]=="complete"; assert data["selected"] is True and data["completed"]==data["total"]; assert semantic["fresh"] is True and semantic["corpus_generation"]==refresh["corpus_generation"]; assert data["coverage"]["configured_root_count"]==4 and data["coverage"]["resolved_root_count"]==4; assert set(state)=={"made_at","now","age_ms","corpus_generation","semantic_build","unindexed","unindexed_reason"}; assert isinstance(state["made_at"],str) and state["made_at"]==data["indexed_at"]; assert isinstance(state["now"],str) and state["now"]; assert isinstance(state["age_ms"],int) and state["age_ms"]>=0 and state["age_ms"]==data["corpus_age_ms"]; assert state["corpus_generation"]==refresh["corpus_generation"] and isinstance(state["corpus_generation"],int); assert state["semantic_build"]==semantic["semantic_build"] and isinstance(state["semantic_build"],int); unindexed=state["unindexed"]; reason=state["unindexed_reason"]; counts=isinstance(unindexed,dict) and set(unindexed)=={"files","directories","bytes"} and all(isinstance(unindexed[key],int) and unindexed[key]>=0 for key in unindexed) and reason is None; closed=unindexed is None and isinstance(reason,str) and bool(reason); assert counts or closed' "$path"
+end
+
+function assert_user_units
+    systemctl --user is-enabled cc-search-chats-index.timer >$uat_dir/index-timer-enabled.txt 2>&1
+    or return 1
+    systemctl --user list-timers --all --no-pager cc-search-chats-index.timer >$uat_dir/index-timer-schedule.txt 2>&1
+    or return 1
+    systemctl --user list-units --all --no-legend --no-pager >$uat_dir/user-units.txt 2>&1
+    or return 1
+    systemctl --user list-unit-files --no-legend --no-pager >$uat_dir/user-unit-files.txt 2>&1
     or return 1
 
-    set -l probe "$uat_dir/background-probe.json"
-    set -l probe_progress "$uat_dir/background-probe.ndjson"
+    # Invariant: the nightly index timer is enabled and the retired unit is absent, not inactive.
+    python -c 'from pathlib import Path; import sys; enabled=Path(sys.argv[1]).read_text(encoding="utf-8").strip(); schedule=Path(sys.argv[2]).read_text(encoding="utf-8"); inventories=[Path(path).read_text(encoding="utf-8").splitlines() for path in sys.argv[3:]]; assert enabled=="enabled" and "cc-search-chats-index.timer" in schedule; assert all(all("cc-search-chats-refresh.service" not in line.split() for line in inventory) for inventory in inventories)' "$uat_dir/index-timer-enabled.txt" "$uat_dir/index-timer-schedule.txt" "$uat_dir/user-units.txt" "$uat_dir/user-unit-files.txt"
+end
+
+function probe_staleness
+    set -l stale "$uat_dir/stale-search.json"
+    set -l stale_progress "$uat_dir/stale-search.ndjson"
     set -l started (date +%s%N)
-    cc-search-chats search "$UAT_CLAUDE_STANDARD_QUERY" --literal --provider claude --limit 200 --json >$probe 2>$probe_progress
+    or return 1
+    cc-search-chats search "$UAT_CLAUDE_STANDARD_QUERY" --literal --provider claude --limit 200 --json >$stale 2>$stale_progress
     or return 1
     set -l finished (date +%s%N)
-    set -l elapsed_ms (math "($finished - $started) / 1000000")
-    test "$elapsed_ms" -lt 5000
     or return 1
-    assert_progress "$probe_progress"
+    set -l wall_ms (math "($finished - $started) / 1000000")
     or return 1
-    assert_reviewed_partial_coverage "$probe"
+    assert_progress "$stale_progress"
     or return 1
-    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); baseline=json.load(open(sys.argv[2],encoding="utf-8")); query=sys.argv[3]; assert d["status"]=="complete" and d["deadline_ms"]==5000 and d["indexed_at"] and d["corpus_age_ms"]>=0; b=d["background_refresh"]; assert b["request_id"]>0 and b["state"] in {"launching","launched","running","complete"}; current=d["refresh"]["corpus_generation"]; same=current==baseline["corpus_generation"]; assert (same and d["corpus_age_ms"]>=300000 and d["elapsed_ms"]>=4000 and all(query not in r["text"] for r in d["results"])) or ((not same) and d["semantic"]["fresh"] is True and d["semantic"]["corpus_generation"]==current and any(query in r["text"] for r in d["results"]))' "$probe" "$uat_dir/baseline-status.json" "$UAT_CLAUDE_STANDARD_QUERY"
+    assert_reviewed_coverage "$stale"
     or return 1
 
-    set -l wait_deadline (math (date +%s) + 900)
-    while true
-        set -l request_state (psql service=cc_search_chats -v ON_ERROR_STOP=1 -At -c "SELECT state FROM cc_search_chats.auto_refresh_state WHERE singleton")
-        or return 1
-        test "$request_state" = complete
-        and break
-        test "$request_state" = failed
-        and return 1
-        test (date +%s) -lt "$wait_deadline"
-        or return 1
-        sleep 0.2
-    end
-    while systemctl --user is-active --quiet cc-search-chats-refresh.service
-        test (date +%s) -lt "$wait_deadline"
-        or return 1
-        sleep 0.1
-    end
-    test (systemctl --user show cc-search-chats-refresh.service --property=ActiveState --value) = inactive
-    or return 1
-    test (systemctl --user show cc-search-chats-refresh.service --property=Result --value) = success
+    # Invariant: stale literal search answers within five seconds from the selected baseline without exposing the new control.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); baseline=json.load(open(sys.argv[2],encoding="utf-8")); query=sys.argv[3]; wall_ms=float(sys.argv[4]); assert wall_ms<=5000 and data["deadline_ms"]==5000; assert data["mode"]=="literal" and data["retrieval_mode"]=="literal" and data["status"]=="complete"; assert all(query not in result["text"] for result in data["results"]); assert data["refresh"]["corpus_generation"]==baseline["refresh"]["corpus_generation"]; assert data["index_state"]["made_at"]==baseline["index_state"]["made_at"]; unindexed=data["index_state"]["unindexed"]; reason=data["index_state"]["unindexed_reason"]; counted=isinstance(unindexed,dict) and unindexed["files"]>=1 and reason is None; closed=unindexed is None and isinstance(reason,str) and bool(reason); assert counted or closed; print("unindexed.files="+str(unindexed["files"]) if counted else "unindexed_reason="+reason)' "$stale" "$uat_dir/baseline-status.json" "$UAT_CLAUDE_STANDARD_QUERY" "$wall_ms" >$uat_dir/staleness-observation.txt
     or return 1
 
-    cc-search-chats index --status --json >$uat_dir/post-refresh-status.json 2>$uat_dir/post-refresh-status.ndjson
+    cc-search-chats search "$UAT_CLAUDE_STANDARD_QUERY" --literal --provider claude --limit 200 --progress human >$uat_dir/stale-search.human.txt 2>$uat_dir/stale-search.human-progress.txt
     or return 1
-    assert_progress "$uat_dir/post-refresh-status.ndjson"
+    cc-search-chats index --status --json >$uat_dir/post-search-status.json 2>$uat_dir/post-search-status.ndjson
     or return 1
-    assert_reviewed_partial_coverage "$uat_dir/post-refresh-status.json"
+    assert_progress "$uat_dir/post-search-status.ndjson"
     or return 1
+    assert_reviewed_coverage "$uat_dir/post-search-status.json"
+    or return 1
+
+    # Invariant: search did not publish or move the selected corpus.
+    python -c 'import json,sys; current=json.load(open(sys.argv[1],encoding="utf-8")); baseline=json.load(open(sys.argv[2],encoding="utf-8")); assert current["refresh"]["corpus_generation"]==baseline["refresh"]["corpus_generation"]; assert current["semantic"]["semantic_build"]==baseline["semantic"]["semantic_build"]; assert current["index_state"]["made_at"]==baseline["index_state"]["made_at"]' "$uat_dir/post-search-status.json" "$uat_dir/baseline-status.json"
 end
 
-function root_jsonl_bytes --argument-names root
-    python -c 'from pathlib import Path; import sys; print(sum(path.stat().st_size for path in Path(sys.argv[1]).rglob("*.jsonl") if path.is_file()))' "$root"
-end
+function publish_intentionally
+    cc-search-chats index --json >$uat_dir/published-index.json 2>$uat_dir/published-index.ndjson
+    or return 1
+    assert_progress "$uat_dir/published-index.ndjson"
+    or return 1
+    assert_reviewed_coverage "$uat_dir/published-index.json"
+    or return 1
 
-function probe_post_completion_quiet
-    set -l roots "$HOME/.claude/projects" "$HOME/.claude-ponytail/projects" "$HOME/.codex/sessions" "$HOME/.codex-ponytail/sessions"
-    set -l sizes_before
-    for root in $roots
-        set -a sizes_before (root_jsonl_bytes "$root")
-        or return 1
-    end
+    # Invariant: intentional indexing publishes a newer joint corpus with a complete fresh semantic build.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); baseline=json.load(open(sys.argv[2],encoding="utf-8")); generation=data["refresh"]["corpus_generation"]; build=data["semantic"]["semantic_build"]; assert data["schema_version"]==4 and data["command"]=="index" and data["status"]=="complete"; assert isinstance(generation,int) and generation>baseline["refresh"]["corpus_generation"]; assert isinstance(build,int) and build>baseline["semantic"]["semantic_build"]; assert data["semantic"]["corpus_generation"]==generation and data["semantic"]["fresh"] is True; assert data["semantic"]["completed_units"]==data["semantic"]["total_units"]' "$uat_dir/published-index.json" "$uat_dir/baseline-status.json"
+    or return 1
 
-    read -P 'Within five minutes, send one additional benign native-client message in each of the four roots, then press Enter: ' quiet_confirmation
+    cc-search-chats index --json >$uat_dir/unchanged-index.json 2>$uat_dir/unchanged-index.ndjson
+    or return 1
+    assert_progress "$uat_dir/unchanged-index.ndjson"
+    or return 1
+    assert_reviewed_coverage "$uat_dir/unchanged-index.json"
+    or return 1
 
-    set -l sizes_after
-    for root in $roots
-        set -a sizes_after (root_jsonl_bytes "$root")
-        or return 1
-    end
-    for position in (seq 1 (count $roots))
-        test "$sizes_after[$position]" -gt "$sizes_before[$position]"
-        or return 1
-    end
+    # Invariant: an unchanged second index is a no-op that retains generation and semantic build identity.
+    python -c 'import json,sys; current=json.load(open(sys.argv[1],encoding="utf-8")); published=json.load(open(sys.argv[2],encoding="utf-8")); assert current["schema_version"]==4 and current["status"]=="complete"; assert current["refresh"]["corpus_generation"]==published["refresh"]["corpus_generation"]; assert current["semantic"]["semantic_build"]==published["semantic"]["semantic_build"]; assert current["semantic"]["corpus_generation"]==published["semantic"]["corpus_generation"]' "$uat_dir/unchanged-index.json" "$uat_dir/published-index.json"
+    or return 1
 
-    set -l service_start_before (systemctl --user show cc-search-chats-refresh.service --property=ExecMainStartTimestampMonotonic --value)
-    test "$service_start_before" -gt 0
+    cc-search-chats index --status --json >$uat_dir/post-index-status.json 2>$uat_dir/post-index-status.ndjson
     or return 1
-    set -l quiet "$uat_dir/quiet-probe.json"
-    set -l quiet_progress "$uat_dir/quiet-probe.ndjson"
-    cc-search-chats search "$UAT_CLAUDE_STANDARD_QUERY" --literal --provider claude --limit 200 --json >$quiet 2>$quiet_progress
+    assert_progress "$uat_dir/post-index-status.ndjson"
     or return 1
-    assert_progress "$quiet_progress"
+    assert_reviewed_coverage "$uat_dir/post-index-status.json"
     or return 1
-    assert_reviewed_partial_coverage "$quiet"
+    assert_complete_status "$uat_dir/post-index-status.json"
     or return 1
-    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); prior=json.load(open(sys.argv[2],encoding="utf-8")); assert d["status"]=="complete" and d["deadline_ms"]==5000 and d["elapsed_ms"]<5000 and 0<=d["corpus_age_ms"]<300000; assert d["refresh"]["corpus_generation"]==prior["corpus_generation"]; assert d["semantic"]["semantic_build"]==prior["semantic_build"] and d["semantic"]["corpus_generation"]==prior["corpus_generation"]; current=d["background_refresh"]; previous=prior["background_refresh"]; assert current["request_id"]==previous["request_id"] and current["state"]==previous["state"]=="complete" and current["refresh_run_id"]==previous["refresh_run_id"]' "$quiet" "$uat_dir/post-refresh-status.json"
+
+    # Invariant: status selects the generation and semantic build published by the intentional index.
+    python -c 'import json,sys; status=json.load(open(sys.argv[1],encoding="utf-8")); published=json.load(open(sys.argv[2],encoding="utf-8")); assert status["refresh"]["corpus_generation"]==published["refresh"]["corpus_generation"]; assert status["semantic"]["semantic_build"]==published["semantic"]["semantic_build"]' "$uat_dir/post-index-status.json" "$uat_dir/published-index.json"
     or return 1
-    test (systemctl --user show cc-search-chats-refresh.service --property=ExecMainStartTimestampMonotonic --value) = "$service_start_before"
+
+    cc-search-chats index --status --progress human >$uat_dir/post-index-status.human.txt 2>$uat_dir/post-index-status.human-progress.txt
     or return 1
 end
 
@@ -190,10 +190,11 @@ function run_case --argument-names label provider expected_root session query
     or return 1
     assert_progress "$literal_progress"
     or return 1
-
-    assert_reviewed_partial_coverage "$literal"
+    assert_reviewed_coverage "$literal"
     or return 1
-    set -l locator (python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["schema_version"]==3 and d["command"]=="search" and d["status"]=="complete"; m=[r for r in d["results"] if r["identity"]["provider"]==sys.argv[2] and r["identity"]["source_session_id"]==sys.argv[3] and sys.argv[4] in r["text"]]; assert m; print(m[0]["identity"]["canonical_locator"])' "$literal" "$provider" "$session" "$query")
+
+    # Invariant: literal mode finds the expected native control and search does not publish a new selected pair.
+    set -l locator (python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); prior=json.load(open(sys.argv[2],encoding="utf-8")); provider=sys.argv[3]; session=sys.argv[4]; query=sys.argv[5]; assert data["schema_version"]==4 and data["status"]=="complete"; assert data["mode"]=="literal" and data["retrieval_mode"]=="literal"; matches=[result for result in data["results"] if result["identity"]["provider"]==provider and result["identity"]["source_session_id"]==session and query in result["text"]]; assert matches; assert data["refresh"]["corpus_generation"]==prior["refresh"]["corpus_generation"]; assert data["semantic"]["semantic_build"]==prior["semantic"]["semantic_build"]; print(matches[0]["identity"]["canonical_locator"])' "$literal" "$uat_dir/post-index-status.json" "$provider" "$session" "$query")
     or return 1
 
     set -l resolved "$uat_dir/$label.resolve.json"
@@ -202,60 +203,131 @@ function run_case --argument-names label provider expected_root session query
     or return 1
     assert_progress "$resolved_progress"
     or return 1
-    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["schema_version"]==3 and d["status"]=="resolved" and d["messages"]; m=d["messages"][0]; assert "text" not in m; assert m["identity"]["canonical_locator"]==sys.argv[2]; assert m["identity"]["physical_aliases"]' "$resolved" "$locator"
+    assert_reviewed_coverage "$resolved"
     or return 1
 
-    set -l observed_roots (psql service=cc_search_chats -v ON_ERROR_STOP=1 -v locator="$locator" -At -c "SELECT DISTINCT root.resolved_path FROM cc_search_chats.message_current AS message JOIN cc_search_chats.physical_alias_current AS alias USING (provider, source_session_id, logical_message_id, content_class) JOIN cc_search_chats.source_root_current AS root USING (source_root_id) WHERE message.canonical_locator = :'locator' ORDER BY root.resolved_path")
-    or return 1
-    string match -q -- "$expected_root" $observed_roots
-    or return 1
-
-    set -l hybrid "$uat_dir/$label.hybrid.json"
-    set -l hybrid_progress "$uat_dir/$label.hybrid.ndjson"
-    cc-search-chats search "$query" --provider "$provider" --limit 200 --json >$hybrid 2>$hybrid_progress
-    or return 1
-    assert_progress "$hybrid_progress"
-    or return 1
-    assert_reviewed_partial_coverage "$hybrid"
-    or return 1
-    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["status"]=="complete" and d["semantic"]["fresh"] is True; m=[r for r in d["results"] if r["identity"]["canonical_locator"]==sys.argv[2]]; assert m; rank=m[0]["ranking"]; assert rank["method"]=="rrf" and rank["semantic_rank"] is not None and rank["semantic_chunk_ordinal"] is not None' "$hybrid" "$locator"
+    # Invariant: exact reference-only resolution preserves identity and aliases while omitting message bodies.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; assert data["schema_version"]==4 and data["status"]=="resolved" and data["messages"]; matches=[message for message in data["messages"] if message["identity"]["canonical_locator"]==locator]; assert matches; assert all("text" not in message and message["identity"]["physical_aliases"] for message in matches)' "$resolved" "$locator"
     or return 1
 
-    printf '%s\t%s\t%s\t%s\n' "$label" "$provider" "$session" "$locator"
+    psql service=cc_search_chats -v ON_ERROR_STOP=1 -v locator="$locator" -At -c "SELECT DISTINCT root.resolved_path FROM cc_search_chats.message_current AS message JOIN cc_search_chats.physical_alias_current AS alias USING (provider, source_session_id, logical_message_id, content_class) JOIN cc_search_chats.source_root_current AS root USING (source_root_id) WHERE message.canonical_locator = :'locator' ORDER BY root.resolved_path" >$uat_dir/$label.provenance-roots.txt
+    or return 1
+
+    # Invariant: the indexed physical alias resolves to the expected standard or Ponytail root.
+    python -c 'from pathlib import Path; import sys; roots={line for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line}; assert sys.argv[2] in roots' "$uat_dir/$label.provenance-roots.txt" "$expected_root"
+    or return 1
+
+    printf '%s\t%s\t%s\t%s\n' "$label" "$provider" "$session" "$locator" >>$uat_dir/positive-cases.tsv
+
+    set -l semantic "$uat_dir/$label.semantic.json"
+    set -l semantic_progress "$uat_dir/$label.semantic.ndjson"
+    cc-search-chats search "$query" --semantic --provider "$provider" --limit 200 --json >$semantic 2>$semantic_progress
+    or return 1
+    assert_progress "$semantic_progress"
+    or return 1
+    assert_reviewed_coverage "$semantic"
+    or return 1
+
+    # Invariant: semantic mode delivers timely hybrid RRF evidence rather than a degraded literal answer.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; assert data["schema_version"]==4 and data["status"]=="complete"; assert data["mode"]=="semantic" and data["retrieval_mode"]=="hybrid"; matches=[result for result in data["results"] if result["identity"]["canonical_locator"]==locator]; assert matches; ranking=matches[0]["ranking"]; assert ranking["method"]=="rrf" and ranking["semantic_rank"] is not None and ranking["semantic_chunk_ordinal"] is not None; assert all(warning["code"]!="semantic_search_degraded" for warning in data["warnings"]); assert data["deadline_ms"]==5000 and data["elapsed_ms"]<=data["deadline_ms"]' "$semantic" "$locator"
+    or return 1
+
+    printf '%s\n' "$locator"
+end
+
+function probe_exhaustive
+    cc-search-chats search "$UAT_CLAUDE_STANDARD_QUERY" --literal --tools --exhaustive --provider claude --json >$uat_dir/claude-exhaustive.json 2>$uat_dir/claude-exhaustive.ndjson
+    or return 1
+    assert_progress "$uat_dir/claude-exhaustive.ndjson"
+    or return 1
+    assert_reviewed_coverage "$uat_dir/claude-exhaustive.json"
+    or return 1
+
+    # Invariant: exhaustive literal mode is unbounded, includes tools, and still contains the Claude control.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); query=sys.argv[2]; assert data["schema_version"]==4 and data["status"]=="complete"; assert data["mode"]=="literal" and data["retrieval_mode"]=="exhaustive_literal"; assert data["exhaustive"] is True and data["result_limit"] is None and data["deadline_ms"] is None; assert any(query in result["text"] for result in data["results"])' "$uat_dir/claude-exhaustive.json" "$UAT_CLAUDE_STANDARD_QUERY"
+end
+
+function probe_events --argument-names from_utc
+    set -l until_utc (date -u '+%Y-%m-%dT%H:%M:%SZ')
+    or return 1
+    cc-search-chats events --from "$from_utc" --until "$until_utc" --json >$uat_dir/events.json 2>$uat_dir/events.ndjson
+    or return 1
+    assert_progress "$uat_dir/events.ndjson"
+    or return 1
+    assert_reviewed_coverage "$uat_dir/events.json"
+    or return 1
+
+    # Invariant: the published generation exports all four human controls as content-free canonical events.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); published=json.load(open(sys.argv[2],encoding="utf-8")); expected={("claude",sys.argv[3]),("claude",sys.argv[4]),("codex",sys.argv[5]),("codex",sys.argv[6])}; generation=published["refresh"]["corpus_generation"]; events=data["events"]; keys={"event_id","occurred_at_utc","canonical_locator","provider","source_session_id","session_kind","cwd","repository","submitted_by","retention_status","physical_alias_count","source_corpus_generation"}; assert data["schema_version"]==4 and data["command"]=="events" and data["status"]=="complete"; assert data["window"]=={"from_utc":sys.argv[7],"until_utc":sys.argv[8]}; assert data["source_corpus_generation"]==generation; assert data["population"]["retained"]>=4 and events; assert set(events[0])==keys and "text" not in set(events[0]); assert all(set(event)==keys and event["source_corpus_generation"]==generation for event in events); observed={(event["provider"],event["source_session_id"]) for event in events}; assert expected<=observed' "$uat_dir/events.json" "$uat_dir/published-index.json" "$UAT_CLAUDE_STANDARD_SESSION" "$UAT_CLAUDE_PONYTAIL_SESSION" "$UAT_CODEX_STANDARD_SESSION" "$UAT_CODEX_PONYTAIL_SESSION" "$from_utc" "$until_utc"
 end
 
 function execute_uat
+    cp -- "$UAT_MIGRATION_JSON" "$uat_dir/index-migrate.stdout.json"
+    or return 1
+    cp -- "$UAT_MIGRATION_NDJSON" "$uat_dir/index-migrate.stderr.ndjson"
+    or return 1
+    assert_progress "$uat_dir/index-migrate.stderr.ndjson"
+    or return 1
+
+    # Invariant: the separately authorized migration evidence is one schema-v4 index result at ledger version 10.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); assert data["schema_version"]==4 and data["command"]=="index" and data["status"]=="complete"; assert data["applied_schema_version"]==10' "$uat_dir/index-migrate.stdout.json"
+    or return 1
+
+    assert_user_units
+    or return 1
+    read -P 'Confirm the retained timer schedule is not due inside the planned UAT window, then press Enter: ' timer_confirmation
+
     cc-search-chats index --status --json >$uat_dir/baseline-status.json 2>$uat_dir/baseline-status.ndjson
     or return 1
     assert_progress "$uat_dir/baseline-status.ndjson"
     or return 1
-    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["schema_version"]==3 and d["corpus_generation"]>0 and d["indexed_at"] and d["corpus_age_ms"]>=300000' "$uat_dir/baseline-status.json"
+    assert_reviewed_coverage "$uat_dir/baseline-status.json"
+    or return 1
+    assert_complete_status "$uat_dir/baseline-status.json"
     or return 1
 
-    probe_coherent_refresh
+    set -l uat_from_utc (date -u '+%Y-%m-%dT%H:%M:%SZ')
     or return 1
-    probe_post_completion_quiet
+    printf '%s\n' "$uat_from_utc" >$uat_dir/uat-from-utc.txt
+    read -P 'Send the four configured sentinel phrases through their native clients, wait for newline-terminated records, then press Enter: ' sentinel_confirmation
+
+    probe_staleness
+    or return 1
+    publish_intentionally
     or return 1
 
-    run_case claude-standard claude "$HOME/.claude/projects" "$UAT_CLAUDE_STANDARD_SESSION" "$UAT_CLAUDE_STANDARD_QUERY"
+    set -l claude_standard_locator (run_case claude-standard claude "$HOME/.claude/projects" "$UAT_CLAUDE_STANDARD_SESSION" "$UAT_CLAUDE_STANDARD_QUERY")
     or return 1
-    run_case claude-ponytail claude "$HOME/.claude-ponytail/projects" "$UAT_CLAUDE_PONYTAIL_SESSION" "$UAT_CLAUDE_PONYTAIL_QUERY"
+    set -l claude_ponytail_locator (run_case claude-ponytail claude "$HOME/.claude-ponytail/projects" "$UAT_CLAUDE_PONYTAIL_SESSION" "$UAT_CLAUDE_PONYTAIL_QUERY")
     or return 1
-    run_case codex-standard codex "$HOME/.codex/sessions" "$UAT_CODEX_STANDARD_SESSION" "$UAT_CODEX_STANDARD_QUERY"
+    set -l codex_standard_locator (run_case codex-standard codex "$HOME/.codex/sessions" "$UAT_CODEX_STANDARD_SESSION" "$UAT_CODEX_STANDARD_QUERY")
     or return 1
-    run_case codex-ponytail codex "$HOME/.codex-ponytail/sessions" "$UAT_CODEX_PONYTAIL_SESSION" "$UAT_CODEX_PONYTAIL_QUERY"
+    set -l codex_ponytail_locator (run_case codex-ponytail codex "$HOME/.codex-ponytail/sessions" "$UAT_CODEX_PONYTAIL_SESSION" "$UAT_CODEX_PONYTAIL_QUERY")
+    or return 1
+
+    probe_exhaustive
+    or return 1
+    probe_events "$uat_from_utc"
     or return 1
 
     cc-search-chats index --status --json >$uat_dir/final-status.json 2>$uat_dir/final-status.ndjson
     or return 1
     assert_progress "$uat_dir/final-status.ndjson"
     or return 1
-    assert_reviewed_partial_coverage "$uat_dir/final-status.json"
+    assert_reviewed_coverage "$uat_dir/final-status.json"
     or return 1
-    python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); assert d["schema_version"]==3 and d["status"]=="complete"; assert d["selected"] is True and d["completed"]==d["total"]; assert d["semantic"]["fresh"] is True; assert d["coverage"]["configured_root_count"]==4 and d["coverage"]["resolved_root_count"]==4' "$uat_dir/final-status.json"
+    assert_complete_status "$uat_dir/final-status.json"
     or return 1
 
-    test (systemctl --user is-enabled cc-search-chats-index.timer 2>/dev/null) = disabled
+    # Invariant: the final selected pair is still the one intentionally published for this UAT.
+    python -c 'import json,sys; final=json.load(open(sys.argv[1],encoding="utf-8")); published=json.load(open(sys.argv[2],encoding="utf-8")); assert final["refresh"]["corpus_generation"]==published["refresh"]["corpus_generation"]; assert final["semantic"]["semantic_build"]==published["semantic"]["semantic_build"]' "$uat_dir/final-status.json" "$uat_dir/published-index.json"
+    or return 1
+
+    systemctl --user is-enabled cc-search-chats-index.timer >$uat_dir/final-index-timer-enabled.txt 2>&1
+    or return 1
+
+    # Invariant: the intended nightly builder remains enabled after all UAT controls.
+    python -c 'from pathlib import Path; import sys; assert Path(sys.argv[1]).read_text(encoding="utf-8").strip()=="enabled"' "$uat_dir/final-index-timer-enabled.txt"
     or return 1
 
     printf 'UAT evidence: %s\n' "$uat_dir"
@@ -271,12 +343,14 @@ directory is intentionally retained for review.
 
 The human reviews:
 
-- all four expected messages and their surrounding context;
-- ranking usefulness and false positives;
-- baseline age, bounded publication wait, coherent fallback, background
-  incremental byte/vector work, model-load, and query latency;
-- coverage/warnings and the exact roots associated with each control;
-- stdout/stderr artifacts and final fresh semantic state.
+- all four expected messages and their surrounding native context;
+- literal and semantic ranking usefulness, including false positives;
+- staleness legibility in the retained human header and JSON `index_state`
+  before and after the intentional index;
+- semantic latency against the five-second answer deadline;
+- coverage, warnings, and the exact roots associated with each control;
+- stdout JSON and stderr NDJSON purity, including exactly one terminal event;
+- the initial and final nightly timer state.
 
 Record an acceptance or rejection with the exact installed commit and evidence
 directory. Do not infer acceptance from script exit status. Prune remains a
