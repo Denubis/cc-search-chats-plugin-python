@@ -126,7 +126,7 @@ cc-search-chats search "schema_migration" --literal
 # Include agent/unknown sessions in model-ranked hybrid search
 cc-search-chats search "the earlier runner work" --semantic --agents
 
-# Lexical tool content; reasoning and instructions remain excluded
+# Lexical tool names and inputs; reasoning, instructions, and results stay excluded
 cc-search-chats search "git diff" --literal --tools
 
 # Every matching prose/tool occurrence in deterministic order
@@ -168,7 +168,7 @@ PostgreSQL searches all configured roots by default. Filters narrow that corpus:
 - `--project PATH` for exact recorded repository/cwd values
 - `--role ROLE`, `--epoch N`, and `--days N`
 - `--agents` for agent and unknown sessions
-- `--literal --tools` for persisted tool names, inputs, and outputs
+- `--literal --tools` for persisted tool names and inputs
 
 Literal and semantic ranked searches return at most `--limit` results (1–200).
 Semantic search fuses bounded lexical and semantic component rankings with

@@ -48,20 +48,16 @@
     "file_name": "claude.py",
     "functions": [
       {
-        "name": "_tool_output",
-        "complexity": 17
-      },
-      {
         "name": "_classify_session_kind",
         "complexity": 24
       },
       {
-        "name": "parse_claude_session",
-        "complexity": 49
+        "name": "_extract_content",
+        "complexity": 25
       },
       {
-        "name": "_extract_content",
-        "complexity": 64
+        "name": "parse_claude_session",
+        "complexity": 49
       }
     ]
   },
@@ -69,14 +65,6 @@
     "path": "src/cc_search_chats/providers/codex.py",
     "file_name": "codex.py",
     "functions": [
-      {
-        "name": "_message_content",
-        "complexity": 19
-      },
-      {
-        "name": "_parse_response_item",
-        "complexity": 29
-      },
       {
         "name": "_metadata_session_identity",
         "complexity": 40
@@ -156,12 +144,12 @@
         "complexity": 19
       },
       {
-        "name": "_skipped_record_diagnostics",
-        "complexity": 24
+        "name": "_parse_and_stage_source",
+        "complexity": 23
       },
       {
-        "name": "_parse_and_stage_source",
-        "complexity": 25
+        "name": "_skipped_record_diagnostics",
+        "complexity": 24
       },
       {
         "name": "refresh_native_sources",

@@ -49,7 +49,7 @@ They do not use the operator's production database.
   `--semantic` is model-ranked hybrid search that fuses bounded full-text and
   embedding candidates with exact reciprocal-rank-fusion arithmetic. Both modes
   return visible primary-session prose; `--agents` includes agent and unknown
-  sessions; `--literal --tools` includes tool name/input/output rows;
+  sessions; `--literal --tools` includes persisted tool-name and tool-input rows;
   `--exhaustive` requires literal mode and returns deterministic complete
   occurrences. No supported mode exposes reasoning, system/developer
   instructions, injected context, or unrecognised record shapes.

@@ -91,12 +91,17 @@ cc-search-chats index --json
 cc-search-chats index --status --json
 ```
 
+The first index after this release reparses every source from byte zero because
+both provider parser-state versions changed; expect a long run. Only messages
+whose repaired, filtered embedding-input digest changed are re-embedded. The
+nightly timer performs this full reparse if nobody runs it by hand.
+
 Require positive root/file counts; zero resolved roots is not passing. Complete
-coverage passes directly. Partial coverage may proceed only when every current
-failure is reconciled to a reviewed deterministic native-source defect, the
-exact expected blocked-source count is recorded in the UAT evidence, and
-transient failures are zero. Never coerce malformed native bytes or mark the
-coverage complete manually.
+coverage may include counted, operator-visible skipped records and repaired
+records. Partial coverage may proceed only when every current blocking failure
+is reconciled to a reviewed deterministic native-source defect, the exact
+expected blocked-source count is recorded in the UAT evidence, and transient
+failures are zero. Never mark blocking coverage complete manually.
 
 Require terminal success, a positive `refresh.corpus_generation`, a positive
 `semantic.semantic_build`, semantic/corpus generation agreement,

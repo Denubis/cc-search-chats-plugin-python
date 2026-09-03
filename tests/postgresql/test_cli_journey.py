@@ -49,6 +49,7 @@ def _assert_v4_envelope(
         "indexed_files",
         "skipped_files",
         "skipped_records",
+        "repaired_records",
         "excluded_files",
         "unreadable_files",
         "unknown_sessions",
@@ -314,6 +315,7 @@ def test_postgresql_cli_journey_with_events(
     assert coverage["indexed_files"] == 4
     assert coverage["skipped_files"] == 0
     assert coverage["skipped_records"] == 0
+    assert coverage["repaired_records"] == 0
     assert coverage["excluded_files"] == 0
     assert coverage["unreadable_files"] == 0
     assert coverage["unknown_sessions"] == 1
@@ -355,6 +357,7 @@ def test_postgresql_cli_journey_with_events(
     assert unchanged_coverage["content_read_bytes"] == 0
     assert unchanged_coverage["read_files"] == 0
     assert unchanged_coverage["skipped_records"] == 0
+    assert unchanged_coverage["repaired_records"] == 0
     assert unchanged_coverage["completeness"] == "complete"
     assert unchanged_refresh["run_id"] is None
     assert unchanged_refresh["state"] == "unchanged"
@@ -388,6 +391,17 @@ def test_postgresql_cli_journey_with_events(
     status_progress = _progress_events(status_output.err)
     assert status_progress[-1]["index_state"] == status_index_state
 
+    with claude_source.open("ab") as handle:
+        handle.write(b'{"malformed":\n')
+
+    code, skipped_index = _run(monkeypatch, capsys, "index", "--json")
+    assert code == 0
+    skipped_payload = json.loads(skipped_index.out)
+    skipped_progress = _progress_events(skipped_index.err)
+    assert [
+        event["warning"] for event in skipped_progress if event["event"] == "warning"
+    ] == [skipped_payload["warnings"][0]]
+
     code, human_index = _run(
         monkeypatch,
         capsys,
@@ -396,7 +410,22 @@ def test_postgresql_cli_journey_with_events(
         "human",
     )
     assert code == 0
-    assert f"into corpus {indexed_payload['corpus_generation']}" in human_index.err
+    assert "WARNING: skipped claude record" in human_index.err
+    assert "(malformed_json)" in human_index.err
+    assert "Indexed 12 messages from 4 sources into corpus " in human_index.err
+
+    code, quiet_status = _run(
+        monkeypatch,
+        capsys,
+        "index",
+        "--status",
+        "--json",
+    )
+    assert code == 0
+    quiet_status_payload = json.loads(quiet_status.out)
+    assert quiet_status_payload["warnings"] == []
+    post_skip_generation = quiet_status_payload["refresh"]["corpus_generation"]
+    post_skip_build = quiet_status_payload["semantic"]["semantic_build"]
 
     code, exported = _run(
         monkeypatch,
@@ -411,23 +440,20 @@ def test_postgresql_cli_journey_with_events(
     assert code == 0, json.loads(exported.out)["error"]
     exported_payload = json.loads(exported.out)
     _assert_v4_envelope(exported_payload, "events")
+    assert exported_payload["warnings"] == []
     assert exported_payload["window"] == {
         "from_utc": "2026-08-11T00:00:00Z",
         "until_utc": "2026-08-12T00:00:00Z",
     }
-    assert (
-        exported_payload["source_corpus_generation"]
-        == indexed_payload["corpus_generation"]
-    )
+    assert exported_payload["source_corpus_generation"] == post_skip_generation
     assert exported_payload["population"] == {
-        "scanned_content_rows": 13,
-        "scanned_logical_messages": 11,
+        "scanned_content_rows": 12,
+        "scanned_logical_messages": 10,
         "retained": 2,
-        "excluded": 8,
+        "excluded": 7,
         "unresolved": 1,
         "excluded_by_reason": {
             "identified_harness": 1,
-            "non_prose": 1,
             "non_user_role": 6,
         },
         "unresolved_by_reason": {"unknown_authorship": 1},
@@ -435,7 +461,6 @@ def test_postgresql_cli_journey_with_events(
             "prose": 10,
             "tool_input": 1,
             "tool_name": 1,
-            "tool_output": 1,
         },
     }
     events = exported_payload["events"]
@@ -465,8 +490,7 @@ def test_postgresql_cli_journey_with_events(
     ]
     assert [event["physical_alias_count"] for event in events] == [1, 2]
     assert all(
-        event["source_corpus_generation"] == indexed_payload["corpus_generation"]
-        for event in events
+        event["source_corpus_generation"] == post_skip_generation for event in events
     )
     assert "visible primary user" not in exported.out
     assert "modern visible user" not in exported.out
@@ -526,10 +550,8 @@ def test_postgresql_cli_journey_with_events(
     assert stale_payload["mode"] == "literal"
     assert stale_payload["results"] == []
     stale_index_state = _assert_index_state(stale_payload)
-    assert (
-        stale_index_state["corpus_generation"] == indexed_payload["corpus_generation"]
-    )
-    assert stale_index_state["semantic_build"] == indexed_payload["semantic_build"]
+    assert stale_index_state["corpus_generation"] == post_skip_generation
+    assert stale_index_state["semantic_build"] == post_skip_build
     assert stale_index_state["unindexed"] == {
         "files": 1,
         "directories": 1,
@@ -736,7 +758,7 @@ def test_postgresql_cli_journey_with_events(
         monkeypatch,
         capsys,
         "search",
-        "Read OR synthetic.txt OR synthetic tool output",
+        "Read OR synthetic.txt",
         "--literal",
         "--tools",
         "--exhaustive",
@@ -752,7 +774,6 @@ def test_postgresql_cli_journey_with_events(
     assert [value["content_class"] for value in exhaustive_payload["results"]] == [
         "tool_name",
         "tool_input",
-        "tool_output",
     ]
 
     for command in (

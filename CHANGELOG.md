@@ -6,6 +6,13 @@
 - PostgreSQL migration 10 clears an already-incoherent selected pair when
   applied, then guards selection and demotion interleavings from making the
   selected corpus generation and semantic build incoherent.
+- Native parsing now excludes injected wrapper context and tool results,
+  repairs lone surrogates and U+0000 to U+FFFD, quietly counts skippable records,
+  distinguishes invalid UTF-8, upgrades a pending Codex session kind when its
+  metadata arrives, and ignores hidden Claude directories.
+- Both provider parser-state versions changed. The first index after this
+  release reparses every source from byte zero and may take substantially
+  longer; only changed embedding-input digests are re-embedded.
 
 ## cc-search-chats 2.1.0
 

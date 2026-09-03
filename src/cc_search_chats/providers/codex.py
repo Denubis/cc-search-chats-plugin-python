@@ -28,6 +28,7 @@ from cc_search_chats.core.identity import (
     SessionKind,
     SubmittedBy,
     is_unicode_scalar_text,
+    repair_unstorable_text,
 )
 from cc_search_chats.providers.source_discovery import (
     RecordEnvelope,
@@ -417,11 +418,14 @@ class CodexDiagnosticCode(StrEnum):
     """Closed Codex parse and exclusion classifications."""
 
     MALFORMED_JSON = "malformed_json"
+    INVALID_ENCODING = "invalid_encoding"
     UNSUPPORTED_SOURCE_SHAPE = "unsupported_source_shape"
     EXCLUDED_DEVELOPER = "excluded_developer"
+    EXCLUDED_INJECTED = "excluded_injected"
     UNKNOWN_ROLE = "unknown_role"
     UNKNOWN_CONTENT_BLOCK = "unknown_content_block"
     EXCLUDED_REASONING = "excluded_reasoning"
+    EXCLUDED_TOOL_RESULT = "excluded_tool_result"
     UNKNOWN_RESPONSE_ITEM = "unknown_response_item"
     UNKNOWN_EVENT = "unknown_event"
     UNKNOWN_OUTER_TYPE = "unknown_outer_type"
@@ -432,6 +436,7 @@ class CodexDiagnosticCode(StrEnum):
     EXCLUDED_LIFECYCLE_EVENT = "excluded_lifecycle_event"
     PARTIAL_TAIL = "partial_tail"
     INVALID_PAYLOAD = "invalid_payload"
+    REPAIRED_UNICODE = "repaired_unicode"
     INVALID_UNICODE = "invalid_unicode"
     EMPTY_CONTENT = "empty_content"
     UNKNOWN_METADATA_SHAPE = "unknown_metadata_shape"
@@ -587,7 +592,16 @@ def _decode_records(
     for envelope in envelopes:
         try:
             payload: object = json.loads(envelope.raw_bytes)
-        except json.JSONDecodeError, UnicodeDecodeError:
+        except UnicodeDecodeError:
+            diagnostics.append(
+                _diagnostic(
+                    CodexDiagnosticCode.INVALID_ENCODING,
+                    envelope,
+                    "complete record is not valid UTF-8",
+                )
+            )
+            continue
+        except json.JSONDecodeError:
             diagnostics.append(
                 _diagnostic(
                     CodexDiagnosticCode.MALFORMED_JSON,
@@ -718,6 +732,8 @@ def _continued_session_kind(
         return established, ()
     if diagnostics:
         return SessionKind.UNKNOWN, diagnostics
+    if established is SessionKind.UNKNOWN:
+        return observed, ()
     return SessionKind.UNKNOWN, (
         _diagnostic(
             CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE,
@@ -971,6 +987,114 @@ def _native_message(
     )
 
 
+def _is_injected_user_element(value: str) -> bool:
+    """Recognize only the two ruled whole-block Codex harness wrappers."""
+    trimmed = value.strip()
+    for tag in ("environment_context", "user_instructions"):
+        opening = f"<{tag}>"
+        closing = f"</{tag}>"
+        if trimmed.startswith(opening) and trimmed.endswith(closing):
+            inner = trimmed[len(opening) : -len(closing)]
+            return opening not in inner and closing not in inner
+    return False
+
+
+def _extract_message_text_block(
+    block: object,
+    role: str,
+    envelope: RecordEnvelope,
+) -> tuple[str | None, bool, bool, tuple[CodexDiagnostic, ...]]:
+    """Classify one Codex message block and return its visible text, if any."""
+    if not _is_json_object(block):
+        return (
+            None,
+            False,
+            False,
+            (
+                _diagnostic(
+                    CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
+                    envelope,
+                    "message content block is not an object",
+                ),
+            ),
+        )
+    block_type = block.get("type")
+    if block_type in {"reasoning", "summary_text"}:
+        return (
+            None,
+            False,
+            False,
+            (
+                _diagnostic(
+                    CodexDiagnosticCode.EXCLUDED_REASONING,
+                    envelope,
+                    "reasoning content is deliberately non-searchable",
+                ),
+            ),
+        )
+    if (
+        block_type == "input_image"
+        and frozenset(block) == {"type", "detail", "image_url"}
+        and isinstance(block.get("detail"), str)
+        and isinstance(block.get("image_url"), str)
+    ):
+        return (
+            None,
+            False,
+            False,
+            (
+                _diagnostic(
+                    CodexDiagnosticCode.EXCLUDED_NON_TEXT_CONTENT,
+                    envelope,
+                    "image content is deliberately non-searchable",
+                ),
+            ),
+        )
+    expected = "input_text" if role == "user" else "output_text"
+    text = block.get("text")
+    if block_type != expected or not isinstance(text, str):
+        return (
+            None,
+            False,
+            False,
+            (
+                _diagnostic(
+                    CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
+                    envelope,
+                    f"unrecognized or role-incompatible message block: {block_type!r}",
+                ),
+            ),
+        )
+    if role == "user" and _is_injected_user_element(text):
+        return None, True, False, ()
+    text, repaired = repair_unstorable_text(text)
+    if not is_unicode_scalar_text(text):
+        return (
+            None,
+            False,
+            True,
+            (
+                _diagnostic(
+                    CodexDiagnosticCode.INVALID_UNICODE,
+                    envelope,
+                    "message text contains a non-scalar Unicode value",
+                ),
+            ),
+        )
+    diagnostics = (
+        (
+            _diagnostic(
+                CodexDiagnosticCode.REPAIRED_UNICODE,
+                envelope,
+                "message text contained unstorable code points repaired with U+FFFD",
+            ),
+        )
+        if repaired
+        else ()
+    )
+    return text, False, False, diagnostics
+
+
 def _message_content(
     content: object,
     role: str,
@@ -993,66 +1117,29 @@ def _message_content(
                 "recognized message has an empty content block list",
             ),
         )
-    expected = "input_text" if role == "user" else "output_text"
     text_parts: list[str] = []
     diagnostics: list[CodexDiagnostic] = []
     invalid_unicode = False
+    removed_injected = False
     for block in content:
-        if not _is_json_object(block):
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
-                    envelope,
-                    "message content block is not an object",
-                )
-            )
-            continue
-        block_type = block.get("type")
-        if block_type in {"reasoning", "summary_text"}:
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.EXCLUDED_REASONING,
-                    envelope,
-                    "reasoning content is deliberately non-searchable",
-                )
-            )
-            continue
-        if (
-            block_type == "input_image"
-            and frozenset(block) == {"type", "detail", "image_url"}
-            and isinstance(block.get("detail"), str)
-            and isinstance(block.get("image_url"), str)
-        ):
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.EXCLUDED_NON_TEXT_CONTENT,
-                    envelope,
-                    "image content is deliberately non-searchable",
-                )
-            )
-            continue
-        text = block.get("text")
-        if block_type != expected or not isinstance(text, str):
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
-                    envelope,
-                    f"unrecognized or role-incompatible message block: {block_type!r}",
-                )
-            )
-            continue
-        if not is_unicode_scalar_text(text):
-            invalid_unicode = True
-            diagnostics.append(
-                _diagnostic(
-                    CodexDiagnosticCode.INVALID_UNICODE,
-                    envelope,
-                    "message text contains a non-scalar Unicode value",
-                )
-            )
-            continue
-        text_parts.append(text)
+        text, removed, invalid, block_diagnostics = _extract_message_text_block(
+            block, role, envelope
+        )
+        diagnostics.extend(block_diagnostics)
+        removed_injected = removed_injected or removed
+        invalid_unicode = invalid_unicode or invalid
+        if text is not None:
+            text_parts.append(text)
     if invalid_unicode:
+        return None, tuple(diagnostics)
+    if removed_injected and not any(text_parts):
+        diagnostics.append(
+            _diagnostic(
+                CodexDiagnosticCode.EXCLUDED_INJECTED,
+                envelope,
+                "injected user context is deliberately non-searchable",
+            )
+        )
         return None, tuple(diagnostics)
     if not text_parts:
         return None, tuple(diagnostics)
@@ -1066,6 +1153,79 @@ def _message_content(
         )
         return None, tuple(diagnostics)
     return "\n".join(text_parts), tuple(diagnostics)
+
+
+def _parse_tool_call_item(
+    *,
+    item_type: object,
+    payload: dict[str, object],
+    record: _DecodedRecord,
+    context: CodexSessionContext,
+    source_session_id: str,
+    session_kind: SessionKind,
+    epoch: int,
+) -> tuple[tuple[PhysicalMessageCandidate, ...], tuple[CodexDiagnostic, ...]]:
+    """Parse one ruled Codex function/custom tool invocation."""
+    name = payload.get("name")
+    tool_input = _tool_text(
+        payload.get("arguments")
+        if item_type == "function_call"
+        else payload.get("input")
+    )
+    repaired = False
+    if isinstance(name, str):
+        name, repaired_name = repair_unstorable_text(name)
+        repaired = repaired or repaired_name
+    if tool_input is not None:
+        tool_input, repaired_input = repair_unstorable_text(tool_input)
+        repaired = repaired or repaired_input
+    if (isinstance(name, str) and not is_unicode_scalar_text(name)) or (
+        tool_input is not None and not is_unicode_scalar_text(tool_input)
+    ):
+        return (), (
+            _diagnostic(
+                CodexDiagnosticCode.INVALID_UNICODE,
+                record.envelope,
+                "tool call contains a non-scalar Unicode value",
+            ),
+        )
+    if not isinstance(name, str) or not name or tool_input is None:
+        return (), (
+            _diagnostic(
+                CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM,
+                record.envelope,
+                "tool call lacks a recognized name/input shape",
+            ),
+        )
+    messages = tuple(
+        _native_message(
+            record=record,
+            context=context,
+            source_session_id=source_session_id,
+            session_kind=session_kind,
+            epoch=epoch,
+            role="assistant",
+            content_class=content_class,
+            text=text,
+            family=CodexRecordFamily.TOOL,
+        )
+        for content_class, text in (
+            (ContentClass.TOOL_NAME, name),
+            (ContentClass.TOOL_INPUT, tool_input),
+        )
+    )
+    diagnostics = (
+        (
+            _diagnostic(
+                CodexDiagnosticCode.REPAIRED_UNICODE,
+                record.envelope,
+                "tool call contained unstorable code points repaired with U+FFFD",
+            ),
+        )
+        if repaired
+        else ()
+    )
+    return messages, diagnostics
 
 
 def _tool_text(value: object) -> str | None:
@@ -1160,90 +1320,22 @@ def _parse_response_item(
             diagnostics,
         )
     if item_type in {"function_call", "custom_tool_call"}:
-        name = payload.get("name")
-        tool_input = _tool_text(
-            payload.get("arguments")
-            if item_type == "function_call"
-            else payload.get("input")
-        )
-        if (isinstance(name, str) and not is_unicode_scalar_text(name)) or (
-            tool_input is not None and not is_unicode_scalar_text(tool_input)
-        ):
-            return (), (
-                _diagnostic(
-                    CodexDiagnosticCode.INVALID_UNICODE,
-                    record.envelope,
-                    "tool call contains a non-scalar Unicode value",
-                ),
-            )
-        if not isinstance(name, str) or not name or tool_input is None:
-            return (), (
-                _diagnostic(
-                    CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM,
-                    record.envelope,
-                    "tool call lacks a recognized name/input shape",
-                ),
-            )
-        return (
-            (
-                _native_message(
-                    record=record,
-                    context=context,
-                    source_session_id=source_session_id,
-                    session_kind=session_kind,
-                    epoch=epoch,
-                    role="assistant",
-                    content_class=ContentClass.TOOL_NAME,
-                    text=name,
-                    family=CodexRecordFamily.TOOL,
-                ),
-                _native_message(
-                    record=record,
-                    context=context,
-                    source_session_id=source_session_id,
-                    session_kind=session_kind,
-                    epoch=epoch,
-                    role="assistant",
-                    content_class=ContentClass.TOOL_INPUT,
-                    text=tool_input,
-                    family=CodexRecordFamily.TOOL,
-                ),
-            ),
-            (),
+        return _parse_tool_call_item(
+            item_type=item_type,
+            payload=payload,
+            record=record,
+            context=context,
+            source_session_id=source_session_id,
+            session_kind=session_kind,
+            epoch=epoch,
         )
     if item_type in {"function_call_output", "custom_tool_call_output"}:
-        output = _tool_text(payload.get("output"))
-        if output is not None and not is_unicode_scalar_text(output):
-            return (), (
-                _diagnostic(
-                    CodexDiagnosticCode.INVALID_UNICODE,
-                    record.envelope,
-                    "tool output contains a non-scalar Unicode value",
-                ),
-            )
-        if output is None:
-            return (), (
-                _diagnostic(
-                    CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM,
-                    record.envelope,
-                    "tool output lacks a recognized output shape",
-                ),
-            )
-        return (
-            (
-                _native_message(
-                    record=record,
-                    context=context,
-                    source_session_id=source_session_id,
-                    session_kind=session_kind,
-                    epoch=epoch,
-                    role="tool",
-                    content_class=ContentClass.TOOL_OUTPUT,
-                    text=output,
-                    family=CodexRecordFamily.TOOL,
-                ),
+        return (), (
+            _diagnostic(
+                CodexDiagnosticCode.EXCLUDED_TOOL_RESULT,
+                record.envelope,
+                "tool result content is deliberately non-searchable",
             ),
-            (),
         )
     return (), (
         _diagnostic(
@@ -1287,6 +1379,13 @@ def _parse_event(
             record.envelope,
             f"unrecognized event_msg payload type: {event_type!r}",
         )
+    if role == "user" and _is_injected_user_element(message):
+        return None, _diagnostic(
+            CodexDiagnosticCode.EXCLUDED_INJECTED,
+            record.envelope,
+            "injected user context is deliberately non-searchable",
+        )
+    message, repaired = repair_unstorable_text(message)
     if not is_unicode_scalar_text(message):
         return None, _diagnostic(
             CodexDiagnosticCode.INVALID_UNICODE,
@@ -1311,7 +1410,15 @@ def _parse_event(
             text=message,
             family=CodexRecordFamily.EVENT_MESSAGE,
         ),
-        None,
+        (
+            _diagnostic(
+                CodexDiagnosticCode.REPAIRED_UNICODE,
+                record.envelope,
+                "event message contained unstorable code points repaired with U+FFFD",
+            )
+            if repaired
+            else None
+        ),
     )
 
 
@@ -1659,10 +1766,12 @@ def parse_codex_session(
 
     new_candidates = tuple(candidates)
     established_kind = (
-        state.session_kind if state.session_kind is not None else session_kind
+        session_kind
+        if state.session_kind in {None, SessionKind.UNKNOWN}
+        else state.session_kind
     )
     compatible_carry = (
-        state.trailing_candidate if session_kind is established_kind else None
+        state.trailing_candidate if state.session_kind is session_kind else None
     )
     candidates_with_carry = (
         *((compatible_carry,) if compatible_carry is not None else ()),

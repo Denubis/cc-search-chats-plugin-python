@@ -752,6 +752,13 @@ def test_parser_state_version_change_forces_full_reparse(
     )
 
 
+def test_native_record_policy_bumps_both_parser_state_versions() -> None:
+    assert refresh_module._PARSER_STATE_VERSIONS == {
+        Provider.CLAUDE: 3,
+        Provider.CODEX: 3,
+    }
+
+
 def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(
     postgres_connection: psycopg.Connection,
     tmp_path: Path,
@@ -1043,13 +1050,15 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
         refresh_module._PARSER_STATE_VERSIONS[Provider.CLAUDE],
     )
     assert failure[7:] == (checkpoint[2], len(future_bytes), 1)
-    failed_coverage = cast(
-        "dict[str, object]",
-        _postgres_envelope(postgres_connection, "index")["coverage"],
-    )
+    failed_envelope = _postgres_envelope(postgres_connection, "search")
+    failed_coverage = cast("dict[str, object]", failed_envelope["coverage"])
     assert failed_coverage["unrecognized_conversation_records"] == 1
     assert failed_coverage["skipped_records"] == 0
     assert failed_coverage["completeness"] == "partial"
+    assert [
+        warning["code"]
+        for warning in cast("list[dict[str, object]]", failed_envelope["warnings"])
+    ] == ["source_refresh_failed"]
 
     run_count = next(
         postgres_connection.execute("SELECT count(*) FROM cc_search_chats.refresh_run")
@@ -1125,14 +1134,61 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
     )
 
 
+def test_unstorable_text_is_repaired_counted_and_not_warned(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    source.write_bytes(
+        _claude_message_bytes(
+            uuid="repaired-nul",
+            text="before\x00repaired",
+        )
+    )
+
+    result = refresh_native_sources(
+        postgres_connection,
+        source_roots=(_source_root(Provider.CLAUDE, claude_root),),
+    )
+
+    assert [row.text for row in search_messages(postgres_connection, "repaired")] == [
+        "before\ufffdrepaired"
+    ]
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT skipped_record_count FROM cc_search_chats.source_file_current"
+            )
+        )[0]
+        == 0
+    )
+    diagnostics = next(
+        postgres_connection.execute(
+            "SELECT diagnostics FROM cc_search_chats.refresh_run WHERE run_id = %s",
+            (result.run_id,),
+        )
+    )[0]
+    repaired = [value for value in diagnostics if value["code"] == "record_repaired"]
+    assert len(repaired) == 1
+    assert repaired[0]["reason"] == "repaired_unicode"
+    envelope = _postgres_envelope(
+        postgres_connection,
+        "index",
+        refresh_result=result,
+    )
+    coverage = cast("dict[str, object]", envelope["coverage"])
+    assert coverage["repaired_records"] == 1
+    assert coverage["skipped_records"] == 0
+    assert coverage["completeness"] == "complete"
+    assert envelope["warnings"] == []
+
+
 @pytest.mark.parametrize(
     ("reason", "bad_record", "record_limit"),
     [
-        (
-            "invalid_unicode",
-            _claude_message_bytes(uuid="bad-nul", text="bad\x00text"),
-            None,
-        ),
+        ("invalid_encoding", b"\xff\n", None),
         ("malformed_json", b'{"type":\n', None),
         (
             "oversized_record",
@@ -1239,7 +1295,7 @@ def test_first_parse_skips_unstorable_record_and_publishes_neighbors(
     skipped = [value for value in diagnostics if value["code"] == "record_skipped"]
     assert len(skipped) == 1
     expected_detail = {
-        "invalid_unicode": "message text contains a non-scalar Unicode value",
+        "invalid_encoding": "complete record is not valid UTF-8",
         "malformed_json": "complete record is not valid JSON",
         "oversized_record": "complete record exceeds the single-record byte limit",
     }[reason]
@@ -1266,17 +1322,32 @@ def test_first_parse_skips_unstorable_record_and_publishes_neighbors(
     )
     assert coverage["blocked_files"] == 0
     assert coverage["skipped_records"] == 1
-    assert coverage["completeness"] == "partial"
+    assert coverage["completeness"] == "complete"
+    index_warnings = cast(
+        "list[dict[str, object]]",
+        _postgres_envelope(
+            postgres_connection,
+            "index",
+            refresh_result=result,
+        )["warnings"],
+    )
+    assert [warning["code"] for warning in index_warnings] == ["record_skipped"]
+    assert (
+        _postgres_envelope(
+            postgres_connection,
+            "index",
+            include_skipped_warnings=False,
+        )["warnings"]
+        == []
+    )
+    for command in ("search", "resolve", "events", "list", "extract"):
+        assert _postgres_envelope(postgres_connection, command)["warnings"] == []
 
 
 @pytest.mark.parametrize(
     ("reason", "bad_record", "record_limit"),
     [
-        (
-            "invalid_unicode",
-            _claude_message_bytes(uuid="appended-bad-nul", text="bad\x00text"),
-            None,
-        ),
+        ("invalid_encoding", b"\xff\n", None),
         ("malformed_json", b'{"type":\n', None),
         (
             "oversized_record",
@@ -1356,10 +1427,10 @@ def test_append_skips_unstorable_record_and_advances_checkpoint(
         )["coverage"],
     )
     assert coverage["skipped_records"] == 1
-    assert coverage["completeness"] == "partial"
+    assert coverage["completeness"] == "complete"
 
 
-def test_codex_invalid_unicode_record_is_skipped_without_losing_neighbors(
+def test_codex_invalid_encoding_record_is_skipped_without_losing_neighbors(
     postgres_connection: psycopg.Connection,
     tmp_path: Path,
 ) -> None:
@@ -1388,15 +1459,6 @@ def test_codex_invalid_unicode_record_is_skipped_without_losing_neighbors(
             },
         },
         {
-            "timestamp": "2026-09-02T00:00:02Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "call",
-                "output": "bad\x00tool output",
-            },
-        },
-        {
             "timestamp": "2026-09-02T00:00:03Z",
             "type": "response_item",
             "payload": {
@@ -1407,12 +1469,11 @@ def test_codex_invalid_unicode_record_is_skipped_without_losing_neighbors(
             },
         },
     )
-    source.write_bytes(
-        b"".join(
-            json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
-            for payload in payloads
-        )
-    )
+    encoded = [
+        json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+        for payload in payloads
+    ]
+    source.write_bytes(encoded[0] + encoded[1] + b"\xff\n" + encoded[2])
 
     result = refresh_native_sources(
         postgres_connection,
@@ -1440,7 +1501,7 @@ def test_codex_invalid_unicode_record_is_skipped_without_losing_neighbors(
     skipped = [value for value in diagnostics if value["code"] == "record_skipped"]
     assert len(skipped) == 1
     assert skipped[0]["provider"] == "codex"
-    assert skipped[0]["reason"] == "invalid_unicode"
+    assert skipped[0]["reason"] == "invalid_encoding"
     assert skipped[0]["record_ordinal"] == 2
     assert skipped[0]["source_line"] == 3
 

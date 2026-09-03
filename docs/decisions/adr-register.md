@@ -9,3 +9,4 @@ ruling.
 |-----|-------|--------|------|
 | [0001](0001-classify-index-failures-before-acting.md) | Classify index failures before acting on them | Accepted | 2026-07-31 |
 | [0002](0002-explicit-search-modes-no-search-triggered-refresh.md) | Search never refreshes; the caller names the mode; the index stays joint | Accepted | 2026-09-02 |
+| [0003](0003-native-record-policy.md) | Persist visible conversation and bounded tool metadata | Accepted | 2026-09-03 |

@@ -32,7 +32,7 @@ ledger.
 | 5 | `semantic_chunk_schema.sql` | exact chunk profile, chunk coordinates, retirement of whole-message mappings |
 | 6 | `incremental_refresh_schema.sql` | failed-observation fingerprints, truthful attempted work, and the state table retired by migration 9 |
 | 7 | `coherent_corpus_schema.sql` | corpus-generation/semantic-build naming and one jointly selected coherent corpus |
-| 8 | `skipped_record_coverage_schema.sql` | durable count of skipped unstorable records per source checkpoint |
+| 8 | `skipped_record_coverage_schema.sql` | durable count of skippable records per source checkpoint |
 | 9 | `drop_auto_refresh_state_schema.sql` | retirement of the automatic-refresh state table |
 | 10 | `coherent_selection_guard_schema.sql` | symmetric update guards for the selected corpus-generation/semantic-build pair |
 
@@ -67,6 +67,13 @@ detected and is forbidden by the maintenance runbook.
 Migration 5 drops the retired `message_embedding_current` whole-message
 mapping. Chunks join directly to `embedding_value` by profile/input digest, so
 there is no second vector or membership copy.
+
+`message_current` persists visible user and assistant prose. Agent and unknown
+sessions remain queryable only behind `--agents`; persisted tool names and
+inputs remain queryable only behind `--literal --tools`. Provider parsers never
+persist reasoning, system/developer/injected context, or tool results. Lone
+surrogates and U+0000 in otherwise retained text are replaced with U+FFFD before
+the embedding-input digest is computed.
 
 ## Identity and exact resolution
 
@@ -111,11 +118,16 @@ generation's own completed semantic build. PostgreSQL MVCC exposes either the
 old or new coherent state. A no-op creates no generation and changes no current
 row versions.
 
-A deterministic parse failure stores its observed file identity, size, mtime,
-parser version, failing coordinate/code, and attempted bytes separately from the
-last successful checkpoint. The same observation is a metadata-only blocked
-source on later refreshes. Transient I/O failures retain retry-after/backoff;
-manual force retry and changed observations invalidate the relevant boundary.
+Skippable individual records advance the complete-record checkpoint and add to
+its durable skipped-record count without making coverage partial. The index run
+reports each skipped record, while read envelopes remain quiet. Repair counts
+are run-scoped diagnostics exposed as `coverage.repaired_records`; repairs are
+neither warnings nor partial coverage. A deterministic blocking parse failure
+stores its observed file identity, size, mtime, parser version, failing
+coordinate/code, and attempted bytes separately from the last successful
+checkpoint. The same observation is a metadata-only blocked source on later
+refreshes. Transient I/O failures retain retry-after/backoff; manual force retry
+and changed observations invalidate the relevant boundary.
 
 One session advisory owner serializes corpus work. `index`, invoked
 intentionally by a person, an agent, or the nightly timer, is the only builder

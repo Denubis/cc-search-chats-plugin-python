@@ -467,7 +467,7 @@ class TestClaudeRecognizedShapes:
 
         assert result.messages == ()
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
-            ClaudeDiagnosticCode.EXCLUDED_NON_TEXT_TOOL_RESULT
+            ClaudeDiagnosticCode.EXCLUDED_TOOL_RESULT
         ]
 
     @pytest.mark.parametrize(
@@ -573,6 +573,61 @@ class TestClaudeRecognizedShapes:
         assert result.messages[0].timestamp == "2026-08-29T00:00:00Z"
         assert result.diagnostics == ()
 
+    def test_user_system_reminder_spans_are_removed_from_visible_prose(self) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "type": "user",
+                        "uuid": "mixed-reminders",
+                        "message": {
+                            "role": "user",
+                            "content": (
+                                "before <system-reminder>first\nline</system-reminder>"
+                                " middle <system-reminder>second</system-reminder> after"
+                            ),
+                        },
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert [message.text for message in result.messages] == [
+            "before  middle  after"
+        ]
+        assert result.diagnostics == ()
+
+    def test_user_message_emptied_by_system_reminders_is_excluded(self) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "type": "user",
+                        "uuid": "only-reminders",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        " \n<system-reminder>injected"
+                                        "</system-reminder>\t"
+                                    ),
+                                }
+                            ],
+                        },
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EXCLUDED_INJECTED
+        ]
+
     def test_resumes_conversation_epoch_from_explicit_state(self) -> None:
         boundary_payload = {
             "type": "system",
@@ -653,7 +708,6 @@ class TestClaudeRecognizedShapes:
             (ContentClass.PROSE, "visible assistant"),
             (ContentClass.TOOL_NAME, "Read"),
             (ContentClass.TOOL_INPUT, '{"file_path":"synthetic.txt"}'),
-            (ContentClass.TOOL_OUTPUT, "synthetic tool output"),
             (ContentClass.PROSE, "visible after boundary"),
         ]
         assert all("[tool:" not in message.text for message in result.messages)
@@ -665,7 +719,6 @@ class TestClaudeRecognizedShapes:
             for message in result.messages
         )
         assert [message.conversation_epoch for message in result.messages] == [
-            0,
             0,
             0,
             0,
@@ -683,16 +736,20 @@ class TestClaudeRecognizedShapes:
         assert [
             (message.content_class, message.text) for message in result.messages
         ] == [
+            (ContentClass.PROSE, "invalid\ufffdpostgres text"),
             (ContentClass.TOOL_NAME, "Read\nGrep"),
             (
                 ContentClass.TOOL_INPUT,
                 '{"file_path":"one.txt"}\n{"pattern":"needle"}',
             ),
         ]
-        assert any(
-            diagnostic.code is ClaudeDiagnosticCode.INVALID_UNICODE
+        assert all(
+            diagnostic.code is not ClaudeDiagnosticCode.INVALID_UNICODE
             for diagnostic in result.diagnostics
         )
+        assert ClaudeDiagnosticCode.REPAIRED_UNICODE in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
 
     def test_compact_boundary_is_retained_but_never_searchable(self) -> None:
         result = parse_fixture(
@@ -784,6 +841,17 @@ class TestClaudeRecognizedShapes:
 
 
 class TestClaudeFailClosedDiagnostics:
+    def test_invalid_utf8_record_has_encoding_diagnostic(self) -> None:
+        result = parse_claude_session(
+            (raw_envelope(b"\xff"),),
+            context=ClaudeSessionContext(source_session_id="encoding-session"),
+        )
+
+        assert result.messages == ()
+        assert len(result.diagnostics) == 1
+        assert result.diagnostics[0].code is ClaudeDiagnosticCode.INVALID_ENCODING
+        assert "valid UTF-8" in result.diagnostics[0].detail
+
     def test_known_metadata_type_with_unobserved_shape_stays_unknown(self) -> None:
         result = parse_claude_session(
             (envelope({"type": "custom-title", "unexpected": "value"}),),
@@ -836,7 +904,7 @@ class TestClaudeFailClosedDiagnostics:
         ]
 
     @pytest.mark.parametrize("escaped_surrogate", [b"\\ud800", b"\\udfff"])
-    def test_escaped_lone_surrogate_prose_is_diagnostic(
+    def test_escaped_lone_surrogate_prose_is_repaired(
         self, escaped_surrogate: bytes
     ) -> None:
         raw = (
@@ -849,12 +917,12 @@ class TestClaudeFailClosedDiagnostics:
             context=ClaudeSessionContext(source_session_id="surrogate-session"),
         )
 
-        assert result.messages == ()
+        assert [message.text for message in result.messages] == ["\ufffd"]
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
-            ClaudeDiagnosticCode.INVALID_UNICODE
+            ClaudeDiagnosticCode.REPAIRED_UNICODE
         ]
 
-    def test_escaped_lone_surrogate_in_serialized_tool_value_is_diagnostic(
+    def test_escaped_lone_surrogate_in_serialized_tool_value_is_repaired(
         self,
     ) -> None:
         raw = (
@@ -868,9 +936,14 @@ class TestClaudeFailClosedDiagnostics:
             context=ClaudeSessionContext(source_session_id="surrogate-tool-session"),
         )
 
-        assert result.messages == ()
+        assert [
+            (message.content_class, message.text) for message in result.messages
+        ] == [
+            (ContentClass.TOOL_NAME, "tool"),
+            (ContentClass.TOOL_INPUT, '{"invalid":"\ufffd"}'),
+        ]
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
-            ClaudeDiagnosticCode.INVALID_UNICODE
+            ClaudeDiagnosticCode.REPAIRED_UNICODE
         ]
 
     def test_empty_typed_prose_is_diagnostic(self) -> None:

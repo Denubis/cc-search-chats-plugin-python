@@ -33,6 +33,7 @@ class SourceDiagnosticCode(StrEnum):
 
     PARTIAL_TAIL = "partial_tail"
     INVALID_JSON = "invalid_json"
+    INVALID_ENCODING = "invalid_encoding"
     UNREADABLE_SOURCE = "unreadable_source"
     OVERSIZED_RECORD = "oversized_record"
     SOURCE_TRUNCATED = "source_truncated"
@@ -269,7 +270,16 @@ def _invalid_json_diagnostic(
     """Classify malformed complete JSON without excluding its envelope."""
     try:
         json.loads(record_bytes)
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+    except UnicodeDecodeError as error:
+        return _record_diagnostic(
+            SourceDiagnosticCode.INVALID_ENCODING,
+            path,
+            f"complete record is not valid UTF-8: {error}",
+            ordinal,
+            source_line,
+            offset,
+        )
+    except json.JSONDecodeError as error:
         return _record_diagnostic(
             SourceDiagnosticCode.INVALID_JSON,
             path,
@@ -506,7 +516,13 @@ def _positive_non_native_diagnostic(path: Path) -> SourceDiagnostic | None:
 
     try:
         payload = json.loads(first_line)
-    except json.JSONDecodeError, UnicodeDecodeError:
+    except UnicodeDecodeError as error:
+        return _diagnostic(
+            SourceDiagnosticCode.INVALID_ENCODING,
+            path,
+            f"first line is not valid UTF-8: {error}",
+        )
+    except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
         return None
@@ -640,8 +656,54 @@ def _discover(
     )
 
 
+def _classify_walk_entry(
+    entry: os.DirEntry[str], *, skip_hidden_directories: bool
+) -> tuple[Path | None, Path | None, SourceDiagnostic | None]:
+    """Classify one directory entry as a child, regular file, or failure."""
+    path = Path(entry.path)
+    try:
+        if entry.is_dir(follow_symlinks=False):
+            child = (
+                None if skip_hidden_directories and entry.name.startswith(".") else path
+            )
+            return child, None, None
+        if entry.is_file(follow_symlinks=True):
+            return None, path, None
+    except OSError as error:
+        return (
+            None,
+            None,
+            _diagnostic(
+                SourceDiagnosticCode.UNREADABLE_PATH,
+                path,
+                f"path could not be inspected during traversal: {error}",
+            ),
+        )
+    return None, None, None
+
+
+def _walk_directory_entries(
+    directory: Path, root: Path
+) -> tuple[tuple[os.DirEntry[str], ...], SourceDiagnostic | None]:
+    """Read and sort one directory, naming a traversal failure if it occurs."""
+    try:
+        with os.scandir(directory) as entries:
+            return tuple(sorted(entries, key=lambda entry: entry.name)), None
+    except OSError as error:
+        code = (
+            SourceDiagnosticCode.UNREADABLE_ROOT
+            if directory == root
+            else SourceDiagnosticCode.UNREADABLE_PATH
+        )
+        return (), _diagnostic(
+            code,
+            directory,
+            f"directory could not be traversed: {error}",
+        )
+
+
 def _walk_regular_files(
-    root: Path,
+    root: Path, *, skip_hidden_directories: bool = False
 ) -> tuple[tuple[Path, ...], tuple[SourceDiagnostic, ...]]:
     """Walk ``root`` deterministically and report every traversal failure."""
     pending = deque([root])
@@ -650,41 +712,21 @@ def _walk_regular_files(
 
     while pending:
         directory = pending.popleft()
-        try:
-            with os.scandir(directory) as entries:
-                ordered_entries = sorted(entries, key=lambda entry: entry.name)
-        except OSError as error:
-            code = (
-                SourceDiagnosticCode.UNREADABLE_ROOT
-                if directory == root
-                else SourceDiagnosticCode.UNREADABLE_PATH
-            )
-            diagnostics.append(
-                _diagnostic(
-                    code,
-                    directory,
-                    f"directory could not be traversed: {error}",
-                )
-            )
+        ordered_entries, traversal_failure = _walk_directory_entries(directory, root)
+        if traversal_failure is not None:
+            diagnostics.append(traversal_failure)
             continue
 
-        child_directories: list[Path] = []
         for entry in ordered_entries:
-            path = Path(entry.path)
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    child_directories.append(path)
-                elif entry.is_file(follow_symlinks=True):
-                    files.append(path)
-            except OSError as error:
-                diagnostics.append(
-                    _diagnostic(
-                        SourceDiagnosticCode.UNREADABLE_PATH,
-                        path,
-                        f"path could not be inspected during traversal: {error}",
-                    )
-                )
-        pending.extend(child_directories)
+            child, file, diagnostic = _classify_walk_entry(
+                entry, skip_hidden_directories=skip_hidden_directories
+            )
+            if child is not None:
+                pending.append(child)
+            if file is not None:
+                files.append(file)
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
 
     return tuple(sorted(files)), tuple(diagnostics)
 
@@ -711,7 +753,10 @@ def _discover_provider_sources(
     failure = _root_failure(provider, resolved_root)
     if failure is not None:
         return failure
-    files, traversal_diagnostics = _walk_regular_files(resolved_root)
+    files, traversal_diagnostics = _walk_regular_files(
+        resolved_root,
+        skip_hidden_directories=provider is Provider.CLAUDE,
+    )
     if provider is Provider.CLAUDE:
         candidates = tuple(path for path in files if path.suffix == ".jsonl")
     else:

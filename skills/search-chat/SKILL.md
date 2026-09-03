@@ -34,7 +34,7 @@ cc-search-chats search "query" --literal --provider codex --days 7 --json
 # Include agent and unknown sessions
 cc-search-chats search "query" --semantic --agents --json
 
-# Lexical tool names/inputs/outputs; reasoning and instructions stay excluded
+# Lexical tool names and inputs; reasoning, instructions, and results stay excluded
 cc-search-chats search "query" --literal --tools --json
 
 # Complete deterministic prose/tool occurrences rather than ranked top results
@@ -65,10 +65,11 @@ prior results show the exact recorded repository/cwd; missing project metadata
 cannot match it.
 
 Both modes search visible primary-session prose. `--agents` adds agent and
-unknown sessions. `--tools` requires `--literal`; `--exhaustive` also requires
-literal mode and is the only complete occurrence mode. Ranked results are
-bounded top results. No flag exposes reasoning/thinking, system/developer
-instructions, injected context, or unrecognized record shapes.
+unknown sessions. `--tools` requires `--literal` and adds persisted tool names
+and inputs; tool results are not persisted. `--exhaustive` also requires literal
+mode and is the only complete occurrence mode. Ranked results are bounded top
+results. No flag exposes reasoning/thinking, system/developer instructions,
+injected context, or unrecognized record shapes.
 
 ## Interpret schema v4
 

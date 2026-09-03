@@ -452,6 +452,23 @@ class TestBoundedJsonlRead:
         assert diagnostic_codes(result) == {SourceDiagnosticCode.INVALID_JSON}
         assert result.diagnostics[0].record_ordinal == 0
 
+    def test_invalid_utf8_is_distinct_and_complete_record_remains_available(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "invalid-encoding.jsonl"
+        source.write_bytes(b"\xff\n")
+
+        result = read_bounded_jsonl(
+            source,
+            source_file_relative=Path("invalid-encoding.jsonl"),
+            target_size=source.stat().st_size,
+        )
+
+        assert [envelope.raw_bytes for envelope in result.envelopes] == [b"\xff"]
+        assert len(result.diagnostics) == 1
+        assert result.diagnostics[0].code is SourceDiagnosticCode.INVALID_ENCODING
+        assert "valid UTF-8" in result.diagnostics[0].detail
+
     def test_unreadable_source_is_reported_instead_of_looking_empty(
         self, tmp_path: Path
     ) -> None:
@@ -469,6 +486,19 @@ class TestBoundedJsonlRead:
 
 
 class TestProviderDiscovery:
+    def test_undecodable_first_line_is_reported_not_admitted(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "invalid-encoding.jsonl"
+        source.write_bytes(b"\xff\n")
+
+        result = discover_claude_sources(tmp_path.resolve())
+
+        assert result.sources == ()
+        assert len(result.diagnostics) == 1
+        assert result.diagnostics[0].code is SourceDiagnosticCode.INVALID_ENCODING
+        assert "valid UTF-8" in result.diagnostics[0].detail
+
     def test_nested_traversal_failure_is_reported_while_siblings_continue(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -514,6 +544,31 @@ class TestProviderDiscovery:
         assert [source.source_file_relative for source in result.sources] == [
             Path("primary.jsonl"),
             Path("session-id/subagents/agent.jsonl"),
+        ]
+        assert result.diagnostics == ()
+
+    def test_claude_does_not_descend_into_hidden_directories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = tmp_path / "project"
+        hidden = project / ".windowed"
+        hidden.mkdir(parents=True)
+        (hidden / "x.jsonl").write_text('{"role":"user"}\n')
+        visible = project / "visible.jsonl"
+        visible.write_text('{"type":"user"}\n')
+        original_scandir = os.scandir
+
+        def reject_hidden_directory(path: os.PathLike[str] | str):
+            if Path(path) == hidden:
+                raise AssertionError("hidden directory was traversed")
+            return original_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", reject_hidden_directory)
+
+        result = discover_claude_sources(tmp_path.resolve())
+
+        assert [source.source_file_relative for source in result.sources] == [
+            Path("project/visible.jsonl")
         ]
         assert result.diagnostics == ()
 

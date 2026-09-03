@@ -96,6 +96,123 @@ def established_unknown_session(session_id: str) -> CodexParserState:
 
 
 class TestCodexSchemaFamilies:
+    @pytest.mark.parametrize("wrapper", ["environment_context", "user_instructions"])
+    def test_user_wrapper_block_is_dropped_beside_visible_prose(
+        self, wrapper: str
+    ) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": f" <{wrapper}>private\nvalue</{wrapper}> ",
+                                },
+                                {"type": "input_text", "text": "visible user prose"},
+                            ],
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="wrapper-session"),
+            prior_state=established_unknown_session("wrapper-session"),
+        )
+
+        assert [message.text for message in result.messages] == ["visible user prose"]
+        assert result.diagnostics == ()
+
+    @pytest.mark.parametrize("wrapper", ["environment_context", "user_instructions"])
+    def test_user_event_containing_only_wrapper_is_excluded(self, wrapper: str) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": f"\n<{wrapper}>private</{wrapper}>\n",
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="wrapper-session"),
+            prior_state=established_unknown_session("wrapper-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.EXCLUDED_INJECTED
+        ]
+
+    def test_multiple_wrapper_elements_are_not_treated_as_one_injected_element(
+        self,
+    ) -> None:
+        text = (
+            "<environment_context>private</environment_context>"
+            "visible"
+            "<environment_context>private</environment_context>"
+        )
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": text}],
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="wrapper-session"),
+            prior_state=established_unknown_session("wrapper-session"),
+        )
+
+        assert [message.text for message in result.messages] == [text]
+        assert result.diagnostics == ()
+
+    def test_wrapper_plus_empty_block_is_excluded_as_injected(self) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "<environment_context>private"
+                                        "</environment_context>"
+                                    ),
+                                },
+                                {"type": "input_text", "text": ""},
+                            ],
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="wrapper-session"),
+            prior_state=established_unknown_session("wrapper-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.EXCLUDED_INJECTED
+        ]
+
     def test_child_lineage_session_id_names_parent_while_id_names_child(self) -> None:
         result = parse_codex_session(
             sequential_envelopes(
@@ -1197,6 +1314,38 @@ class TestCodexSchemaFamilies:
             diagnostic.code for diagnostic in suffix.diagnostics
         }
 
+    def test_established_unknown_kind_upgrades_when_session_metadata_arrives(
+        self,
+    ) -> None:
+        suffix = parse_codex_session(
+            sequential_envelopes(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "upgrade-session", "source": "cli"},
+                },
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "visible"}],
+                    },
+                },
+            ),
+            context=CodexSessionContext(source_session_id="upgrade-session"),
+            prior_state=established_unknown_session("upgrade-session"),
+        )
+
+        assert suffix.session_kind is SessionKind.PRIMARY
+        assert suffix.next_state.session_kind is SessionKind.PRIMARY
+        assert [message.session_kind for message in suffix.messages] == [
+            SessionKind.PRIMARY
+        ]
+        assert CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE not in {
+            diagnostic.code for diagnostic in suffix.diagnostics
+        }
+
     def test_changed_kind_cannot_pair_with_established_trailing_candidate(
         self,
     ) -> None:
@@ -1330,11 +1479,9 @@ class TestCodexSchemaFamilies:
             (ContentClass.PROSE, "legacy visible assistant"),
             (ContentClass.TOOL_NAME, "shell_command"),
             (ContentClass.TOOL_INPUT, '{"cmd":"synthetic"}'),
-            (ContentClass.TOOL_OUTPUT, "synthetic command output"),
             (ContentClass.PROSE, "legacy after compact"),
         ]
         assert [message.conversation_epoch for message in result.messages] == [
-            0,
             0,
             0,
             0,
@@ -1523,6 +1670,18 @@ class TestCodexSchemaFamilies:
 
 
 class TestCodexFailClosedDiagnostics:
+    def test_invalid_utf8_record_has_encoding_diagnostic(self) -> None:
+        result = parse_codex_session(
+            (raw_envelope(b"\xff"),),
+            context=CodexSessionContext(source_session_id="encoding-session"),
+            prior_state=established_unknown_session("encoding-session"),
+        )
+
+        assert result.messages == ()
+        assert len(result.diagnostics) == 1
+        assert result.diagnostics[0].code is CodexDiagnosticCode.INVALID_ENCODING
+        assert "valid UTF-8" in result.diagnostics[0].detail
+
     def test_unsupported_fixture_emits_no_searchable_content(self) -> None:
         result = parse_fixture(
             "codex_unsupported_shapes.jsonl", session_id="codex-unsupported"
@@ -1641,7 +1800,7 @@ class TestCodexFailClosedDiagnostics:
         }
 
     @pytest.mark.parametrize("escaped_surrogate", [b"\\ud800", b"\\udfff"])
-    def test_escaped_lone_surrogate_prose_is_diagnostic(
+    def test_escaped_lone_surrogate_prose_is_repaired(
         self, escaped_surrogate: bytes
     ) -> None:
         response = (
@@ -1660,13 +1819,14 @@ class TestCodexFailClosedDiagnostics:
             prior_state=established_unknown_session("surrogate-session"),
         )
 
-        assert result.messages == ()
+        assert [message.text for message in result.messages] == ["\ufffd"]
+        assert len(result.messages[0].identity.physical_aliases) == 2
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
-            CodexDiagnosticCode.INVALID_UNICODE,
-            CodexDiagnosticCode.INVALID_UNICODE,
+            CodexDiagnosticCode.REPAIRED_UNICODE,
+            CodexDiagnosticCode.REPAIRED_UNICODE,
         ]
 
-    def test_escaped_lone_surrogate_in_serialized_tool_value_is_diagnostic(
+    def test_escaped_lone_surrogate_in_serialized_tool_value_is_repaired(
         self,
     ) -> None:
         raw = (
@@ -1681,9 +1841,32 @@ class TestCodexFailClosedDiagnostics:
             prior_state=established_unknown_session("surrogate-tool-session"),
         )
 
-        assert result.messages == ()
+        assert [
+            (message.content_class, message.text) for message in result.messages
+        ] == [
+            (ContentClass.TOOL_NAME, "tool"),
+            (ContentClass.TOOL_INPUT, '{"invalid":"\ufffd"}'),
+        ]
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
-            CodexDiagnosticCode.INVALID_UNICODE
+            CodexDiagnosticCode.REPAIRED_UNICODE
+        ]
+
+    def test_nul_in_user_prose_is_repaired(self) -> None:
+        raw = (
+            b'{"timestamp":"2026-08-11T09:00:00Z","type":"response_item",'
+            b'"payload":{"type":"message","role":"user","content":'
+            b'[{"type":"input_text","text":"before\\u0000after"}]}}'
+        )
+
+        result = parse_codex_session(
+            (raw_envelope(raw),),
+            context=CodexSessionContext(source_session_id="nul-session"),
+            prior_state=established_unknown_session("nul-session"),
+        )
+
+        assert [message.text for message in result.messages] == ["before\ufffdafter"]
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.REPAIRED_UNICODE
         ]
 
     @pytest.mark.parametrize(

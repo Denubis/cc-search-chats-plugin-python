@@ -15,7 +15,7 @@ and do not invent connection or cache environment variables.
 - Topic: `cc-search-chats search "QUERY" --semantic --json`
 - Exact/filter search: `cc-search-chats search "QUERY" --literal --json`
 - Agent/unknown sessions: `cc-search-chats search "QUERY" --semantic --agents --json`
-- Tool content: `cc-search-chats search "QUERY" --literal --tools --json`
+- Tool names and inputs: `cc-search-chats search "QUERY" --literal --tools --json`
 - Complete occurrences: `cc-search-chats search "QUERY" --literal --tools --exhaustive --json`
 - Recent sessions: `cc-search-chats list --days 7 --json`
 - Recover: `cc-search-chats extract [SESSION_ID] --provider PROVIDER --json`
@@ -32,8 +32,9 @@ newer corpus is required. A miss merits alternate terms, `--literal`, and
 filter review before explicit maintenance. Both modes contain visible primary
 prose from configured standard and Ponytail roots;
 `--agents` adds agent/unknown sessions;
-`--literal --tools` adds tool content. Reasoning, instructions, injected context,
-and unrecognized shapes are unavailable.
+`--literal --tools` adds persisted tool names and inputs. Tool results,
+reasoning, instructions, injected context, and unrecognized shapes are
+unavailable.
 
 Read `results`, `sessions`, `messages`, or batched `resolutions` as appropriate.
 Retain provider-qualified native identity and `ccchat:v1:` locators when

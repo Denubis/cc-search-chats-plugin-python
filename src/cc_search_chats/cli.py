@@ -537,6 +537,7 @@ def _error_envelope(
             "indexed_files": 0,
             "skipped_files": 0,
             "skipped_records": 0,
+            "repaired_records": 0,
             "excluded_files": 0,
             "unreadable_files": 0,
             "unknown_sessions": 0,
@@ -931,7 +932,6 @@ def _coverage_completeness(metrics: _RefreshMetrics) -> str:
         or metrics.blocked_files
         or metrics.transient_failure_files
         or metrics.pending_bytes
-        or metrics.skipped_records
     )
     return "partial" if incomplete else "complete"
 
@@ -947,6 +947,11 @@ def _postgres_coverage(
         for diagnostic in diagnostics
         if isinstance(diagnostic, dict)
         and "unsupported " in str(diagnostic.get("detail", "")).lower()
+    )
+    repaired_records = sum(
+        1
+        for diagnostic in diagnostics
+        if isinstance(diagnostic, dict) and diagnostic.get("code") == "record_repaired"
     )
     return {
         "configured_root_count": len(roots),
@@ -971,6 +976,7 @@ def _postgres_coverage(
         "indexed_files": sum(int(root["indexed_files"]) for root in roots),
         "skipped_files": max(0, metrics.discovered_files - metrics.changed_files),
         "skipped_records": metrics.skipped_records,
+        "repaired_records": repaired_records,
         "excluded_files": sum(int(root["excluded_files"]) for root in roots),
         "unreadable_files": metrics.transient_failure_files,
         "unknown_sessions": _postgres_unknown_sessions(connection),
@@ -1052,6 +1058,7 @@ def _postgres_envelope(
     *,
     status: str = "complete",
     additional_warnings: Sequence[object] = (),
+    include_skipped_warnings: bool | None = None,
     refresh_result: RefreshResult | CorpusIndexResult | None = None,
     index_state_roots: tuple[ConfiguredSourceRoot, ...] | None = None,
     index_state_deadline: float | None = None,
@@ -1065,6 +1072,22 @@ def _postgres_envelope(
     refresh = _postgres_refresh(metrics)
     semantic = _postgres_semantic(connection)
     timing = _postgres_timing(connection)
+    if include_skipped_warnings is None:
+        include_skipped_warnings = command == "index"
+    refresh_warnings = [
+        diagnostic
+        for diagnostic in diagnostics
+        if not (
+            isinstance(diagnostic, dict)
+            and (
+                diagnostic.get("code") == "record_repaired"
+                or (
+                    diagnostic.get("code") == "record_skipped"
+                    and not include_skipped_warnings
+                )
+            )
+        )
+    ]
     return {
         "schema_version": _POSTGRES_SCHEMA_VERSION,
         "command": command,
@@ -1076,7 +1099,7 @@ def _postgres_envelope(
             timing.made_at.isoformat() if timing.made_at is not None else None
         ),
         "corpus_age_ms": timing.age_ms,
-        "warnings": [*diagnostics, *additional_warnings],
+        "warnings": [*refresh_warnings, *additional_warnings],
         **payload,
         **_index_state_payload(
             connection,
@@ -1388,6 +1411,8 @@ class _PostgresContext:
         *,
         status: str = "complete",
         additional_warnings: Sequence[object] = (),
+        emit_skipped_warning_events: bool = False,
+        include_skipped_warnings: bool | None = None,
         refresh_result: RefreshResult | CorpusIndexResult | None = None,
         index_state_roots: tuple[ConfiguredSourceRoot, ...] | None = None,
         index_state_deadline: float | None = None,
@@ -1398,11 +1423,26 @@ class _PostgresContext:
             command,
             status=status,
             additional_warnings=additional_warnings,
+            include_skipped_warnings=include_skipped_warnings,
             refresh_result=refresh_result,
             index_state_roots=index_state_roots,
             index_state_deadline=index_state_deadline,
             **payload,
         )
+        if emit_skipped_warning_events and self.progress_stream.ndjson:
+            refresh = cast("dict[str, object]", envelope["refresh"])
+            for warning in cast("list[object]", envelope["warnings"]):
+                if (
+                    isinstance(warning, dict)
+                    and warning.get("code") == "record_skipped"
+                ):
+                    self.progress_stream.emit(
+                        "parse",
+                        "warning",
+                        event="warning",
+                        run_id=cast("int | None", refresh["run_id"]),
+                        warning=warning,
+                    )
         self.progress_stream.terminal(envelope)
         return envelope
 
@@ -1501,6 +1541,7 @@ def _postgres_index_migrate(context: _PostgresContext) -> int:
     applied_schema_version = _applied_schema_version(context.connection)
     envelope = context.finish(
         "index",
+        include_skipped_warnings=False,
         applied_schema_version=applied_schema_version,
     )
     if context.args.json:
@@ -1540,6 +1581,7 @@ def _postgres_index_status(context: _PostgresContext) -> int:
     )
     envelope = context.finish(
         "index",
+        include_skipped_warnings=False,
         index_state_roots=configured_source_roots(),
         index_state_deadline=(
             context.args.request_started
@@ -1583,6 +1625,7 @@ def _postgres_index_run(context: _PostgresContext) -> int:
     progress.complete(result)
     envelope = context.finish(
         "index",
+        emit_skipped_warning_events=True,
         refresh_result=result,
         corpus_generation=result.corpus_generation,
         semantic_build=result.semantic_build,
@@ -1593,6 +1636,16 @@ def _postgres_index_run(context: _PostgresContext) -> int:
     if context.args.json:
         print(json.dumps(envelope, sort_keys=True))
     else:
+        for warning in cast("list[dict[str, object]]", envelope["warnings"]):
+            if warning.get("code") == "record_skipped":
+                print(
+                    "WARNING: skipped "
+                    f"{warning.get('provider')} record "
+                    f"{warning.get('source_file_relative')}:"
+                    f"{warning.get('source_line')} "
+                    f"({warning.get('reason')}): {warning.get('detail')}",
+                    file=sys.stderr,
+                )
         print(
             f"Indexed {result.message_count} messages from "
             f"{result.source_count} sources into corpus {result.corpus_generation}",
@@ -2502,7 +2555,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             '  cc-search-chats search "database migration" --semantic\n'
             '  cc-search-chats search "auth" --literal --provider codex\n'
-            '  cc-search-chats search "tool output" --literal --tools\n'
+            '  cc-search-chats search "file_path" --literal --tools\n'
             '  cc-search-chats search "sentinel" --literal --exhaustive --json'
         ),
     )
@@ -2526,7 +2579,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tools",
         action="store_true",
         default=False,
-        help="include tool name, input, and output rows in literal search",
+        help="include persisted tool name and input rows in literal search",
     )
     search_parser.add_argument(
         "--exhaustive",

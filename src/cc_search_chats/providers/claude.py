@@ -3,6 +3,7 @@
 # pattern: Functional Core
 
 import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, TypeIs
@@ -19,6 +20,7 @@ from cc_search_chats.core.identity import (
     SessionKind,
     SubmittedBy,
     is_unicode_scalar_text,
+    repair_unstorable_text,
 )
 from cc_search_chats.providers.source_discovery import RecordEnvelope
 
@@ -26,10 +28,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_SYSTEM_REMINDER_SPAN = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+
+
 class ClaudeDiagnosticCode(StrEnum):
     """Closed Claude parse and exclusion classifications."""
 
     MALFORMED_JSON = "malformed_json"
+    INVALID_ENCODING = "invalid_encoding"
     MISSING_MESSAGE = "missing_message"
     NON_OBJECT_MESSAGE = "non_object_message"
     UNKNOWN_ROLE = "unknown_role"
@@ -40,12 +46,14 @@ class ClaudeDiagnosticCode(StrEnum):
     EXCLUDED_SYSTEM = "excluded_system"
     EXCLUDED_INJECTED = "excluded_injected"
     EXCLUDED_METADATA = "excluded_metadata"
+    EXCLUDED_TOOL_RESULT = "excluded_tool_result"
     EXCLUDED_NON_TEXT_TOOL_RESULT = "excluded_non_text_tool_result"
     EXCLUDED_TOOL_METADATA = "excluded_tool_metadata"
     MISSING_MESSAGE_UUID = "missing_message_uuid"
     INVALID_COMPACT_BOUNDARY = "invalid_compact_boundary"
     DUPLICATE_COMPACT_BOUNDARY = "duplicate_compact_boundary"
     EMPTY_CONTENT = "empty_content"
+    REPAIRED_UNICODE = "repaired_unicode"
     INVALID_UNICODE = "invalid_unicode"
 
 
@@ -648,7 +656,16 @@ def _decode_records(
     for envelope in envelopes:
         try:
             payload: object = json.loads(envelope.raw_bytes)
-        except json.JSONDecodeError, UnicodeDecodeError:
+        except UnicodeDecodeError:
+            diagnostics.append(
+                _diagnostic(
+                    ClaudeDiagnosticCode.INVALID_ENCODING,
+                    envelope,
+                    "complete record is not valid UTF-8",
+                )
+            )
+            continue
+        except json.JSONDecodeError:
             diagnostics.append(
                 _diagnostic(
                     ClaudeDiagnosticCode.MALFORMED_JSON,
@@ -796,46 +813,37 @@ def _is_advisor_tool_result(value: object) -> bool:
     )
 
 
-def _tool_output(value: object) -> tuple[str | None, bool]:
-    """Extract only understood Claude tool-result output shapes."""
-    if isinstance(value, str):
-        return value, False
-    if isinstance(value, list):
-        parts: list[str] = []
-        excluded_non_text = False
-        for item in value:
-            if isinstance(item, str):
-                parts.append(item)
-            elif _is_json_object(item) and item.get("type") == "text":
-                text = item.get("text")
-                if not isinstance(text, str):
-                    return None, False
-                parts.append(text)
-            elif _is_known_non_text_tool_item(item):
-                excluded_non_text = True
-            else:
-                return None, False
-        return ("\n".join(parts) or None), excluded_non_text
-    if isinstance(value, dict):
-        return _stringify_tool_value(value), False
-    return None, False
+def _without_system_reminders(value: str) -> tuple[str, bool]:
+    """Remove every exact Claude system-reminder span from user prose."""
+    cleaned, count = _SYSTEM_REMINDER_SPAN.subn("", value)
+    return cleaned, count > 0
 
 
-def _extract_content(
-    content: object, envelope: RecordEnvelope
+def _extract_string_content(
+    content: str, envelope: RecordEnvelope, *, user_content: bool
 ) -> tuple[list[tuple[ContentClass, str]], list[ClaudeDiagnostic]]:
-    """Classify searchable blocks and name every excluded/unknown shape."""
-    if isinstance(content, str):
-        if not is_unicode_scalar_text(content):
-            return [], [
-                _diagnostic(
-                    ClaudeDiagnosticCode.INVALID_UNICODE,
-                    envelope,
-                    "message text contains a non-scalar Unicode value",
-                )
-            ]
-        if content:
-            return [(ContentClass.PROSE, content)], []
+    """Classify a bare message string after ruled filtering and repair."""
+    removed_injected = False
+    if user_content:
+        content, removed_injected = _without_system_reminders(content)
+    if removed_injected and not content.strip():
+        return [], [
+            _diagnostic(
+                ClaudeDiagnosticCode.EXCLUDED_INJECTED,
+                envelope,
+                "system-reminder content is deliberately non-searchable",
+            )
+        ]
+    content, repaired = repair_unstorable_text(content)
+    if not is_unicode_scalar_text(content):
+        return [], [
+            _diagnostic(
+                ClaudeDiagnosticCode.INVALID_UNICODE,
+                envelope,
+                "message text contains a non-scalar Unicode value",
+            )
+        ]
+    if not content:
         return [], [
             _diagnostic(
                 ClaudeDiagnosticCode.EMPTY_CONTENT,
@@ -843,6 +851,169 @@ def _extract_content(
                 "recognized message has empty string content",
             )
         ]
+    diagnostics = (
+        [
+            _diagnostic(
+                ClaudeDiagnosticCode.REPAIRED_UNICODE,
+                envelope,
+                "message text contained unstorable code points repaired with U+FFFD",
+            )
+        ]
+        if repaired
+        else []
+    )
+    return [(ContentClass.PROSE, content)], diagnostics
+
+
+def _extract_text_block(
+    block: dict[str, object],
+    envelope: RecordEnvelope,
+    *,
+    user_content: bool,
+) -> tuple[str | None, bool, bool, list[ClaudeDiagnostic]]:
+    """Return one visible text block and its repair/filter state."""
+    text = block.get("text")
+    if not isinstance(text, str):
+        return (
+            None,
+            False,
+            False,
+            [
+                _diagnostic(
+                    ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
+                    envelope,
+                    "text block lacks string text",
+                )
+            ],
+        )
+    removed_injected = False
+    if user_content:
+        text, removed_injected = _without_system_reminders(text)
+        if removed_injected and not text.strip():
+            return None, False, True, []
+    text, repaired = repair_unstorable_text(text)
+    if not is_unicode_scalar_text(text):
+        return (
+            None,
+            True,
+            removed_injected,
+            [
+                _diagnostic(
+                    ClaudeDiagnosticCode.INVALID_UNICODE,
+                    envelope,
+                    "text block contains a non-scalar Unicode value",
+                )
+            ],
+        )
+    diagnostics = (
+        [
+            _diagnostic(
+                ClaudeDiagnosticCode.REPAIRED_UNICODE,
+                envelope,
+                "text block contained unstorable code points repaired with U+FFFD",
+            )
+        ]
+        if repaired
+        else []
+    )
+    return text, False, removed_injected, diagnostics
+
+
+def _extract_tool_use_block(
+    block: dict[str, object], envelope: RecordEnvelope
+) -> tuple[list[tuple[ContentClass, str]], list[ClaudeDiagnostic]]:
+    """Return searchable name/input rows for one Claude tool invocation."""
+    name = block.get("name")
+    if not isinstance(name, str) or not name:
+        return [], [
+            _diagnostic(
+                ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
+                envelope,
+                "tool_use block lacks a nonempty name",
+            )
+        ]
+    rendered_input = _stringify_tool_value(block["input"]) if "input" in block else None
+    name, repaired_name = repair_unstorable_text(name)
+    repaired_input = False
+    if rendered_input is not None:
+        rendered_input, repaired_input = repair_unstorable_text(rendered_input)
+    if not is_unicode_scalar_text(name) or (
+        rendered_input is not None and not is_unicode_scalar_text(rendered_input)
+    ):
+        return [], [
+            _diagnostic(
+                ClaudeDiagnosticCode.INVALID_UNICODE,
+                envelope,
+                "tool_use block contains a non-scalar Unicode value",
+            )
+        ]
+    rows = [(ContentClass.TOOL_NAME, name)]
+    if rendered_input is not None:
+        rows.append((ContentClass.TOOL_INPUT, rendered_input))
+    diagnostics = (
+        [
+            _diagnostic(
+                ClaudeDiagnosticCode.REPAIRED_UNICODE,
+                envelope,
+                "tool_use block contained unstorable code points repaired with U+FFFD",
+            )
+        ]
+        if repaired_name or repaired_input
+        else []
+    )
+    return rows, diagnostics
+
+
+def _excluded_content_block_diagnostic(
+    block: dict[str, object], block_type: str, envelope: RecordEnvelope
+) -> ClaudeDiagnostic:
+    """Name a ruled exclusion or an unrecognized Claude content block."""
+    if block_type == "tool_result":
+        code = ClaudeDiagnosticCode.EXCLUDED_TOOL_RESULT
+        detail = "tool result content is deliberately non-searchable"
+    elif _is_advisor_tool_result(block):
+        code = ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA
+        detail = "advisor tool metadata is deliberately non-searchable"
+    elif _is_known_non_text_tool_item(block):
+        code = ClaudeDiagnosticCode.EXCLUDED_NON_TEXT_TOOL_RESULT
+        detail = "non-text image content is deliberately non-searchable"
+    elif (
+        block_type == "fallback"
+        and frozenset(block) == {"type", "from", "to"}
+        and _is_json_object(block.get("from"))
+        and _is_json_object(block.get("to"))
+    ):
+        code = ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA
+        detail = "model fallback metadata is deliberately non-searchable"
+    elif block_type == "server_tool_use" and frozenset(block) == {
+        "type",
+        "id",
+        "input",
+        "name",
+    }:
+        code = ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA
+        detail = "server tool metadata is deliberately non-searchable"
+    elif block_type == "thinking":
+        code = ClaudeDiagnosticCode.EXCLUDED_THINKING
+        detail = "thinking content is deliberately non-searchable"
+    elif block_type == "reasoning":
+        code = ClaudeDiagnosticCode.EXCLUDED_REASONING
+        detail = "reasoning content is deliberately non-searchable"
+    elif block_type in {"system", "developer", "injected"}:
+        code = ClaudeDiagnosticCode.EXCLUDED_INJECTED
+        detail = f"{block_type} content is deliberately non-searchable"
+    else:
+        code = ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK
+        detail = f"unrecognized Claude content block: {block_type}"
+    return _diagnostic(code, envelope, detail)
+
+
+def _extract_content(
+    content: object, envelope: RecordEnvelope, *, user_content: bool = False
+) -> tuple[list[tuple[ContentClass, str]], list[ClaudeDiagnostic]]:
+    """Classify searchable blocks and name every excluded/unknown shape."""
+    if isinstance(content, str):
+        return _extract_string_content(content, envelope, user_content=user_content)
     if not isinstance(content, list):
         return [], [
             _diagnostic(
@@ -863,6 +1034,7 @@ def _extract_content(
     rows: list[tuple[ContentClass, str]] = []
     prose: list[str] = []
     invalid_prose = False
+    removed_injected = False
     diagnostics: list[ClaudeDiagnostic] = []
     for block in content:
         if not _is_json_object(block) or not isinstance(block.get("type"), str):
@@ -876,157 +1048,21 @@ def _extract_content(
             continue
         block_type = block["type"]
         if block_type == "text":
-            text = block.get("text")
-            if not isinstance(text, str):
-                diagnostics.append(
-                    _diagnostic(
-                        ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
-                        envelope,
-                        "text block lacks string text",
-                    )
-                )
-                continue
-            if not is_unicode_scalar_text(text):
-                invalid_prose = True
-                diagnostics.append(
-                    _diagnostic(
-                        ClaudeDiagnosticCode.INVALID_UNICODE,
-                        envelope,
-                        "text block contains a non-scalar Unicode value",
-                    )
-                )
-                continue
-            prose.append(text)
+            text, invalid, removed, text_diagnostics = _extract_text_block(
+                block, envelope, user_content=user_content
+            )
+            diagnostics.extend(text_diagnostics)
+            invalid_prose = invalid_prose or invalid
+            removed_injected = removed_injected or removed
+            if text is not None:
+                prose.append(text)
         elif block_type == "tool_use":
-            name = block.get("name")
-            if not isinstance(name, str) or not name:
-                diagnostics.append(
-                    _diagnostic(
-                        ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
-                        envelope,
-                        "tool_use block lacks a nonempty name",
-                    )
-                )
-                continue
-            rendered_input = (
-                _stringify_tool_value(block["input"]) if "input" in block else None
-            )
-            if not is_unicode_scalar_text(name) or (
-                rendered_input is not None
-                and not is_unicode_scalar_text(rendered_input)
-            ):
-                diagnostics.append(
-                    _diagnostic(
-                        ClaudeDiagnosticCode.INVALID_UNICODE,
-                        envelope,
-                        "tool_use block contains a non-scalar Unicode value",
-                    )
-                )
-                continue
-            rows.append((ContentClass.TOOL_NAME, name))
-            if rendered_input is not None:
-                rows.append((ContentClass.TOOL_INPUT, rendered_input))
-        elif block_type == "tool_result":
-            output, excluded_non_text = _tool_output(block.get("content"))
-            if output is None and not excluded_non_text:
-                diagnostics.append(
-                    _diagnostic(
-                        ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
-                        envelope,
-                        "tool_result block has an unsupported content shape",
-                    )
-                )
-            elif output is not None and not is_unicode_scalar_text(output):
-                diagnostics.append(
-                    _diagnostic(
-                        ClaudeDiagnosticCode.INVALID_UNICODE,
-                        envelope,
-                        "tool_result block contains a non-scalar Unicode value",
-                    )
-                )
-            elif output is not None:
-                rows.append((ContentClass.TOOL_OUTPUT, output))
-            if excluded_non_text:
-                diagnostics.append(
-                    _diagnostic(
-                        ClaudeDiagnosticCode.EXCLUDED_NON_TEXT_TOOL_RESULT,
-                        envelope,
-                        "non-text tool result content is deliberately non-searchable",
-                    )
-                )
-        elif _is_advisor_tool_result(block):
-            diagnostics.append(
-                _diagnostic(
-                    ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA,
-                    envelope,
-                    "advisor tool metadata is deliberately non-searchable",
-                )
-            )
-        elif _is_known_non_text_tool_item(block):
-            diagnostics.append(
-                _diagnostic(
-                    ClaudeDiagnosticCode.EXCLUDED_NON_TEXT_TOOL_RESULT,
-                    envelope,
-                    "non-text image content is deliberately non-searchable",
-                )
-            )
-        elif (
-            block_type == "fallback"
-            and frozenset(block) == {"type", "from", "to"}
-            and _is_json_object(block.get("from"))
-            and _is_json_object(block.get("to"))
-        ):
-            diagnostics.append(
-                _diagnostic(
-                    ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA,
-                    envelope,
-                    "model fallback metadata is deliberately non-searchable",
-                )
-            )
-        elif block_type == "server_tool_use" and frozenset(block) == {
-            "type",
-            "id",
-            "input",
-            "name",
-        }:
-            diagnostics.append(
-                _diagnostic(
-                    ClaudeDiagnosticCode.EXCLUDED_TOOL_METADATA,
-                    envelope,
-                    "server tool metadata is deliberately non-searchable",
-                )
-            )
-        elif block_type == "thinking":
-            diagnostics.append(
-                _diagnostic(
-                    ClaudeDiagnosticCode.EXCLUDED_THINKING,
-                    envelope,
-                    "thinking content is deliberately non-searchable",
-                )
-            )
-        elif block_type == "reasoning":
-            diagnostics.append(
-                _diagnostic(
-                    ClaudeDiagnosticCode.EXCLUDED_REASONING,
-                    envelope,
-                    "reasoning content is deliberately non-searchable",
-                )
-            )
-        elif block_type in {"system", "developer", "injected"}:
-            diagnostics.append(
-                _diagnostic(
-                    ClaudeDiagnosticCode.EXCLUDED_INJECTED,
-                    envelope,
-                    f"{block_type} content is deliberately non-searchable",
-                )
-            )
+            tool_rows, tool_diagnostics = _extract_tool_use_block(block, envelope)
+            rows.extend(tool_rows)
+            diagnostics.extend(tool_diagnostics)
         else:
             diagnostics.append(
-                _diagnostic(
-                    ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
-                    envelope,
-                    f"unrecognized Claude content block: {block_type}",
-                )
+                _excluded_content_block_diagnostic(block, block_type, envelope)
             )
     if prose and not invalid_prose:
         if not any(prose):
@@ -1039,6 +1075,14 @@ def _extract_content(
             )
         else:
             rows.insert(0, (ContentClass.PROSE, "\n".join(prose)))
+    if removed_injected and not rows and not invalid_prose:
+        diagnostics.append(
+            _diagnostic(
+                ClaudeDiagnosticCode.EXCLUDED_INJECTED,
+                envelope,
+                "system-reminder content is deliberately non-searchable",
+            )
+        )
     grouped: dict[ContentClass, list[str]] = {}
     for content_class, text in rows:
         grouped.setdefault(content_class, []).append(text)
@@ -1171,7 +1215,9 @@ def parse_claude_session(
             continue
         if _is_legacy_flat_message_record(payload):
             content_rows, content_diagnostics = _extract_content(
-                payload["text"], record.envelope
+                payload["text"],
+                record.envelope,
+                user_content=payload.get("role") == "user",
             )
             diagnostics.extend(content_diagnostics)
             message_uuid = _message_uuid(payload)
@@ -1293,7 +1339,7 @@ def parse_claude_session(
             )
             continue
         content_rows, content_diagnostics = _extract_content(
-            message.get("content"), record.envelope
+            message.get("content"), record.envelope, user_content=role == "user"
         )
         diagnostics.extend(content_diagnostics)
         alias = _physical_alias(

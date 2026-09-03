@@ -28,6 +28,7 @@ from cc_search_chats.core.identity import (
     format_locator,
 )
 from cc_search_chats.providers.claude import (
+    ClaudeDiagnostic,
     ClaudeDiagnosticCode,
     ClaudeParseResult,
     ClaudeParserState,
@@ -35,6 +36,7 @@ from cc_search_chats.providers.claude import (
     parse_claude_session,
 )
 from cc_search_chats.providers.codex import (
+    CodexDiagnostic,
     CodexDiagnosticCode,
     CodexParseResult,
     CodexParserState,
@@ -67,8 +69,8 @@ from cc_search_chats.storage.postgresql.semantic import (
 )
 
 _PARSER_STATE_VERSIONS = {
-    Provider.CLAUDE: 2,
-    Provider.CODEX: 2,
+    Provider.CLAUDE: 3,
+    Provider.CODEX: 3,
 }
 _RETAINED_REFRESH_RUNS = 100
 _WAIT_HEARTBEAT_SECONDS = 5.0
@@ -101,12 +103,16 @@ _UNSUPPORTED_CODEX_DIAGNOSTICS = {
 }
 _SKIPPABLE_CLAUDE_DIAGNOSTICS = {
     ClaudeDiagnosticCode.MALFORMED_JSON,
+    ClaudeDiagnosticCode.INVALID_ENCODING,
     ClaudeDiagnosticCode.INVALID_UNICODE,
 }
 _SKIPPABLE_CODEX_DIAGNOSTICS = {
     CodexDiagnosticCode.MALFORMED_JSON,
+    CodexDiagnosticCode.INVALID_ENCODING,
     CodexDiagnosticCode.INVALID_UNICODE,
 }
+_REPAIRED_CLAUDE_DIAGNOSTICS = {ClaudeDiagnosticCode.REPAIRED_UNICODE}
+_REPAIRED_CODEX_DIAGNOSTICS = {CodexDiagnosticCode.REPAIRED_UNICODE}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1134,7 +1140,11 @@ def _skipped_record_diagnostics(
             diagnostic.source_byte_offset,
         )
         for diagnostic in source_diagnostics
-        if diagnostic.code is SourceDiagnosticCode.OVERSIZED_RECORD
+        if diagnostic.code
+        in {
+            SourceDiagnosticCode.OVERSIZED_RECORD,
+            SourceDiagnosticCode.INVALID_ENCODING,
+        }
     )
 
     by_ordinal: dict[int, dict[str, object]] = {}
@@ -1178,6 +1188,58 @@ def _messages_without_skipped_records(
             for alias in message.identity.physical_aliases
         )
     )
+
+
+def _repaired_record_diagnostic(
+    plan: _SourcePlan, diagnostic: ClaudeDiagnostic | CodexDiagnostic
+) -> tuple[int, dict[str, object]]:
+    """Convert one parser repair outcome to its run-scoped summary."""
+    if (
+        diagnostic.record_ordinal is None
+        or diagnostic.source_line is None
+        or diagnostic.source_byte_offset is None
+    ):
+        raise _SourceRefreshError("repaired record lacks complete source coordinates")
+    return diagnostic.record_ordinal, {
+        "code": "record_repaired",
+        "provider": plan.observed.root.provider.value,
+        "source_root_id": plan.observed.root.source_root_id,
+        "source_file_relative": (plan.observed.source.source_file_relative.as_posix()),
+        "record_ordinal": diagnostic.record_ordinal,
+        "source_line": diagnostic.source_line,
+        "source_byte_offset": diagnostic.source_byte_offset,
+        "reason": diagnostic.code.value,
+        "detail": diagnostic.detail,
+    }
+
+
+def _repaired_record_diagnostics(
+    plan: _SourcePlan,
+    parsed: ClaudeParseResult | CodexParseResult,
+) -> tuple[dict[str, object], ...]:
+    """Summarize repaired physical records without treating them as warnings."""
+    provider = plan.observed.root.provider
+    if provider is Provider.CLAUDE:
+        if not isinstance(parsed, ClaudeParseResult):
+            raise _SourceRefreshError("Claude source produced a non-Claude result")
+        diagnostics = (
+            diagnostic
+            for diagnostic in parsed.diagnostics
+            if diagnostic.code in _REPAIRED_CLAUDE_DIAGNOSTICS
+        )
+    else:
+        if not isinstance(parsed, CodexParseResult):
+            raise _SourceRefreshError("Codex source produced a non-Codex result")
+        diagnostics = (
+            diagnostic
+            for diagnostic in parsed.diagnostics
+            if diagnostic.code in _REPAIRED_CODEX_DIAGNOSTICS
+        )
+    by_ordinal: dict[int, dict[str, object]] = {}
+    for diagnostic in diagnostics:
+        ordinal, value = _repaired_record_diagnostic(plan, diagnostic)
+        by_ordinal.setdefault(ordinal, value)
+    return tuple(by_ordinal[ordinal] for ordinal in sorted(by_ordinal))
 
 
 def _stage_source_checkpoint(
@@ -1245,50 +1307,68 @@ def _stage_source_checkpoint(
     return advanced, pending_bytes
 
 
+def _index_artifact(path: Path) -> SourceDiagnostic | None:
+    """Keep byte-decode defects on the per-record parser path."""
+    artifact = inspect_non_native_artifact(path)
+    if artifact is not None and artifact.code is SourceDiagnosticCode.INVALID_ENCODING:
+        return None
+    return artifact
+
+
+def _stage_index_artifact(
+    connection: psycopg.Connection,
+    plan: _SourcePlan,
+    artifact: SourceDiagnostic,
+) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
+    """Exclude a known non-native artifact or fail its source inspection."""
+    if artifact.code not in {
+        SourceDiagnosticCode.NON_NATIVE_AGY,
+        SourceDiagnosticCode.NON_NATIVE_TRANSPORT_ARCHIVE,
+    }:
+        raise _SourceRefreshError(
+            "native source inspection failed: "
+            f"{artifact.code.value}: {artifact.detail}",
+            code=artifact.code.value,
+            failure_class=(
+                "transient"
+                if artifact.code is SourceDiagnosticCode.UNREADABLE_SOURCE
+                else "deterministic"
+            ),
+            record_ordinal=artifact.record_ordinal,
+            source_line=artifact.source_line,
+            source_byte_offset=artifact.source_byte_offset,
+        )
+    advanced, pending = _stage_source_checkpoint(
+        connection,
+        plan,
+        complete_byte_offset=0,
+        next_record_ordinal=0,
+        next_source_line=1,
+        parser_state={
+            "excluded_code": artifact.code.value,
+            "detail": artifact.detail,
+        },
+        source_status="excluded",
+        final_size=plan.observed.size,
+        skipped_record_count=0,
+    )
+    return advanced, pending, 0, ()
+
+
 def _parse_and_stage_source(
     connection: psycopg.Connection, plan: _SourcePlan
 ) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
     observed = plan.observed
-    artifact = inspect_non_native_artifact(observed.source.path)
+    artifact = _index_artifact(observed.source.path)
     if artifact is not None:
-        if artifact.code not in {
-            SourceDiagnosticCode.NON_NATIVE_AGY,
-            SourceDiagnosticCode.NON_NATIVE_TRANSPORT_ARCHIVE,
-        }:
-            raise _SourceRefreshError(
-                "native source inspection failed: "
-                f"{artifact.code.value}: {artifact.detail}",
-                code=artifact.code.value,
-                failure_class=(
-                    "transient"
-                    if artifact.code is SourceDiagnosticCode.UNREADABLE_SOURCE
-                    else "deterministic"
-                ),
-                record_ordinal=artifact.record_ordinal,
-                source_line=artifact.source_line,
-                source_byte_offset=artifact.source_byte_offset,
-            )
-        advanced, pending = _stage_source_checkpoint(
-            connection,
-            plan,
-            complete_byte_offset=0,
-            next_record_ordinal=0,
-            next_source_line=1,
-            parser_state={
-                "excluded_code": artifact.code.value,
-                "detail": artifact.detail,
-            },
-            source_status="excluded",
-            final_size=observed.size,
-            skipped_record_count=0,
-        )
-        return advanced, pending, 0, ()
+        return _stage_index_artifact(connection, plan, artifact)
 
     offset = plan.start_byte_offset
     ordinal = plan.next_record_ordinal
     source_line = plan.next_source_line
     state: ClaudeParserState | CodexParserState | None = plan.prior_state
     skipped_diagnostics: list[dict[str, object]] = []
+    repaired_diagnostics: list[dict[str, object]] = []
     if observed.size == offset and state is None:
         state = (
             ClaudeParserState()
@@ -1340,6 +1420,7 @@ def _parse_and_stage_source(
             batch.diagnostics,
         )
         skipped_diagnostics.extend(batch_skips)
+        repaired_diagnostics.extend(_repaired_record_diagnostics(plan, parsed))
         skipped_ordinals = frozenset(
             _required_integer(diagnostic, "record_ordinal")
             for diagnostic in batch_skips
@@ -1394,7 +1475,7 @@ def _parse_and_stage_source(
         advanced,
         pending,
         max(0, offset - plan.start_byte_offset),
-        tuple(skipped_diagnostics),
+        (*skipped_diagnostics, *repaired_diagnostics),
     )
 
 

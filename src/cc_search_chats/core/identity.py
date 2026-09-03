@@ -107,6 +107,17 @@ def is_unicode_scalar_text(value: object) -> bool:
     return True
 
 
+def repair_unstorable_text(value: str) -> tuple[str, bool]:
+    """Replace NUL and lone surrogate code points with the replacement character."""
+    repaired = "".join(
+        "\ufffd"
+        if character == "\x00" or 0xD800 <= ord(character) <= 0xDFFF
+        else character
+        for character in value
+    )
+    return repaired, repaired != value
+
+
 @dataclass(frozen=True, slots=True)
 class NativeLocator:
     """Provider-qualified physical native-record locator."""
