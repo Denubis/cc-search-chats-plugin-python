@@ -3,7 +3,10 @@
 import hashlib
 import json
 import shutil
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
+from threading import Event
 
 import psycopg
 import pytest
@@ -293,6 +296,7 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
         (7, "coherent_corpus_schema.sql", 64),
         (8, "skipped_record_coverage_schema.sql", 64),
         (9, "drop_auto_refresh_state_schema.sql", 64),
+        (10, "coherent_selection_guard_schema.sql", 64),
     )
     assert next(
         postgres_connection.execute(
@@ -319,7 +323,7 @@ def test_pending_migrations_is_read_only_and_reports_the_packaged_suffix(
     assert tuple(
         migration.version
         for migration in migrations.pending_migrations(postgres_connection)
-    ) == (1, 2, 3, 4, 5, 6, 7, 8, 9)
+    ) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
     assert (
         next(postgres_connection.execute("SELECT to_regnamespace('cc_search_chats')"))[
             0
@@ -354,7 +358,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
     monkeypatch.setattr(
         migrations,
         "_MIGRATIONS",
-        (*migrations._MIGRATIONS, migrations.Migration(10, "missing-migration.sql")),
+        (*migrations._MIGRATIONS, migrations.Migration(11, "missing-migration.sql")),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -364,7 +368,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
         postgres_connection.execute(
             "SELECT version FROM cc_search_chats.schema_migration ORDER BY version"
         )
-    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,))
+    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,))
 
 
 def test_migration_9_drops_only_the_retired_auto_refresh_state(
@@ -375,6 +379,9 @@ def test_migration_9_drops_only_the_retired_auto_refresh_state(
     migrations_through_v8 = tuple(
         migration for migration in packaged_migrations if migration.version <= 8
     )
+    migrations_through_v9 = tuple(
+        migration for migration in packaged_migrations if migration.version <= 9
+    )
     monkeypatch.setattr(migrations, "_MIGRATIONS", migrations_through_v8)
     migrations.apply_migrations(postgres_connection)
     assert next(
@@ -383,7 +390,7 @@ def test_migration_9_drops_only_the_retired_auto_refresh_state(
         )
     )[0]
 
-    monkeypatch.setattr(migrations, "_MIGRATIONS", packaged_migrations)
+    monkeypatch.setattr(migrations, "_MIGRATIONS", migrations_through_v9)
     assert tuple(
         migration.version
         for migration in migrations.pending_migrations(postgres_connection)
@@ -461,6 +468,7 @@ def _upgrade_seeded_v6_schema(
         7,
         8,
         9,
+        10,
     )
     migrations.apply_migrations(connection)
 
@@ -556,6 +564,388 @@ def test_migration_7_rejects_incomplete_or_cross_corpus_selection(
 
     with pytest.raises(psycopg.errors.CheckViolation):
         select_incomplete_semantic_build()
+
+
+def _seed_coherent_selection_guard_cases(
+    connection: psycopg.Connection,
+) -> None:
+    migrate(connection)
+    connection.execute(
+        """
+        INSERT INTO cc_search_chats.corpus_generation (
+            corpus_generation, completed_at, status, message_count, alias_count
+        ) OVERRIDING SYSTEM VALUE VALUES
+            (1, '2026-09-03T00:00:00Z', 'complete', 0, 0),
+            (2, '2026-09-03T00:01:00Z', 'complete', 0, 0),
+            (3, '2026-09-03T00:02:00Z', 'complete', 0, 0)
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO cc_search_chats.semantic_build (
+            semantic_build, corpus_generation, profile_id,
+            completed_at, status, embedded_count
+        ) OVERRIDING SYSTEM VALUE VALUES
+            (10, 1, 'nemotron-3-embed-8b-bf16:chunks-v1',
+             '2026-09-03T00:00:00Z', 'complete', 0),
+            (11, 1, 'nemotron-3-embed-8b-bf16:chunks-v1',
+             NULL, 'building', 0),
+            (20, 2, 'nemotron-3-embed-8b-bf16:chunks-v1',
+             '2026-09-03T00:01:00Z', 'complete', 0),
+            (30, 3, 'nemotron-3-embed-8b-bf16:chunks-v1',
+             '2026-09-03T00:02:00Z', 'complete', 0)
+        """
+    )
+    connection.execute(
+        """
+        UPDATE cc_search_chats.corpus_generation
+        SET semantic_build = CASE corpus_generation
+            WHEN 1 THEN 10
+            WHEN 2 THEN 20
+            WHEN 3 THEN 30
+        END
+        """
+    )
+    connection.execute(
+        "UPDATE cc_search_chats.corpus_state SET current_corpus_generation = 1"
+    )
+
+
+def test_migration_10_rejects_selected_generation_status_demotion(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    _seed_coherent_selection_guard_cases(postgres_connection)
+
+    with (
+        pytest.raises(
+            psycopg.errors.CheckViolation,
+            match=r"corpus_generation.*selected corpus generation 1",
+        ),
+        postgres_connection.transaction(),
+    ):
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.corpus_generation SET status = 'failed' "
+            "WHERE corpus_generation = 1"
+        )
+
+    assert next(
+        postgres_connection.execute(
+            "SELECT status FROM cc_search_chats.corpus_generation "
+            "WHERE corpus_generation = 1"
+        )
+    ) == ("complete",)
+
+
+def test_migration_10_rejects_selected_generation_completion_removal(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    _seed_coherent_selection_guard_cases(postgres_connection)
+
+    with (
+        pytest.raises(
+            psycopg.errors.CheckViolation,
+            match=r"corpus_generation.*selected corpus generation 1",
+        ),
+        postgres_connection.transaction(),
+    ):
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.corpus_generation SET completed_at = NULL "
+            "WHERE corpus_generation = 1"
+        )
+
+    assert next(
+        postgres_connection.execute(
+            "SELECT completed_at IS NOT NULL "
+            "FROM cc_search_chats.corpus_generation WHERE corpus_generation = 1"
+        )
+    ) == (True,)
+
+
+def test_migration_10_rejects_selected_build_status_demotion(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    _seed_coherent_selection_guard_cases(postgres_connection)
+
+    with (
+        pytest.raises(
+            psycopg.errors.CheckViolation,
+            match=r"semantic_build.*selected corpus generation 1",
+        ),
+        postgres_connection.transaction(),
+    ):
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.semantic_build SET status = 'failed' "
+            "WHERE semantic_build = 10"
+        )
+
+    assert next(
+        postgres_connection.execute(
+            "SELECT status FROM cc_search_chats.semantic_build "
+            "WHERE semantic_build = 10"
+        )
+    ) == ("complete",)
+
+
+def test_migration_10_rejects_selected_generation_incomplete_build_repoint(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    _seed_coherent_selection_guard_cases(postgres_connection)
+
+    with (
+        pytest.raises(
+            psycopg.errors.CheckViolation,
+            match=r"corpus_generation.*selected corpus generation 1",
+        ),
+        postgres_connection.transaction(),
+    ):
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.corpus_generation SET semantic_build = 11 "
+            "WHERE corpus_generation = 1"
+        )
+
+    assert next(
+        postgres_connection.execute(
+            "SELECT semantic_build FROM cc_search_chats.corpus_generation "
+            "WHERE corpus_generation = 1"
+        )
+    ) == (10,)
+
+
+def test_migration_10_allows_unselected_pair_demotion(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    _seed_coherent_selection_guard_cases(postgres_connection)
+
+    with postgres_connection.transaction():
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.corpus_generation SET status = 'failed' "
+            "WHERE corpus_generation = 2"
+        )
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.semantic_build SET status = 'failed' "
+            "WHERE semantic_build = 20"
+        )
+
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT generation.status, build.status
+            FROM cc_search_chats.corpus_generation AS generation
+            JOIN cc_search_chats.semantic_build AS build
+              ON (build.semantic_build, build.corpus_generation) =
+                 (generation.semantic_build, generation.corpus_generation)
+            WHERE generation.corpus_generation = 2
+            """
+        )
+    ) == ("failed", "failed")
+
+
+def test_migration_10_defers_old_pair_guard_until_after_coherent_handover(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    _seed_coherent_selection_guard_cases(postgres_connection)
+    assert tuple(
+        postgres_connection.execute(
+            """
+            SELECT tgname, pg_get_triggerdef(oid)
+            FROM pg_trigger
+            WHERE tgname IN (
+                'corpus_generation_preserves_coherent_selection',
+                'semantic_build_preserves_coherent_selection'
+            )
+            ORDER BY tgname
+            """
+        )
+    ) == (
+        (
+            "corpus_generation_preserves_coherent_selection",
+            (
+                "CREATE CONSTRAINT TRIGGER "
+                "corpus_generation_preserves_coherent_selection "
+                "AFTER UPDATE OF status, completed_at, semantic_build ON "
+                "cc_search_chats.corpus_generation DEFERRABLE INITIALLY DEFERRED "
+                "FOR EACH ROW EXECUTE FUNCTION "
+                "cc_search_chats.require_coherent_selection_after_pair_update()"
+            ),
+        ),
+        (
+            "semantic_build_preserves_coherent_selection",
+            (
+                "CREATE CONSTRAINT TRIGGER "
+                "semantic_build_preserves_coherent_selection "
+                "AFTER UPDATE OF status, completed_at ON "
+                "cc_search_chats.semantic_build DEFERRABLE INITIALLY DEFERRED "
+                "FOR EACH ROW EXECUTE FUNCTION "
+                "cc_search_chats.require_coherent_selection_after_pair_update()"
+            ),
+        ),
+    )
+
+    with postgres_connection.transaction():
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.corpus_generation SET status = 'failed' "
+            "WHERE corpus_generation = 1"
+        )
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.semantic_build SET status = 'failed' "
+            "WHERE semantic_build = 10"
+        )
+        postgres_connection.execute(
+            "UPDATE cc_search_chats.corpus_state SET current_corpus_generation = 3"
+        )
+
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT state.current_corpus_generation,
+                   old_generation.status,
+                   old_build.status
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS old_generation
+              ON old_generation.corpus_generation = 1
+            JOIN cc_search_chats.semantic_build AS old_build
+              ON old_build.semantic_build = 10
+            """
+        )
+    ) == (3, "failed", "failed")
+
+
+def test_migration_10_queues_selected_pair_guard_until_constraints_are_checked(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    _seed_coherent_selection_guard_cases(postgres_connection)
+
+    def force_deferred_guard() -> None:
+        with postgres_connection.transaction():
+            postgres_connection.execute(
+                "UPDATE cc_search_chats.corpus_generation SET status = 'failed' "
+                "WHERE corpus_generation = 1"
+            )
+            postgres_connection.execute("SET CONSTRAINTS ALL IMMEDIATE")
+
+    with pytest.raises(
+        psycopg.errors.CheckViolation,
+        match=r"corpus_generation.*selected corpus generation 1",
+    ):
+        force_deferred_guard()
+
+    assert next(
+        postgres_connection.execute(
+            "SELECT status FROM cc_search_chats.corpus_generation "
+            "WHERE corpus_generation = 1"
+        )
+    ) == ("complete",)
+
+
+def _apply_migration_10_to_existing_selection(
+    connection: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    make_incoherent: bool,
+) -> None:
+    packaged_migrations = migrations._MIGRATIONS
+    migrations_through_v9 = tuple(
+        migration for migration in packaged_migrations if migration.version <= 9
+    )
+    monkeypatch.setattr(migrations, "_MIGRATIONS", migrations_through_v9)
+    _seed_coherent_selection_guard_cases(connection)
+    if make_incoherent:
+        connection.execute(
+            "UPDATE cc_search_chats.semantic_build SET status = 'failed' "
+            "WHERE semantic_build = 10"
+        )
+
+    monkeypatch.setattr(migrations, "_MIGRATIONS", packaged_migrations)
+    migrations.apply_migrations(connection)
+
+
+def test_migration_10_clears_an_existing_incoherent_selection(
+    postgres_connection: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _apply_migration_10_to_existing_selection(
+        postgres_connection,
+        monkeypatch,
+        make_incoherent=True,
+    )
+
+    assert next(
+        postgres_connection.execute(
+            "SELECT current_corpus_generation FROM cc_search_chats.corpus_state"
+        )
+    ) == (None,)
+
+
+def test_migration_10_preserves_an_existing_coherent_selection(
+    postgres_connection: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _apply_migration_10_to_existing_selection(
+        postgres_connection,
+        monkeypatch,
+        make_incoherent=False,
+    )
+
+    assert next(
+        postgres_connection.execute(
+            "SELECT current_corpus_generation FROM cc_search_chats.corpus_state"
+        )
+    ) == (1,)
+
+
+def test_migration_10_serializes_selection_with_concurrent_pair_demotion(
+    postgres_connection: psycopg.Connection,
+    postgres_cluster,
+) -> None:
+    _seed_coherent_selection_guard_cases(postgres_connection)
+    postgres_connection.execute(
+        "UPDATE cc_search_chats.corpus_state SET current_corpus_generation = 2"
+    )
+    demoter_started = Event()
+
+    def demote_build() -> None:
+        with psycopg.connect(postgres_cluster.dsn) as demoter:
+            demoter.execute("SET LOCAL lock_timeout = '5s'")
+            demoter.execute(
+                "UPDATE cc_search_chats.semantic_build SET status = 'failed' "
+                "WHERE semantic_build = 10"
+            )
+            demoter_started.set()
+            demoter.commit()
+
+    with (
+        psycopg.connect(postgres_cluster.dsn) as publisher,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        publisher.execute(
+            "UPDATE cc_search_chats.corpus_state SET current_corpus_generation = 1"
+        )
+        demotion = executor.submit(demote_build)
+        assert demoter_started.wait(timeout=2)
+        with pytest.raises(FutureTimeoutError):
+            demotion.result(timeout=0.25)
+
+        publisher.commit()
+        with pytest.raises(
+            psycopg.errors.CheckViolation,
+            match=r"semantic_build.*selected corpus generation 1",
+        ):
+            demotion.result(timeout=5)
+
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT state.current_corpus_generation, build.status
+            FROM cc_search_chats.corpus_state AS state
+            JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation = state.current_corpus_generation
+            JOIN cc_search_chats.semantic_build AS build
+              ON (build.semantic_build, build.corpus_generation) =
+                 (generation.semantic_build, generation.corpus_generation)
+            WHERE state.singleton
+            """
+        )
+    ) == (1, "complete")
 
 
 def _seed_legacy_snapshots(connection: psycopg.Connection) -> None:

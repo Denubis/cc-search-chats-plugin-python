@@ -195,7 +195,7 @@ def test_migration_reporting_uses_applied_ledger_version(
             """
             INSERT INTO cc_search_chats.schema_migration (
                 version, resource_name, sha256
-            ) VALUES (10, 'future_schema.sql', %s)
+            ) VALUES (11, 'future_schema.sql', %s)
             """,
             ("0" * 64,),
         )
@@ -219,7 +219,7 @@ def test_migration_reporting_uses_applied_ledger_version(
                 "SELECT max(version) FROM cc_search_chats.schema_migration"
             )
         )[0]
-    assert ledger_version == 10
+    assert ledger_version == 11
     if json_output:
         assert json.loads(output.out)["applied_schema_version"] == ledger_version
     else:
@@ -290,7 +290,7 @@ def test_postgresql_cli_journey_with_events(
 
     code, migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
     assert code == 0
-    assert json.loads(migrated.out)["applied_schema_version"] == 9
+    assert json.loads(migrated.out)["applied_schema_version"] == 10
     code, indexed = _run(monkeypatch, capsys, "index", "--json")
     assert code == 0
     indexed_payload = json.loads(indexed.out)

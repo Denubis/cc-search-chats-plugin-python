@@ -164,7 +164,7 @@ def test_search_reports_pending_migration_without_creating_schema(
     _assert_v4_error_envelope(payload)
     assert payload["status"] == "maintenance_required"
     error = cast("dict[str, object]", payload["error"])
-    assert error["pending_versions"] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert error["pending_versions"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     with psycopg.connect(postgres_cluster.dsn) as connection:
         assert (
             next(connection.execute("SELECT to_regnamespace('cc_search_chats')"))[0]

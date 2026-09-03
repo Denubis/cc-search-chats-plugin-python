@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Changed:**
+- PostgreSQL migration 10 clears an already-incoherent selected pair when
+  applied, then guards selection and demotion interleavings from making the
+  selected corpus generation and semantic build incoherent.
+
 ## cc-search-chats 2.1.0
 
 **Changed:**

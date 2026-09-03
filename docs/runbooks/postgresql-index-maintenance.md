@@ -1,6 +1,6 @@
 # PostgreSQL index maintenance
 
-Last verified: 2026-09-02
+Last verified: 2026-09-03
 
 This runbook separates read-only inspection, candidate migration, production
 UAT, and irreversible legacy pruning. Preparing or testing code does not
@@ -63,16 +63,22 @@ Only after explicit production-migration authority, use the exact installed
 entrypoint. Migration is a separate command so a failed migration cannot be
 obscured by indexing output:
 
+First run the selected-pair inspection query in §5 and record that both statuses
+are `complete`. If either is not, migration 10 clears the selection and the
+following `cc-search-chats index` republishes it. Do not run `index --migrate`
+while an index run is active on another host sharing the database; same-host
+runs are already single-flight.
+
 ```console
 cc-search-chats index --migrate --json
 ```
 
-The migration result must report `applied_schema_version == 9`. Re-running it is
+The migration result must report `applied_schema_version == 10`. Re-running it is
 idempotent. Routine search/index commands must have reported
 `maintenance_required` without schema mutation before this explicit step.
 
-Capture stdout/stderr separately. Stdout must parse as one schema-v3 object.
-Stderr must parse as ordered schema-v3 NDJSON ending in exactly one terminal
+Capture stdout/stderr separately. Stdout must parse as one schema-v4 object.
+Stderr must parse as ordered schema-v4 NDJSON ending in exactly one terminal
 event.
 
 ## 4. Publish one coherent corpus
@@ -121,6 +127,29 @@ work is unavailable; status must not claim the failed candidate is current.
 - **Interrupted coherent update:** publication rolls back, the previous corpus
   remains selected, and the next owner diagnoses abandoned state and retries.
   Reusable vectors remain; retry embeds only missing chunk digests.
+- **Incoherent selection rejected (`23514`):** inspect the selected pair without
+  changing it:
+
+  ```sql
+  SELECT state.current_corpus_generation,
+         generation.status AS corpus_generation_status,
+         generation.completed_at AS corpus_generation_completed_at,
+         generation.semantic_build,
+         build.status AS semantic_build_status,
+         build.completed_at AS semantic_build_completed_at
+  FROM cc_search_chats.corpus_state AS state
+  LEFT JOIN cc_search_chats.corpus_generation AS generation
+    ON generation.corpus_generation = state.current_corpus_generation
+  LEFT JOIN cc_search_chats.semantic_build AS build
+    ON (build.semantic_build, build.corpus_generation) =
+       (generation.semantic_build, generation.corpus_generation)
+  WHERE state.singleton;
+  ```
+
+  Never demote, delete, or replace the selected pair by hand, including by
+  deleting and reinserting the same build key. Publish a new coherent pair with
+  `cc-search-chats index`; after selection moves, the superseded rows are
+  ordinary history.
 - **Stale exact source:** refresh and repeat exact resolution. Do not substitute
   a ranked match.
 - **Database/storage unavailable:** restore the configured boundary. Do not use

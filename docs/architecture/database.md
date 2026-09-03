@@ -1,6 +1,6 @@
 # Database architecture
 
-Last verified: 2026-09-02
+Last verified: 2026-09-03
 
 ## Authority and ownership
 
@@ -34,6 +34,7 @@ ledger.
 | 7 | `coherent_corpus_schema.sql` | corpus-generation/semantic-build naming and one jointly selected coherent corpus |
 | 8 | `skipped_record_coverage_schema.sql` | durable count of skipped unstorable records per source checkpoint |
 | 9 | `drop_auto_refresh_state_schema.sql` | retirement of the automatic-refresh state table |
+| 10 | `coherent_selection_guard_schema.sql` | symmetric update guards for the selected corpus-generation/semantic-build pair |
 
 Applied migration bytes are immutable. A future schema change is a new ordered
 resource plus a ledger test.
@@ -56,6 +57,12 @@ resource plus a ledger test.
 | `semantic_build` | one small row per corpus/profile attempt | owning corpus generation, progress/failure and coverage counts; no vector copies |
 | `legacy_snapshot_inventory` | at most one migration record | quarantined selected snapshot inputs until approved prune |
 | `cutover_validation` | one per production candidate | exact installed commit and human acceptance evidence |
+
+The selected pair is guarded on both sides. Deferred, share-locked guards reject
+any single transaction, and any interleaving of a selector and a demoter, that
+would leave the selected pair incoherent. Key changes and deletes are refused by
+the foreign keys. A delete-and-reinsert of a build key in one transaction is not
+detected and is forbidden by the maintenance runbook.
 
 Migration 5 drops the retired `message_embedding_current` whole-message
 mapping. Chunks join directly to `embedding_value` by profile/input digest, so
