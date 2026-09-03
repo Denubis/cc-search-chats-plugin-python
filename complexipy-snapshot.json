@@ -1,27 +1,5 @@
 [
   {
-    "path": "src/cc_search_chats/cli.py",
-    "file_name": "cli.py",
-    "functions": [
-      {
-        "name": "_ProgressStream::emit",
-        "complexity": 25
-      },
-      {
-        "name": "_postgres_envelope",
-        "complexity": 34
-      },
-      {
-        "name": "main",
-        "complexity": 98
-      },
-      {
-        "name": "_handle_postgres",
-        "complexity": 174
-      }
-    ]
-  },
-  {
     "path": "src/cc_search_chats/core/canonicalization.py",
     "file_name": "canonicalization.py",
     "functions": [

@@ -10,13 +10,14 @@ import shlex
 import sqlite3
 import sys
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from multiprocessing import get_context
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
-from typing import TYPE_CHECKING, Never, cast
+from typing import TYPE_CHECKING, Never, TypedDict, cast
 
 import psycopg
 
@@ -72,6 +73,7 @@ from cc_search_chats.storage.index import (
 )
 from cc_search_chats.storage.postgresql import (
     CorpusIndexResult,
+    ExactResolution,
     HybridHit,
     MessageResolution,
     RefreshProgress,
@@ -316,52 +318,91 @@ class _ProgressStream:
                 "semantic": semantic,
             }
             if self._ndjson:
-                print(
-                    json.dumps(value, ensure_ascii=False, sort_keys=True),
-                    file=self._stderr,
-                )
-            elif completed_units is not None and total_units is not None:
-                if (
-                    self._human_active_phase is not None
-                    and self._human_active_phase != phase
-                ):
-                    print(file=self._stderr)
-                    self._human_phase_samples.pop(self._human_active_phase, None)
-                    self._human_active_phase = None
-                started_at, started_units = self._human_phase_samples.setdefault(
-                    phase,
-                    (emitted_at, completed_units),
-                )
-                elapsed = emitted_at - started_at
-                advanced = completed_units - started_units
-                rate = advanced / elapsed if elapsed > 0 and advanced > 0 else 0.0
-                percent = (
-                    completed_units / total_units * 100 if total_units > 0 else 100.0
-                )
-                rate_text = f" {rate:.1f} units/s" if rate > 0 else ""
-                eta_text = ""
-                if rate > 0 and completed_units < total_units:
-                    remaining_seconds = round((total_units - completed_units) / rate)
-                    hours, remainder = divmod(remaining_seconds, 3600)
-                    minutes, seconds = divmod(remainder, 60)
-                    eta_text = f" ETA {hours:d}:{minutes:02d}:{seconds:02d}"
-                end = "" if state == "running" else "\n"
-                print(
-                    f"\x1b[2K\r{phase}: {state} {completed_units}/{total_units} "
-                    f"({percent:.1f}%){rate_text}{eta_text}",
-                    end=end,
-                    file=self._stderr,
-                    flush=True,
-                )
-                self._human_active_phase = phase if state == "running" else None
-                if self._human_active_phase is None:
-                    self._human_phase_samples.pop(phase, None)
+                self._emit_ndjson(value)
             else:
-                if self._human_active_phase is not None:
-                    print(file=self._stderr)
-                    self._human_phase_samples.pop(self._human_active_phase, None)
-                    self._human_active_phase = None
-                print(f"{phase}: {state}", file=self._stderr)
+                self._emit_human(
+                    phase,
+                    state,
+                    emitted_at=emitted_at,
+                    completed_units=completed_units,
+                    total_units=total_units,
+                )
+
+    def _emit_ndjson(self, value: dict[str, object]) -> None:
+        print(
+            json.dumps(value, ensure_ascii=False, sort_keys=True),
+            file=self._stderr,
+        )
+
+    def _emit_human(
+        self,
+        phase: str,
+        state: str,
+        *,
+        emitted_at: float,
+        completed_units: int | None,
+        total_units: int | None,
+    ) -> None:
+        if completed_units is not None and total_units is not None:
+            self._emit_human_progress(
+                phase,
+                state,
+                emitted_at=emitted_at,
+                completed_units=completed_units,
+                total_units=total_units,
+            )
+            return
+        self._close_human_phase()
+        print(f"{phase}: {state}", file=self._stderr)
+
+    def _emit_human_progress(
+        self,
+        phase: str,
+        state: str,
+        *,
+        emitted_at: float,
+        completed_units: int,
+        total_units: int,
+    ) -> None:
+        if self._human_active_phase is not None and self._human_active_phase != phase:
+            self._close_human_phase()
+        started_at, started_units = self._human_phase_samples.setdefault(
+            phase,
+            (emitted_at, completed_units),
+        )
+        elapsed = emitted_at - started_at
+        advanced = completed_units - started_units
+        rate = advanced / elapsed if elapsed > 0 and advanced > 0 else 0.0
+        percent = completed_units / total_units * 100 if total_units > 0 else 100.0
+        rate_text = f" {rate:.1f} units/s" if rate > 0 else ""
+        eta_text = self._human_eta(completed_units, total_units, rate)
+        end = "" if state == "running" else "\n"
+        print(
+            f"\x1b[2K\r{phase}: {state} {completed_units}/{total_units} "
+            f"({percent:.1f}%){rate_text}{eta_text}",
+            end=end,
+            file=self._stderr,
+            flush=True,
+        )
+        self._human_active_phase = phase if state == "running" else None
+        if self._human_active_phase is None:
+            self._human_phase_samples.pop(phase, None)
+
+    @staticmethod
+    def _human_eta(completed_units: int, total_units: int, rate: float) -> str:
+        if rate <= 0 or completed_units >= total_units:
+            return ""
+        remaining_seconds = round((total_units - completed_units) / rate)
+        hours, remainder = divmod(remaining_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f" ETA {hours:d}:{minutes:02d}:{seconds:02d}"
+
+    def _close_human_phase(self) -> None:
+        if self._human_active_phase is None:
+            return
+        print(file=self._stderr)
+        self._human_phase_samples.pop(self._human_active_phase, None)
+        self._human_active_phase = None
 
     @contextmanager
     def heartbeat(
@@ -658,18 +699,44 @@ def _index_state_payload(
     }
 
 
-def _postgres_envelope(
-    connection: psycopg.Connection,
-    command: str,
-    *,
-    status: str = "complete",
-    additional_warnings: Sequence[object] = (),
-    refresh_result: RefreshResult | CorpusIndexResult | None = None,
-    index_state_roots: tuple[ConfiguredSourceRoot, ...] | None = None,
-    index_state_deadline: float | None = None,
-    **payload: object,
-) -> dict[str, object]:
-    roots = [
+@dataclass(frozen=True)
+class _RefreshMetrics:
+    corpus_generation: int | None
+    run_id: int | None
+    state: str
+    discovered_files: int
+    changed_files: int
+    failed_files: int
+    read_files: int
+    removed_files: int
+    advanced_files: int
+    metadata_checked_files: int
+    attempted_files: int
+    attempted_content_bytes: int
+    blocked_files: int
+    transient_failure_files: int
+    pending_bytes: int
+    skipped_records: int
+
+
+@dataclass(frozen=True)
+class _CorpusTiming:
+    now: datetime
+    made_at: datetime | None
+    age_ms: int | None
+
+
+class _RootCoverage(TypedDict):
+    provider: str
+    resolved_path: str
+    discovered_files: int
+    indexed_files: int
+    excluded_files: int
+    pending_files: int
+
+
+def _postgres_roots(connection: psycopg.Connection) -> list[_RootCoverage]:
+    return [
         {
             "provider": provider,
             "resolved_path": resolved_path,
@@ -701,7 +768,10 @@ def _postgres_envelope(
             """
         )
     ]
-    refresh_row = next(
+
+
+def _postgres_refresh_row(connection: psycopg.Connection):
+    return next(
         connection.execute(
             """
             SELECT state.current_corpus_generation, run.run_id, run.status,
@@ -733,7 +803,63 @@ def _postgres_envelope(
             """
         )
     )
-    repositories = [
+
+
+def _refresh_metrics(
+    refresh_row,
+    roots: Sequence[_RootCoverage],
+    refresh_result: RefreshResult | CorpusIndexResult | None,
+) -> _RefreshMetrics:
+    current_discovered = sum(int(root["discovered_files"]) for root in roots)
+    values = _RefreshMetrics(
+        corpus_generation=refresh_row[0],
+        run_id=refresh_row[1],
+        state=refresh_row[2] or "unchanged",
+        discovered_files=(
+            int(refresh_row[3]) if refresh_row[3] is not None else current_discovered
+        ),
+        changed_files=int(refresh_row[4] or 0),
+        failed_files=int(refresh_row[5] or 0),
+        read_files=int(refresh_row[6] or 0),
+        removed_files=int(refresh_row[7] or 0),
+        advanced_files=int(refresh_row[8] or 0),
+        metadata_checked_files=int(refresh_row[9] or 0),
+        attempted_files=int(refresh_row[10] or 0),
+        attempted_content_bytes=int(refresh_row[11] or 0),
+        blocked_files=int(refresh_row[12] or 0),
+        transient_failure_files=int(refresh_row[13] or 0),
+        pending_bytes=int(refresh_row[15] or 0),
+        skipped_records=int(refresh_row[16] or 0),
+    )
+    if refresh_result is None:
+        return values
+    return _RefreshMetrics(
+        corpus_generation=refresh_result.corpus_generation,
+        run_id=refresh_result.run_id,
+        state=(
+            refresh_row[2]
+            if refresh_result.run_id is not None
+            and refresh_result.run_id == refresh_row[1]
+            else "unchanged"
+        ),
+        discovered_files=refresh_result.source_count,
+        changed_files=refresh_result.changed_source_count,
+        failed_files=refresh_result.failed_source_count,
+        read_files=refresh_result.read_source_count,
+        removed_files=refresh_result.removed_source_count,
+        advanced_files=refresh_result.advanced_source_count,
+        metadata_checked_files=refresh_result.metadata_checked_source_count,
+        attempted_files=refresh_result.attempted_source_count,
+        attempted_content_bytes=refresh_result.attempted_content_bytes,
+        blocked_files=refresh_result.blocked_source_count,
+        transient_failure_files=refresh_result.transient_failure_source_count,
+        pending_bytes=values.pending_bytes,
+        skipped_records=values.skipped_records,
+    )
+
+
+def _postgres_repositories(connection: psycopg.Connection) -> list[object]:
+    return [
         value
         for (value,) in connection.execute(
             """
@@ -744,7 +870,10 @@ def _postgres_envelope(
             """
         )
     ]
-    unknown_sessions = next(
+
+
+def _postgres_unknown_sessions(connection: psycopg.Connection) -> int:
+    return next(
         connection.execute(
             """
             SELECT count(*)
@@ -757,7 +886,12 @@ def _postgres_envelope(
             """
         )
     )[0]
-    source_watermarks = [
+
+
+def _postgres_source_watermarks(
+    connection: psycopg.Connection,
+) -> list[dict[str, object]]:
+    return [
         {
             "provider": provider,
             "resolved_root": resolved_root,
@@ -788,7 +922,81 @@ def _postgres_envelope(
             """
         )
     ]
-    semantic_row = next(
+
+
+def _coverage_completeness(metrics: _RefreshMetrics) -> str:
+    incomplete = (
+        metrics.state in {"partial", "failed"}
+        or metrics.failed_files
+        or metrics.blocked_files
+        or metrics.transient_failure_files
+        or metrics.pending_bytes
+        or metrics.skipped_records
+    )
+    return "partial" if incomplete else "complete"
+
+
+def _postgres_coverage(
+    connection: psycopg.Connection,
+    roots: list[_RootCoverage],
+    diagnostics: Sequence[object],
+    metrics: _RefreshMetrics,
+) -> dict[str, object]:
+    unrecognized_records = sum(
+        1
+        for diagnostic in diagnostics
+        if isinstance(diagnostic, dict)
+        and "unsupported " in str(diagnostic.get("detail", "")).lower()
+    )
+    return {
+        "configured_root_count": len(roots),
+        "resolved_root_count": len(roots),
+        "roots": roots,
+        "repositories": _postgres_repositories(connection),
+        "discovered_files": metrics.discovered_files,
+        "metadata_checked_files": metrics.metadata_checked_files,
+        "unchanged_files": max(
+            0,
+            metrics.metadata_checked_files
+            - metrics.attempted_files
+            - metrics.blocked_files
+            - metrics.transient_failure_files,
+        ),
+        "content_read_files": metrics.attempted_files,
+        "content_read_bytes": metrics.attempted_content_bytes,
+        "read_files": metrics.read_files,
+        "removed_files": metrics.removed_files,
+        "blocked_files": metrics.blocked_files,
+        "transient_failure_files": metrics.transient_failure_files,
+        "indexed_files": sum(int(root["indexed_files"]) for root in roots),
+        "skipped_files": max(0, metrics.discovered_files - metrics.changed_files),
+        "skipped_records": metrics.skipped_records,
+        "excluded_files": sum(int(root["excluded_files"]) for root in roots),
+        "unreadable_files": metrics.transient_failure_files,
+        "unknown_sessions": _postgres_unknown_sessions(connection),
+        "unrecognized_conversation_records": unrecognized_records,
+        "source_watermarks": _postgres_source_watermarks(connection),
+        "completeness": _coverage_completeness(metrics),
+    }
+
+
+def _postgres_refresh(metrics: _RefreshMetrics) -> dict[str, object]:
+    return {
+        "corpus_generation": metrics.corpus_generation,
+        "run_id": metrics.run_id,
+        "state": metrics.state,
+        "failed_sources": metrics.failed_files,
+        "attempted_sources": metrics.attempted_files,
+        "attempted_content_bytes": metrics.attempted_content_bytes,
+        "blocked_sources": metrics.blocked_files,
+        "transient_failure_sources": metrics.transient_failure_files,
+        "advanced_sources": metrics.advanced_files,
+        "pending_bytes": metrics.pending_bytes,
+    }
+
+
+def _postgres_semantic(connection: psycopg.Connection) -> dict[str, object]:
+    row = next(
         connection.execute(
             """
             SELECT build.semantic_build,
@@ -811,112 +1019,18 @@ def _postgres_envelope(
             """
         )
     )
-    diagnostics = refresh_row[14] or []
-    current_discovered = sum(int(root["discovered_files"]) for root in roots)
-    discovered_files = (
-        int(refresh_row[3]) if refresh_row[3] is not None else current_discovered
-    )
-    changed_files = int(refresh_row[4] or 0)
-    failed_files = int(refresh_row[5] or 0)
-    read_files = int(refresh_row[6] or 0)
-    removed_files = int(refresh_row[7] or 0)
-    advanced_files = int(refresh_row[8] or 0)
-    metadata_checked_files = int(refresh_row[9] or 0)
-    attempted_files = int(refresh_row[10] or 0)
-    attempted_content_bytes = int(refresh_row[11] or 0)
-    blocked_files = int(refresh_row[12] or 0)
-    transient_failure_files = int(refresh_row[13] or 0)
-    pending_bytes = int(refresh_row[15] or 0)
-    skipped_records = int(refresh_row[16] or 0)
-    refresh_run_id = refresh_row[1]
-    refresh_state = refresh_row[2] or "unchanged"
-    corpus_generation = refresh_row[0]
-    if refresh_result is not None:
-        discovered_files = refresh_result.source_count
-        changed_files = refresh_result.changed_source_count
-        failed_files = refresh_result.failed_source_count
-        read_files = refresh_result.read_source_count
-        removed_files = refresh_result.removed_source_count
-        advanced_files = refresh_result.advanced_source_count
-        metadata_checked_files = refresh_result.metadata_checked_source_count
-        attempted_files = refresh_result.attempted_source_count
-        attempted_content_bytes = refresh_result.attempted_content_bytes
-        blocked_files = refresh_result.blocked_source_count
-        transient_failure_files = refresh_result.transient_failure_source_count
-        refresh_run_id = refresh_result.run_id
-        refresh_state = (
-            refresh_row[2]
-            if refresh_result.run_id is not None
-            and refresh_result.run_id == refresh_row[1]
-            else "unchanged"
-        )
-        corpus_generation = refresh_result.corpus_generation
-    unrecognized_records = sum(
-        1
-        for diagnostic in diagnostics
-        if isinstance(diagnostic, dict)
-        and "unsupported " in str(diagnostic.get("detail", "")).lower()
-    )
-    coverage = {
-        "configured_root_count": len(roots),
-        "resolved_root_count": len(roots),
-        "roots": roots,
-        "repositories": repositories,
-        "discovered_files": discovered_files,
-        "metadata_checked_files": metadata_checked_files,
-        "unchanged_files": max(
-            0,
-            metadata_checked_files
-            - attempted_files
-            - blocked_files
-            - transient_failure_files,
-        ),
-        "content_read_files": attempted_files,
-        "content_read_bytes": attempted_content_bytes,
-        "read_files": read_files,
-        "removed_files": removed_files,
-        "blocked_files": blocked_files,
-        "transient_failure_files": transient_failure_files,
-        "indexed_files": sum(int(root["indexed_files"]) for root in roots),
-        "skipped_files": max(0, discovered_files - changed_files),
-        "skipped_records": skipped_records,
-        "excluded_files": sum(int(root["excluded_files"]) for root in roots),
-        "unreadable_files": transient_failure_files,
-        "unknown_sessions": unknown_sessions,
-        "unrecognized_conversation_records": unrecognized_records,
-        "source_watermarks": source_watermarks,
-        "completeness": (
-            "partial"
-            if refresh_state in {"partial", "failed"}
-            or failed_files
-            or blocked_files
-            or transient_failure_files
-            or pending_bytes
-            or skipped_records
-            else "complete"
-        ),
+    return {
+        "semantic_build": row[0],
+        "corpus_generation": row[1],
+        "state": row[2] or "unavailable",
+        "profile_id": row[3],
+        "completed_units": row[4] or 0,
+        "total_units": row[5] or 0,
+        "fresh": row[6] is True,
     }
-    refresh = {
-        "corpus_generation": corpus_generation,
-        "run_id": refresh_run_id,
-        "state": refresh_state,
-        "failed_sources": failed_files,
-        "attempted_sources": attempted_files,
-        "attempted_content_bytes": attempted_content_bytes,
-        "blocked_sources": blocked_files,
-        "transient_failure_sources": transient_failure_files,
-        "advanced_sources": advanced_files,
-        "pending_bytes": pending_bytes,
-    }
-    semantic = {
-        "semantic_build": semantic_row[0],
-        "corpus_generation": semantic_row[1],
-        "state": semantic_row[2] or "unavailable",
-        "profile_id": semantic_row[3],
-        "completed_units": semantic_row[4] or 0,
-        "total_units": semantic_row[5] or 0,
-        "fresh": semantic_row[6] is True,
-    }
+
+
+def _postgres_timing(connection: psycopg.Connection) -> _CorpusTiming:
     indexed_at = next(
         connection.execute(
             """
@@ -929,7 +1043,28 @@ def _postgres_envelope(
             """
         )
     )[0]
-    now, made_at, corpus_age_ms = _corpus_times(indexed_at)
+    return _CorpusTiming(*_corpus_times(indexed_at))
+
+
+def _postgres_envelope(
+    connection: psycopg.Connection,
+    command: str,
+    *,
+    status: str = "complete",
+    additional_warnings: Sequence[object] = (),
+    refresh_result: RefreshResult | CorpusIndexResult | None = None,
+    index_state_roots: tuple[ConfiguredSourceRoot, ...] | None = None,
+    index_state_deadline: float | None = None,
+    **payload: object,
+) -> dict[str, object]:
+    roots = _postgres_roots(connection)
+    refresh_row = _postgres_refresh_row(connection)
+    metrics = _refresh_metrics(refresh_row, roots, refresh_result)
+    diagnostics = refresh_row[14] or []
+    coverage = _postgres_coverage(connection, roots, diagnostics, metrics)
+    refresh = _postgres_refresh(metrics)
+    semantic = _postgres_semantic(connection)
+    timing = _postgres_timing(connection)
     return {
         "schema_version": _POSTGRES_SCHEMA_VERSION,
         "command": command,
@@ -937,19 +1072,21 @@ def _postgres_envelope(
         "coverage": coverage,
         "refresh": refresh,
         "semantic": semantic,
-        "indexed_at": made_at.isoformat() if made_at is not None else None,
-        "corpus_age_ms": corpus_age_ms,
+        "indexed_at": (
+            timing.made_at.isoformat() if timing.made_at is not None else None
+        ),
+        "corpus_age_ms": timing.age_ms,
         "warnings": [*diagnostics, *additional_warnings],
         **payload,
         **_index_state_payload(
             connection,
             roots=index_state_roots,
             deadline=index_state_deadline,
-            now=now,
-            made_at=made_at,
-            age_ms=corpus_age_ms,
-            corpus_generation=corpus_generation,
-            semantic_build=semantic_row[0],
+            now=timing.now,
+            made_at=timing.made_at,
+            age_ms=timing.age_ms,
+            corpus_generation=metrics.corpus_generation,
+            semantic_build=cast("int | None", semantic["semantic_build"]),
         ),
     }
 
@@ -1238,12 +1375,745 @@ def _literal_fallback_command(args: argparse.Namespace) -> str:
     return shlex.join(command)
 
 
-def _handle_postgres(
+@dataclass(frozen=True)
+class _PostgresContext:
+    args: argparse.Namespace
+    dsn: str
+    connection: psycopg.Connection
+    progress_stream: _ProgressStream
+
+    def finish(
+        self,
+        command: str,
+        *,
+        status: str = "complete",
+        additional_warnings: Sequence[object] = (),
+        refresh_result: RefreshResult | CorpusIndexResult | None = None,
+        index_state_roots: tuple[ConfiguredSourceRoot, ...] | None = None,
+        index_state_deadline: float | None = None,
+        **payload: object,
+    ) -> dict[str, object]:
+        envelope = _postgres_envelope(
+            self.connection,
+            command,
+            status=status,
+            additional_warnings=additional_warnings,
+            refresh_result=refresh_result,
+            index_state_roots=index_state_roots,
+            index_state_deadline=index_state_deadline,
+            **payload,
+        )
+        self.progress_stream.terminal(envelope)
+        return envelope
+
+
+class _IndexProgress:
+    def __init__(self, stream: _ProgressStream) -> None:
+        self.stream = stream
+        self.scan_complete = False
+        self.parse_seen = False
+        self.report_model_progress = True
+        self.heartbeat_update: (
+            Callable[[str, int | None, int | None, int | None], None] | None
+        ) = None
+
+    def refresh(self, event: RefreshProgress) -> None:
+        if self.heartbeat_update is not None:
+            self.heartbeat_update(
+                event.phase,
+                event.run_id,
+                event.completed_units,
+                event.total_units,
+            )
+        if event.phase == "parse" and not self.scan_complete:
+            self.stream.emit("scan", "complete")
+            self.scan_complete = True
+        self.parse_seen = self.parse_seen or event.phase == "parse"
+        self.stream.emit(
+            event.phase,
+            event.state,
+            run_id=event.run_id,
+            completed_units=event.completed_units,
+            total_units=event.total_units,
+            owner=event.owner_pid,
+        )
+
+    def model(self, phase: str, state: str) -> None:
+        if self.heartbeat_update is not None:
+            self.heartbeat_update(phase, None, None, None)
+        self.stream.emit(phase, state)
+        if (
+            phase == "model_load"
+            and state == "complete"
+            and self.heartbeat_update is not None
+        ):
+            self.heartbeat_update("semantic_embed", None, None, None)
+
+    def passage_embed(self, texts):
+        model_callback = self.model if self.report_model_progress else None
+        self.report_model_progress = False
+        with model_output_scope(quiet=self.stream.ndjson):
+            return embed_passages(texts, progress=model_callback)
+
+    def passage_chunks(self, texts):
+        with model_output_scope(quiet=self.stream.ndjson):
+            return chunk_passages(texts)
+
+    def embedding(self, completed: int, total: int) -> None:
+        if self.heartbeat_update is not None:
+            self.heartbeat_update("semantic_embed", None, completed, total)
+        self.stream.emit(
+            "semantic_embed",
+            "running" if completed < total else "complete",
+            completed_units=completed,
+            total_units=total,
+        )
+
+    def complete(self, result: CorpusIndexResult) -> None:
+        if not self.scan_complete:
+            self.stream.emit("scan", "complete")
+            self.scan_complete = True
+        if not self.parse_seen:
+            self.stream.emit(
+                "parse",
+                "complete",
+                completed_units=result.read_source_count,
+                total_units=result.changed_source_count,
+            )
+        self.stream.emit(
+            "fts_commit",
+            "complete",
+            completed_units=result.changed_source_count - result.failed_source_count,
+            total_units=result.changed_source_count,
+            corpus_generation=result.corpus_generation,
+        )
+        self.stream.emit(
+            "semantic_commit",
+            "complete",
+            completed_units=result.embedding_count,
+            total_units=result.embedding_count,
+            semantic_build=result.semantic_build,
+        )
+
+
+def _postgres_index_migrate(context: _PostgresContext) -> int:
+    migrate(context.connection)
+    applied_schema_version = _applied_schema_version(context.connection)
+    envelope = context.finish(
+        "index",
+        applied_schema_version=applied_schema_version,
+    )
+    if context.args.json:
+        print(json.dumps(envelope, sort_keys=True))
+    else:
+        print(f"Applied PostgreSQL schema migration {applied_schema_version}")
+    return 0
+
+
+def _postgres_index_status(context: _PostgresContext) -> int:
+    status = next(
+        context.connection.execute(
+            """
+            SELECT state.current_corpus_generation,
+                   build.semantic_build,
+                   COALESCE(build.completed_units, 0),
+                   COALESCE(build.total_units, 0),
+                   build.semantic_build IS NOT NULL
+            FROM cc_search_chats.corpus_state AS state
+            LEFT JOIN cc_search_chats.corpus_generation AS generation
+              ON generation.corpus_generation =
+                 state.current_corpus_generation
+            LEFT JOIN cc_search_chats.semantic_build AS build
+              ON (build.semantic_build, build.corpus_generation) =
+                 (generation.semantic_build, generation.corpus_generation)
+            WHERE state.singleton
+            """
+        ),
+        None,
+    )
+    selected_corpus, selected_build, completed, total, selected = status or (
+        None,
+        None,
+        0,
+        0,
+        False,
+    )
+    envelope = context.finish(
+        "index",
+        index_state_roots=configured_source_roots(),
+        index_state_deadline=(
+            context.args.request_started
+            + _SEARCH_DEADLINE_SECONDS
+            - _SEARCH_RENDER_RESERVE_SECONDS
+        ),
+        corpus_generation=selected_corpus,
+        semantic_build=selected_build,
+        completed=completed,
+        total=total,
+        selected=bool(selected),
+    )
+    if context.args.json:
+        print(json.dumps(envelope, sort_keys=True))
+    else:
+        _print_index_state_header(envelope)
+        print(f"Semantic index: {completed}/{total} passages")
+    return 0
+
+
+def _postgres_index_run(context: _PostgresContext) -> int:
+    acquire_index_session(context.connection)
+    verify_model_revision(
+        context.connection,
+        local_model_revision(),
+        adopt_unknown=True,
+    )
+    progress = _IndexProgress(context.progress_stream)
+    context.progress_stream.emit("scan", "running")
+    with context.progress_stream.heartbeat("scan") as heartbeat_update:
+        progress.heartbeat_update = heartbeat_update
+        result = index_corpus(
+            context.connection,
+            progress.passage_embed,
+            chunker=progress.passage_chunks,
+            source_roots=configured_source_roots(),
+            progress=progress.refresh,
+            embedding_progress=progress.embedding,
+            force_retry=context.args.force_retry,
+        )
+    progress.complete(result)
+    envelope = context.finish(
+        "index",
+        refresh_result=result,
+        corpus_generation=result.corpus_generation,
+        semantic_build=result.semantic_build,
+        sources=result.source_count,
+        messages=result.message_count,
+        embeddings=result.embedding_count,
+    )
+    if context.args.json:
+        print(json.dumps(envelope, sort_keys=True))
+    else:
+        print(
+            f"Indexed {result.message_count} messages from "
+            f"{result.source_count} sources into corpus {result.corpus_generation}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _postgres_events(context: _PostgresContext) -> int:
+    export = export_human_message_events(
+        context.connection,
+        from_utc=_parse_utc_bound(context.args.from_utc),
+        until_utc=_parse_utc_bound(context.args.until_utc),
+    )
+    payload = event_export_payload(export)
+    envelope = context.finish(
+        "events",
+        window=payload["window"],
+        source_corpus_generation=payload["source_corpus_generation"],
+        population=payload["population"],
+        events=payload["events"],
+    )
+    if context.args.json:
+        print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
+    else:
+        population = export.population
+        print(
+            f"Retained {population.retained} human events from "
+            f"{population.scanned_logical_messages} canonical messages"
+        )
+    return 0
+
+
+def _postgres_list(context: _PostgresContext) -> int:
+    sessions = pg_list_sessions(
+        context.connection,
+        provider=context.args.provider,
+        project=context.args.project,
+        since=_since_days(context.args.days),
+    )
+    values = [
+        {
+            "identity": {
+                "provider": value.provider,
+                "source_session_id": value.source_session_id,
+            },
+            "provider": value.provider,
+            "session_id": value.source_session_id,
+            "session_kind": value.session_kind,
+            "latest_timestamp": value.latest_timestamp,
+            "message_count": value.message_count,
+            "repository": value.repository,
+            "cwd": value.cwd,
+        }
+        for value in sessions
+    ]
+    envelope = context.finish("list", sessions=values)
+    if context.args.json:
+        print(json.dumps(envelope))
+    else:
+        for value in values:
+            print(
+                f"{value['provider']}:{value['session_id']} "
+                f"({value['session_kind']}, {value['message_count']} messages)"
+            )
+    return 0
+
+
+def _postgres_extract(context: _PostgresContext) -> int:
+    session_id = context.args.session_id
+    provider = context.args.provider
+    if session_id is None:
+        sessions = pg_list_sessions(
+            context.connection,
+            provider=context.args.provider,
+            project=context.args.project,
+        )
+        if not sessions:
+            raise ValueError("no matching sessions")
+        session_id = sessions[0].source_session_id
+        provider = sessions[0].provider
+    messages = pg_extract_session(
+        context.connection,
+        session_id,
+        provider=provider,
+        epoch=context.args.epoch,
+    )
+    providers = sorted({message.provider for message in messages})
+    if (
+        context.args.session_id is not None
+        and context.args.provider is None
+        and len(providers) > 1
+    ):
+        return _postgres_extract_multiple(context, session_id, providers)
+    values = [_message_json(message) for message in messages]
+    envelope = context.finish(
+        "extract",
+        status="complete" if messages else "no_match",
+        messages=values,
+    )
+    if context.args.json:
+        print(json.dumps(envelope))
+    else:
+        for value in messages:
+            print(f"[{value.timestamp}] {value.role}:\n{value.text}")
+    return 0 if messages else 3
+
+
+def _postgres_extract_multiple(
+    context: _PostgresContext,
+    session_id: str,
+    providers: Sequence[str],
+) -> int:
+    matches = [
+        {"provider": candidate, "source_session_id": session_id}
+        for candidate in providers
+    ]
+    envelope = context.finish(
+        "extract",
+        status="multiple_matches",
+        matches=matches,
+        messages=[],
+    )
+    if context.args.json:
+        print(json.dumps(envelope))
+    else:
+        print(
+            "Session ID matches multiple providers; pass --provider",
+            file=sys.stderr,
+        )
+    return 3
+
+
+def _postgres_context_resolve(context: _PostgresContext) -> int:
+    if context.args.command == "resolve" and context.args.stdin:
+        return _postgres_stdin_resolve(context)
+    return _postgres_single_resolve(context)
+
+
+def _postgres_stdin_resolve(context: _PostgresContext) -> int:
+    if context.args.uuid is not None:
+        print("resolve accepts a locator or --stdin, not both", file=sys.stderr)
+        return 2
+    locators = tuple(line.strip() for line in sys.stdin if line.strip())
+    if not locators:
+        print("resolve --stdin requires at least one locator", file=sys.stderr)
+        return 2
+    resolutions = resolve_exact_messages(
+        context.connection,
+        locators,
+        source_roots=configured_source_roots(),
+    )
+    values = [
+        {
+            "locator": resolution.locator,
+            "status": resolution.status.value,
+            "message_count": len(resolution.messages),
+            "messages": [
+                _message_json(
+                    message,
+                    reference_only=context.args.reference_only,
+                )
+                for message in resolution.messages
+            ],
+            "detail": resolution.detail,
+        }
+        for resolution in resolutions
+    ]
+    statuses = {resolution.status for resolution in resolutions}
+    overall_status = next(iter(statuses)).value if len(statuses) == 1 else "partial"
+    envelope = context.finish(
+        "resolve",
+        status=overall_status,
+        resolutions=values,
+    )
+    if context.args.json:
+        print(json.dumps(envelope))
+    else:
+        for value in values:
+            print(f"{value['status']}\t{value['locator']}")
+    return _resolution_exit_code(statuses)
+
+
+def _resolution_exit_code(statuses: set[ResolutionStatus]) -> int:
+    if statuses == {ResolutionStatus.RESOLVED}:
+        return 0
+    if ResolutionStatus.MALFORMED_LOCATOR in statuses:
+        return 2
+    return 3
+
+
+def _postgres_single_resolve(context: _PostgresContext) -> int:
+    exact = resolve_exact_messages(
+        context.connection,
+        (context.args.uuid,),
+        source_roots=configured_source_roots(),
+    )[0]
+    messages = _postgres_resolved_messages(context, exact)
+    values = [
+        _message_json(
+            message,
+            reference_only=(
+                context.args.command == "resolve" and context.args.reference_only
+            ),
+        )
+        for message in messages
+    ]
+    envelope = context.finish(
+        context.args.command,
+        status=exact.status.value,
+        detail=exact.detail,
+        messages=values,
+    )
+    if context.args.json:
+        print(json.dumps(envelope))
+    else:
+        for value in messages:
+            print(f"[{value.timestamp}] {value.role}:\n{value.text}")
+    return _resolution_exit_code({exact.status})
+
+
+def _postgres_resolved_messages(
+    context: _PostgresContext,
+    exact: ExactResolution,
+) -> Sequence[StoredMessage]:
+    if context.args.command == "context":
+        if exact.status is ResolutionStatus.RESOLVED:
+            return pg_context_messages(
+                context.connection,
+                context.args.uuid,
+                depth=context.args.depth,
+            )
+        return ()
+    return exact.messages
+
+
+@dataclass
+class _SearchState:
+    hits: tuple[SearchHit, ...]
+    literal_hits: tuple[SearchHit, ...]
+    component_depth: int
+    retrieval_mode: str
+    hybrid_rankings: dict[str, HybridHit]
+    warnings: list[dict[str, str]]
+
+
+def _begin_search_snapshot(connection: psycopg.Connection) -> None:
+    connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+    next(
+        connection.execute(
+            """
+            SELECT current_corpus_generation
+            FROM cc_search_chats.corpus_state
+            WHERE singleton
+            """
+        )
+    )
+
+
+def _exhaustive_search_hits(context: _PostgresContext) -> tuple[SearchHit, ...]:
+    hits: list[SearchHit] = []
+    cursor = None
+    while True:
+        page = exhaustive_search_page(
+            context.connection,
+            context.args.query,
+            page_size=500,
+            after=cursor,
+            provider=context.args.provider,
+            role=context.args.role,
+            project=context.args.project,
+            since=_since_days(context.args.days),
+            epoch=context.args.epoch,
+            include_agents=context.args.agents,
+            include_tools=context.args.tools,
+        )
+        hits.extend(page.hits)
+        if page.next_cursor is None:
+            return tuple(hits)
+        cursor = page.next_cursor
+
+
+def _literal_search_state(context: _PostgresContext) -> _SearchState:
+    if context.args.exhaustive:
+        hits = _exhaustive_search_hits(context)
+        return _SearchState(hits, (), 0, "exhaustive_literal", {}, [])
+    component_depth = (
+        context.args.limit
+        if context.args.literal
+        else min(1000, max(100, 5 * context.args.limit))
+    )
+    literal_hits = tuple(
+        search_messages(
+            context.connection,
+            context.args.query,
+            limit=component_depth,
+            provider=context.args.provider,
+            role=context.args.role,
+            project=context.args.project,
+            since=_since_days(context.args.days),
+            epoch=context.args.epoch,
+            include_agents=context.args.agents,
+            include_tools=context.args.tools,
+        )
+    )
+    return _SearchState(
+        literal_hits[: context.args.limit],
+        literal_hits,
+        component_depth,
+        "literal",
+        {},
+        [],
+    )
+
+
+def _append_revision_warning(
+    connection: psycopg.Connection,
+    warnings: list[dict[str, str]],
+) -> None:
+    revision_warning = verify_model_revision(
+        connection,
+        local_model_revision(),
+        adopt_unknown=False,
+    )
+    if revision_warning is not None:
+        warnings.append(
+            {
+                "code": "model_revision_unverified",
+                "detail": revision_warning,
+            }
+        )
+
+
+def _semantic_search_state(
+    context: _PostgresContext,
+    state: _SearchState,
+    answer_deadline: float | None,
+) -> None:
+    if context.args.literal or context.args.exhaustive:
+        return
+    assert answer_deadline is not None  # noqa: S101  # ranked-search invariant
+    _append_revision_warning(context.connection, state.warnings)
+    semantic_budget = answer_deadline - monotonic()
+    context.progress_stream.emit("query_embed", "running")
+    try:
+        query_embedding = _bounded_query_embedding(
+            context.args.query,
+            timeout_seconds=semantic_budget,
+            progress=context.progress_stream.emit,
+            quiet=context.progress_stream.ndjson,
+        )
+        context.progress_stream.emit("query_embed", "complete")
+        semantic_hits = semantic_search(
+            context.connection,
+            query_embedding,
+            limit=state.component_depth,
+            provider=context.args.provider,
+            role=context.args.role,
+            project=context.args.project,
+            since=_since_days(context.args.days),
+            epoch=context.args.epoch,
+            include_agents=context.args.agents,
+            allow_partial=True,
+        )
+        hybrid_hits = fuse_hybrid(
+            state.literal_hits,
+            semantic_hits,
+            limit=context.args.limit,
+            rank_constant=60,
+            component_depth=state.component_depth,
+        )
+        state.hits = tuple(value.message for value in hybrid_hits)
+        state.hybrid_rankings = {
+            value.message.canonical_locator: value for value in hybrid_hits
+        }
+        state.retrieval_mode = "hybrid"
+    except (
+        ModelUnavailable,
+        TimeoutError,
+        psycopg.Error,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        state.retrieval_mode = "literal_fallback"
+        state.warnings.append(
+            {
+                "code": "semantic_search_degraded",
+                "detail": f"{type(error).__name__}: {error}",
+            }
+        )
+        context.progress_stream.emit(
+            "query_embed",
+            "degraded",
+            warning=state.warnings[-1],
+        )
+
+
+def _search_envelope(
+    context: _PostgresContext,
+    state: _SearchState,
+) -> dict[str, object]:
+    return _postgres_envelope(
+        context.connection,
+        "search",
+        index_state_roots=configured_source_roots(),
+        index_state_deadline=(
+            monotonic() + _INDEX_STATE_SCAN_BUDGET_SECONDS
+            if context.args.exhaustive
+            else context.args.answer_deadline
+        ),
+        exhaustive=context.args.exhaustive,
+        result_limit=None if context.args.exhaustive else context.args.limit,
+        deadline_ms=(
+            None if context.args.exhaustive else round(_SEARCH_DEADLINE_SECONDS * 1000)
+        ),
+        elapsed_ms=round((monotonic() - context.args.request_started) * 1000),
+        retrieval_mode=state.retrieval_mode,
+        mode=_requested_search_mode(context.args),
+        stale_reasons=[],
+        additional_warnings=state.warnings,
+    )
+
+
+def _apply_search_staleness(
+    envelope: dict[str, object],
+    retrieval_mode: str,
+) -> None:
+    semantic_state = cast("dict[str, object]", envelope["semantic"])
+    stale_reasons = cast("list[str]", envelope["stale_reasons"])
+    if semantic_state["fresh"] is not True:
+        stale_reasons.append("semantic_build_unavailable")
+        if retrieval_mode == "hybrid":
+            envelope["retrieval_mode"] = "literal_fallback"
+
+
+def _resolve_or_degrade_search(
+    context: _PostgresContext,
+    state: _SearchState,
+    envelope: dict[str, object],
+    answer_deadline: float | None,
+) -> Sequence[Mapping[str, object]]:
+    try:
+        resolutions = pg_resolve_messages(
+            context.connection,
+            tuple(hit.canonical_locator for hit in state.hits),
+        )
+        results = _resolved_search_results(
+            state.hits,
+            resolutions,
+            state.hybrid_rankings,
+            exhaustive=context.args.exhaustive,
+            answer_deadline=answer_deadline,
+        )
+    except (
+        ReadDeadlineExceeded,
+        SearchDeadlineExceeded,
+        psycopg.errors.LockNotAvailable,
+        psycopg.errors.QueryCanceled,
+    ) as error:
+        deadline_warning = {
+            "code": "deadline_degraded",
+            "detail": f"{type(error).__name__}: {error}",
+        }
+        state.warnings.append(deadline_warning)
+        _append_envelope_warning(envelope, deadline_warning)
+        envelope["status"] = "partial"
+        results = _unresolved_search_results(
+            state.hits,
+            state.hybrid_rankings,
+            exhaustive=context.args.exhaustive,
+        )
+        context.connection.execute("ROLLBACK")
+    else:
+        context.connection.execute("COMMIT")
+    return results
+
+
+def _output_search(
+    context: _PostgresContext,
+    state: _SearchState,
+    envelope: dict[str, object],
+    results: Sequence[Mapping[str, object]],
+) -> None:
+    envelope["elapsed_ms"] = round((monotonic() - context.args.request_started) * 1000)
+    envelope["results"] = results
+    context.progress_stream.terminal(envelope)
+    if context.args.json:
+        print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
+    else:
+        _print_human_search(context.args, envelope, state.warnings, results)
+
+
+def _postgres_search(context: _PostgresContext) -> int:
+    answer_deadline = None if context.args.exhaustive else context.args.answer_deadline
+    _begin_search_snapshot(context.connection)
+    context.progress_stream.emit("retrieve", "running")
+    state = _literal_search_state(context)
+    _semantic_search_state(context, state, answer_deadline)
+    context.progress_stream.emit(
+        "retrieve",
+        "complete",
+        completed_units=len(state.hits),
+        total_units=len(state.hits),
+    )
+    envelope = _search_envelope(context, state)
+    _apply_search_staleness(envelope, state.retrieval_mode)
+    results = _resolve_or_degrade_search(
+        context,
+        state,
+        envelope,
+        answer_deadline,
+    )
+    _output_search(context, state, envelope, results)
+    return 0
+
+
+@contextmanager
+def _postgres_connection(
     args: argparse.Namespace,
     dsn: str,
-    progress_stream: _ProgressStream,
-) -> int:
-    """Run the migrated index/search surface against PostgreSQL."""
+) -> Iterator[psycopg.Connection]:
     if args.command == "search" and not args.exhaustive:
         remaining = _remaining_search_seconds(args)
         if remaining <= 0:
@@ -1256,659 +2126,58 @@ def _handle_postgres(
     else:
         connection_context = psycopg.connect(dsn, autocommit=True)
     with connection_context as connection:
-        if args.command == "search" and not args.exhaustive:
-            remaining = _remaining_search_seconds(args)
-            if remaining <= 0:
-                raise SearchDeadlineExceeded(
-                    "search deadline expired while connecting to PostgreSQL"
-                )
-            timeout_ms = max(1, int(remaining * 1000))
-            connection.execute(
-                """
-                SELECT set_config('lock_timeout', %s, false),
-                       set_config('statement_timeout', %s, false)
-                """,
-                (f"{timeout_ms}ms", f"{timeout_ms}ms"),
-            )
+        yield connection
 
+
+def _configure_postgres_connection(
+    args: argparse.Namespace,
+    connection: psycopg.Connection,
+) -> None:
+    if args.command != "search" or args.exhaustive:
+        return
+    remaining = _remaining_search_seconds(args)
+    if remaining <= 0:
+        raise SearchDeadlineExceeded(
+            "search deadline expired while connecting to PostgreSQL"
+        )
+    timeout_ms = max(1, int(remaining * 1000))
+    connection.execute(
+        """
+        SELECT set_config('lock_timeout', %s, false),
+               set_config('statement_timeout', %s, false)
+        """,
+        (f"{timeout_ms}ms", f"{timeout_ms}ms"),
+    )
+
+
+def _handle_postgres(
+    args: argparse.Namespace,
+    dsn: str,
+    progress_stream: _ProgressStream,
+) -> int:
+    """Run the migrated index/search surface against PostgreSQL."""
+    with _postgres_connection(args, dsn) as connection:
+        _configure_postgres_connection(args, connection)
+        context = _PostgresContext(args, dsn, connection, progress_stream)
         if args.command == "index" and args.migrate:
-            migrate(connection)
-            applied_schema_version = _applied_schema_version(connection)
-            envelope = _postgres_envelope(
-                connection,
-                "index",
-                applied_schema_version=applied_schema_version,
-            )
-            progress_stream.terminal(envelope)
-            if args.json:
-                print(json.dumps(envelope, sort_keys=True))
-            else:
-                print(f"Applied PostgreSQL schema migration {applied_schema_version}")
-            return 0
+            return _postgres_index_migrate(context)
 
         require_current_schema(connection)
-
-        def finish(
-            command: str,
-            *,
-            status: str = "complete",
-            additional_warnings: Sequence[object] = (),
-            refresh_result: RefreshResult | CorpusIndexResult | None = None,
-            index_state_roots: tuple[ConfiguredSourceRoot, ...] | None = None,
-            index_state_deadline: float | None = None,
-            **payload: object,
-        ) -> dict[str, object]:
-            envelope = _postgres_envelope(
-                connection,
-                command,
-                status=status,
-                additional_warnings=additional_warnings,
-                refresh_result=refresh_result,
-                index_state_roots=index_state_roots,
-                index_state_deadline=index_state_deadline,
-                **payload,
-            )
-            progress_stream.terminal(envelope)
-            return envelope
-
         if args.command == "index":
             if args.status:
-                status = next(
-                    connection.execute(
-                        """
-                        SELECT state.current_corpus_generation,
-                               build.semantic_build,
-                               COALESCE(build.completed_units, 0),
-                               COALESCE(build.total_units, 0),
-                               build.semantic_build IS NOT NULL
-                        FROM cc_search_chats.corpus_state AS state
-                        LEFT JOIN cc_search_chats.corpus_generation AS generation
-                          ON generation.corpus_generation =
-                             state.current_corpus_generation
-                        LEFT JOIN cc_search_chats.semantic_build AS build
-                          ON (build.semantic_build, build.corpus_generation) =
-                             (generation.semantic_build,
-                              generation.corpus_generation)
-                        WHERE state.singleton
-                        """
-                    ),
-                    None,
-                )
-                selected_corpus, selected_build, completed, total, selected = (
-                    status
-                    or (
-                        None,
-                        None,
-                        0,
-                        0,
-                        False,
-                    )
-                )
-                envelope = finish(
-                    "index",
-                    index_state_roots=configured_source_roots(),
-                    index_state_deadline=(
-                        args.request_started
-                        + _SEARCH_DEADLINE_SECONDS
-                        - _SEARCH_RENDER_RESERVE_SECONDS
-                    ),
-                    corpus_generation=selected_corpus,
-                    semantic_build=selected_build,
-                    completed=completed,
-                    total=total,
-                    selected=bool(selected),
-                )
-                if args.json:
-                    print(json.dumps(envelope, sort_keys=True))
-                else:
-                    _print_index_state_header(envelope)
-                    print(f"Semantic index: {completed}/{total} passages")
-                return 0
-
-            acquire_index_session(connection)
-            verify_model_revision(
-                connection,
-                local_model_revision(),
-                adopt_unknown=True,
-            )
-
-            scan_complete = False
-            parse_seen = False
-            refresh_heartbeat: (
-                Callable[[str, int | None, int | None, int | None], None] | None
-            ) = None
-
-            def progress(event: RefreshProgress) -> None:
-                nonlocal parse_seen, scan_complete
-                if refresh_heartbeat is not None:
-                    refresh_heartbeat(
-                        event.phase,
-                        event.run_id,
-                        event.completed_units,
-                        event.total_units,
-                    )
-                if event.phase == "parse" and not scan_complete:
-                    progress_stream.emit("scan", "complete")
-                    scan_complete = True
-                parse_seen = parse_seen or event.phase == "parse"
-                progress_stream.emit(
-                    event.phase,
-                    event.state,
-                    run_id=event.run_id,
-                    completed_units=event.completed_units,
-                    total_units=event.total_units,
-                    owner=event.owner_pid,
-                )
-
-            report_model_progress = True
-
-            def model_progress(phase: str, state: str) -> None:
-                if refresh_heartbeat is not None:
-                    refresh_heartbeat(phase, None, None, None)
-                progress_stream.emit(phase, state)
-                if (
-                    phase == "model_load"
-                    and state == "complete"
-                    and refresh_heartbeat is not None
-                ):
-                    refresh_heartbeat("semantic_embed", None, None, None)
-
-            def passage_embed(texts):
-                nonlocal report_model_progress
-                model_callback = model_progress if report_model_progress else None
-                report_model_progress = False
-                with model_output_scope(quiet=progress_stream.ndjson):
-                    return embed_passages(texts, progress=model_callback)
-
-            def passage_chunks(texts):
-                with model_output_scope(quiet=progress_stream.ndjson):
-                    return chunk_passages(texts)
-
-            def embedding_progress(completed: int, total: int) -> None:
-                if refresh_heartbeat is not None:
-                    refresh_heartbeat(
-                        "semantic_embed",
-                        None,
-                        completed,
-                        total,
-                    )
-                progress_stream.emit(
-                    "semantic_embed",
-                    "running" if completed < total else "complete",
-                    completed_units=completed,
-                    total_units=total,
-                )
-
-            current_refresh_result: RefreshResult | CorpusIndexResult | None = None
-            progress_stream.emit("scan", "running")
-            with progress_stream.heartbeat("scan") as heartbeat_update:
-                refresh_heartbeat = heartbeat_update
-                result = index_corpus(
-                    connection,
-                    passage_embed,
-                    chunker=passage_chunks,
-                    source_roots=configured_source_roots(),
-                    progress=progress,
-                    embedding_progress=embedding_progress,
-                    force_retry=args.force_retry,
-                )
-                current_refresh_result = result
-            corpus_generation = result.corpus_generation
-            source_count = result.source_count
-            message_count = result.message_count
-            if not scan_complete:
-                progress_stream.emit("scan", "complete")
-                scan_complete = True
-            if not parse_seen:
-                progress_stream.emit(
-                    "parse",
-                    "complete",
-                    completed_units=result.read_source_count,
-                    total_units=result.changed_source_count,
-                )
-            vector_count = result.embedding_count
-            progress_stream.emit(
-                "fts_commit",
-                "complete",
-                completed_units=result.changed_source_count
-                - result.failed_source_count,
-                total_units=result.changed_source_count,
-                corpus_generation=result.corpus_generation,
-            )
-            progress_stream.emit(
-                "semantic_commit",
-                "complete",
-                completed_units=vector_count,
-                total_units=vector_count,
-                semantic_build=result.semantic_build,
-            )
-            envelope = finish(
-                "index",
-                refresh_result=current_refresh_result,
-                corpus_generation=corpus_generation,
-                semantic_build=result.semantic_build,
-                sources=source_count,
-                messages=message_count,
-                embeddings=vector_count,
-            )
-            if args.json:
-                print(json.dumps(envelope, sort_keys=True))
-            else:
-                print(
-                    f"Indexed {message_count} messages from "
-                    f"{source_count} sources into corpus {corpus_generation}",
-                    file=sys.stderr,
-                )
-            return 0
-
-        if args.command == "events":
-            export = export_human_message_events(
-                connection,
-                from_utc=_parse_utc_bound(args.from_utc),
-                until_utc=_parse_utc_bound(args.until_utc),
-            )
-            payload = event_export_payload(export)
-            envelope = finish(
-                "events",
-                window=payload["window"],
-                source_corpus_generation=payload["source_corpus_generation"],
-                population=payload["population"],
-                events=payload["events"],
-            )
-            if args.json:
-                print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
-            else:
-                population = export.population
-                print(
-                    f"Retained {population.retained} human events from "
-                    f"{population.scanned_logical_messages} canonical messages"
-                )
-            return 0
-
-        if args.command == "list":
-            sessions = pg_list_sessions(
-                connection,
-                provider=args.provider,
-                project=args.project,
-                since=_since_days(args.days),
-            )
-            values = [
-                {
-                    "identity": {
-                        "provider": value.provider,
-                        "source_session_id": value.source_session_id,
-                    },
-                    "provider": value.provider,
-                    "session_id": value.source_session_id,
-                    "session_kind": value.session_kind,
-                    "latest_timestamp": value.latest_timestamp,
-                    "message_count": value.message_count,
-                    "repository": value.repository,
-                    "cwd": value.cwd,
-                }
-                for value in sessions
-            ]
-            envelope = finish("list", sessions=values)
-            if args.json:
-                print(json.dumps(envelope))
-            else:
-                for value in values:
-                    print(
-                        f"{value['provider']}:{value['session_id']} "
-                        f"({value['session_kind']}, {value['message_count']} messages)"
-                    )
-            return 0
-
-        if args.command == "extract":
-            session_id = args.session_id
-            provider = args.provider
-            if session_id is None:
-                sessions = pg_list_sessions(
-                    connection, provider=args.provider, project=args.project
-                )
-                if not sessions:
-                    raise ValueError("no matching sessions")
-                session_id = sessions[0].source_session_id
-                provider = sessions[0].provider
-            messages = pg_extract_session(
-                connection,
-                session_id,
-                provider=provider,
-                epoch=args.epoch,
-            )
-            providers = sorted({message.provider for message in messages})
-            if (
-                args.session_id is not None
-                and args.provider is None
-                and len(providers) > 1
-            ):
-                matches = [
-                    {
-                        "provider": candidate,
-                        "source_session_id": session_id,
-                    }
-                    for candidate in providers
-                ]
-                envelope = finish(
-                    "extract",
-                    status="multiple_matches",
-                    matches=matches,
-                    messages=[],
-                )
-                if args.json:
-                    print(json.dumps(envelope))
-                else:
-                    print(
-                        "Session ID matches multiple providers; pass --provider",
-                        file=sys.stderr,
-                    )
-                return 3
-            values = [_message_json(message) for message in messages]
-            envelope = finish(
-                "extract",
-                status="complete" if messages else "no_match",
-                messages=values,
-            )
-            if args.json:
-                print(json.dumps(envelope))
-            else:
-                for value in messages:
-                    print(f"[{value.timestamp}] {value.role}:\n{value.text}")
-            return 0 if messages else 3
-
+                return _postgres_index_status(context)
+            return _postgres_index_run(context)
+        handlers: dict[str, Callable[[_PostgresContext], int]] = {
+            "events": _postgres_events,
+            "list": _postgres_list,
+            "extract": _postgres_extract,
+        }
+        handler = handlers.get(args.command)
+        if handler is not None:
+            return handler(context)
         if args.command in {"context", "resolve"}:
-            if args.command == "resolve" and args.stdin:
-                if args.uuid is not None:
-                    print(
-                        "resolve accepts a locator or --stdin, not both",
-                        file=sys.stderr,
-                    )
-                    return 2
-                locators = tuple(line.strip() for line in sys.stdin if line.strip())
-                if not locators:
-                    print(
-                        "resolve --stdin requires at least one locator", file=sys.stderr
-                    )
-                    return 2
-                resolutions = resolve_exact_messages(
-                    connection,
-                    locators,
-                    source_roots=configured_source_roots(),
-                )
-                values = [
-                    {
-                        "locator": resolution.locator,
-                        "status": resolution.status.value,
-                        "message_count": len(resolution.messages),
-                        "messages": [
-                            _message_json(
-                                message,
-                                reference_only=args.reference_only,
-                            )
-                            for message in resolution.messages
-                        ],
-                        "detail": resolution.detail,
-                    }
-                    for resolution in resolutions
-                ]
-                statuses = {resolution.status for resolution in resolutions}
-                overall_status = (
-                    next(iter(statuses)).value if len(statuses) == 1 else "partial"
-                )
-                envelope = finish(
-                    "resolve",
-                    status=overall_status,
-                    resolutions=values,
-                )
-                if args.json:
-                    print(json.dumps(envelope))
-                else:
-                    for value in values:
-                        print(f"{value['status']}\t{value['locator']}")
-                if statuses == {ResolutionStatus.RESOLVED}:
-                    return 0
-                if ResolutionStatus.MALFORMED_LOCATOR in statuses:
-                    return 2
-                return 3
-            exact = resolve_exact_messages(
-                connection,
-                (args.uuid,),
-                source_roots=configured_source_roots(),
-            )[0]
-            messages = (
-                pg_context_messages(connection, args.uuid, depth=args.depth)
-                if args.command == "context"
-                and exact.status is ResolutionStatus.RESOLVED
-                else exact.messages
-                if args.command == "resolve"
-                else ()
-            )
-            values = [
-                _message_json(
-                    message,
-                    reference_only=(args.command == "resolve" and args.reference_only),
-                )
-                for message in messages
-            ]
-            envelope = finish(
-                args.command,
-                status=exact.status.value,
-                detail=exact.detail,
-                messages=values,
-            )
-            if args.json:
-                print(json.dumps(envelope))
-            else:
-                for value in messages:
-                    print(f"[{value.timestamp}] {value.role}:\n{value.text}")
-            if exact.status is ResolutionStatus.RESOLVED:
-                return 0
-            if exact.status is ResolutionStatus.MALFORMED_LOCATOR:
-                return 2
-            return 3
-
-        answer_deadline = None if args.exhaustive else args.answer_deadline
-        project = args.project
-        hybrid_rankings: dict[str, HybridHit] = {}
-        search_warnings: list[dict[str, str]] = []
-        connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        next(
-            connection.execute(
-                """
-                SELECT current_corpus_generation
-                FROM cc_search_chats.corpus_state
-                WHERE singleton
-                """
-            )
-        )
-        retrieval_mode = "exhaustive_literal" if args.exhaustive else "literal"
-        progress_stream.emit("retrieve", "running")
-        if args.exhaustive:
-            exhaustive_hits = []
-            cursor = None
-            while True:
-                page = exhaustive_search_page(
-                    connection,
-                    args.query,
-                    page_size=500,
-                    after=cursor,
-                    provider=args.provider,
-                    role=args.role,
-                    project=project,
-                    since=_since_days(args.days),
-                    epoch=args.epoch,
-                    include_agents=args.agents,
-                    include_tools=args.tools,
-                )
-                exhaustive_hits.extend(page.hits)
-                if page.next_cursor is None:
-                    break
-                cursor = page.next_cursor
-            hits = tuple(exhaustive_hits)
-        else:
-            component_depth = (
-                args.limit if args.literal else min(1000, max(100, 5 * args.limit))
-            )
-            literal_hits = search_messages(
-                connection,
-                args.query,
-                limit=component_depth,
-                provider=args.provider,
-                role=args.role,
-                project=project,
-                since=_since_days(args.days),
-                epoch=args.epoch,
-                include_agents=args.agents,
-                include_tools=args.tools,
-            )
-            hits = literal_hits[: args.limit]
-
-        if not args.literal and not args.exhaustive:
-            assert answer_deadline is not None  # noqa: S101  # ranked-search invariant
-
-            revision_warning = verify_model_revision(
-                connection,
-                local_model_revision(),
-                adopt_unknown=False,
-            )
-            if revision_warning is not None:
-                search_warnings.append(
-                    {
-                        "code": "model_revision_unverified",
-                        "detail": revision_warning,
-                    }
-                )
-
-            def search_model_progress(phase: str, state: str) -> None:
-                progress_stream.emit(phase, state)
-
-            semantic_budget = answer_deadline - monotonic()
-            progress_stream.emit("query_embed", "running")
-            try:
-                query_embedding = _bounded_query_embedding(
-                    args.query,
-                    timeout_seconds=semantic_budget,
-                    progress=search_model_progress,
-                    quiet=progress_stream.ndjson,
-                )
-                progress_stream.emit("query_embed", "complete")
-                semantic_hits = semantic_search(
-                    connection,
-                    query_embedding,
-                    limit=component_depth,
-                    provider=args.provider,
-                    role=args.role,
-                    project=project,
-                    since=_since_days(args.days),
-                    epoch=args.epoch,
-                    include_agents=args.agents,
-                    allow_partial=True,
-                )
-                hybrid_hits = fuse_hybrid(
-                    literal_hits,
-                    semantic_hits,
-                    limit=args.limit,
-                    rank_constant=60,
-                    component_depth=component_depth,
-                )
-                hits = tuple(value.message for value in hybrid_hits)
-                hybrid_rankings = {
-                    value.message.canonical_locator: value for value in hybrid_hits
-                }
-                retrieval_mode = "hybrid"
-            except (
-                ModelUnavailable,
-                TimeoutError,
-                psycopg.Error,
-                RuntimeError,
-                ValueError,
-            ) as error:
-                retrieval_mode = "literal_fallback"
-                search_warnings.append(
-                    {
-                        "code": "semantic_search_degraded",
-                        "detail": f"{type(error).__name__}: {error}",
-                    }
-                )
-                progress_stream.emit(
-                    "query_embed",
-                    "degraded",
-                    warning=search_warnings[-1],
-                )
-        progress_stream.emit(
-            "retrieve",
-            "complete",
-            completed_units=len(hits),
-            total_units=len(hits),
-        )
-        envelope = _postgres_envelope(
-            connection,
-            "search",
-            index_state_roots=configured_source_roots(),
-            index_state_deadline=(
-                monotonic() + _INDEX_STATE_SCAN_BUDGET_SECONDS
-                if args.exhaustive
-                else args.answer_deadline
-            ),
-            exhaustive=args.exhaustive,
-            result_limit=None if args.exhaustive else args.limit,
-            deadline_ms=(
-                None if args.exhaustive else round(_SEARCH_DEADLINE_SECONDS * 1000)
-            ),
-            elapsed_ms=round((monotonic() - args.request_started) * 1000),
-            retrieval_mode=retrieval_mode,
-            mode=_requested_search_mode(args),
-            stale_reasons=[],
-            additional_warnings=search_warnings,
-        )
-        semantic_state = cast("dict[str, object]", envelope["semantic"])
-        stale_reasons = cast("list[str]", envelope["stale_reasons"])
-        if semantic_state["fresh"] is not True:
-            stale_reasons.append("semantic_build_unavailable")
-            if retrieval_mode == "hybrid":
-                envelope["retrieval_mode"] = "literal_fallback"
-        try:
-            resolutions = pg_resolve_messages(
-                connection,
-                tuple(hit.canonical_locator for hit in hits),
-            )
-            results = _resolved_search_results(
-                hits,
-                resolutions,
-                hybrid_rankings,
-                exhaustive=args.exhaustive,
-                answer_deadline=answer_deadline,
-            )
-        except (
-            ReadDeadlineExceeded,
-            SearchDeadlineExceeded,
-            psycopg.errors.LockNotAvailable,
-            psycopg.errors.QueryCanceled,
-        ) as error:
-            deadline_warning = {
-                "code": "deadline_degraded",
-                "detail": f"{type(error).__name__}: {error}",
-            }
-            search_warnings.append(deadline_warning)
-            _append_envelope_warning(envelope, deadline_warning)
-            envelope["status"] = "partial"
-            results = _unresolved_search_results(
-                hits,
-                hybrid_rankings,
-                exhaustive=args.exhaustive,
-            )
-            connection.execute("ROLLBACK")
-        else:
-            connection.execute("COMMIT")
-
-        envelope["elapsed_ms"] = round((monotonic() - args.request_started) * 1000)
-        envelope["results"] = results
-        progress_stream.terminal(envelope)
-        if args.json:
-            print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
-        else:
-            _print_human_search(args, envelope, search_warnings, results)
-        return 0
+            return _postgres_context_resolve(context)
+        return _postgres_search(context)
 
 
 def _since_days(days: int | None) -> str | None:
@@ -2458,34 +2727,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(*, request_started: float | None = None) -> None:
-    """Entry point for cc-search-chats CLI."""
-    if request_started is None:
-        request_started = monotonic()
-    parser = build_parser()
-    args = parser.parse_args()
-    args.request_started = request_started
-
-    if args.command is None:
-        parser.print_help()
-        sys.exit(0)
-
-    if args.command == "search":
-        args.answer_deadline = (
-            request_started + _SEARCH_DEADLINE_SECONDS - _SEARCH_RENDER_RESERVE_SECONDS
+def _validate_search_args(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    request_started: float,
+) -> None:
+    if args.command != "search":
+        return
+    args.answer_deadline = (
+        request_started + _SEARCH_DEADLINE_SECONDS - _SEARCH_RENDER_RESERVE_SECONDS
+    )
+    if args.everything:
+        parser.error(
+            "--everything was removed; use --literal --tools --exhaustive "
+            "for complete lexical tool/prose matches. "
+            "Reasoning and instructions remain excluded"
         )
-        if args.everything:
-            parser.error(
-                "--everything was removed; use --literal --tools --exhaustive "
-                "for complete lexical tool/prose matches. "
-                "Reasoning and instructions remain excluded"
-            )
-        if args.tools and not args.literal:
-            parser.error("--tools requires --literal")
-        if args.exhaustive and not args.literal:
-            parser.error("--exhaustive requires --literal")
-        if not args.exhaustive and not 1 <= args.limit <= 200:
-            parser.error("--limit must be between 1 and 200 for ranked search")
+    if args.tools and not args.literal:
+        parser.error("--tools requires --literal")
+    if args.exhaustive and not args.literal:
+        parser.error("--exhaustive requires --literal")
+    if not args.exhaustive and not 1 <= args.limit <= 200:
+        parser.error("--limit must be between 1 and 200 for ranked search")
+
+
+def _uses_postgres(args: argparse.Namespace) -> bool:
     postgres_commands = {
         "index",
         "search",
@@ -2495,211 +2761,271 @@ def main(*, request_started: float | None = None) -> None:
         "context",
         "resolve",
     }
-    postgres = (
-        args.command in postgres_commands and "CC_SEARCH_DB_PATH" not in os.environ
-    )
+    return args.command in postgres_commands and "CC_SEARCH_DB_PATH" not in os.environ
+
+
+def _postgres_dsn() -> str:
     standard_connection = any(
         key in os.environ
         for key in ("PGSERVICE", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER")
     )
-    if postgres:
-        progress_stream = _ProgressStream(args)
-        try:
-            if args.command == "search" and not args.exhaustive:
-                remaining = _remaining_search_seconds(args)
-                if remaining <= 0:
-                    raise SearchDeadlineExceeded(
-                        "search deadline expired before PostgreSQL admission"
-                    )
-                read_scope = read_deadline(max(1, int(remaining * 1000)))
-            else:
-                read_scope = nullcontext()
-            _contain_semantic_index(args)
-            admission_name = (
-                None
-                if args.command == "index" and args.status
-                else None
-                if args.command == "search"
-                else "index"
-                if args.command == "index"
-                else "read"
-            )
-            with read_scope:
-                if admission_name is None:
-                    exit_code = _handle_postgres(
-                        args,
-                        "" if standard_connection else _DEFAULT_POSTGRES_DSN,
-                        progress_stream,
-                    )
-                else:
-                    with client_admission(admission_name):
-                        exit_code = _handle_postgres(
-                            args,
-                            "" if standard_connection else _DEFAULT_POSTGRES_DSN,
-                            progress_stream,
-                        )
-            sys.exit(exit_code)
-        except (ReadDeadlineExceeded, SearchDeadlineExceeded) as exc:
-            error = {
+    return "" if standard_connection else _DEFAULT_POSTGRES_DSN
+
+
+def _postgres_read_scope(args: argparse.Namespace):
+    if args.command != "search" or args.exhaustive:
+        return nullcontext()
+    remaining = _remaining_search_seconds(args)
+    if remaining <= 0:
+        raise SearchDeadlineExceeded(
+            "search deadline expired before PostgreSQL admission"
+        )
+    return read_deadline(max(1, int(remaining * 1000)))
+
+
+def _postgres_admission_name(args: argparse.Namespace) -> str | None:
+    if (args.command == "index" and args.status) or args.command == "search":
+        return None
+    if args.command == "index":
+        return "index"
+    return "read"
+
+
+def _dispatch_postgres(
+    args: argparse.Namespace,
+    progress_stream: _ProgressStream,
+) -> int:
+    read_scope = _postgres_read_scope(args)
+    _contain_semantic_index(args)
+    admission_name = _postgres_admission_name(args)
+    with read_scope:
+        if admission_name is None:
+            return _handle_postgres(args, _postgres_dsn(), progress_stream)
+        with client_admission(admission_name):
+            return _handle_postgres(args, _postgres_dsn(), progress_stream)
+
+
+def _exit_with_error(
+    args: argparse.Namespace,
+    progress_stream: _ProgressStream,
+    status: str,
+    error: Mapping[str, object],
+    exit_code: int,
+    *,
+    human_message: str | None = None,
+) -> Never:
+    envelope = _command_error_envelope(args, status, error)
+    progress_stream.terminal(envelope)
+    if args.json:
+        print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
+    elif human_message is not None and not progress_stream.ndjson:
+        print(human_message, file=sys.stderr)
+    sys.exit(exit_code)
+
+
+def _postgres_error_detail(error: BaseException) -> str:
+    if isinstance(error, psycopg.Error) and error.diag.message_primary:
+        return error.diag.message_primary
+    return str(error)
+
+
+def _exit_postgres_operation_error(
+    args: argparse.Namespace,
+    progress_stream: _ProgressStream,
+    error: OSError | psycopg.Error | RuntimeError | ValueError,
+) -> Never:
+    detail = _postgres_error_detail(error)
+    if args.command == "search" and isinstance(
+        error,
+        (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled),
+    ):
+        _exit_with_error(
+            args,
+            progress_stream,
+            "deadline_exceeded",
+            {
                 "code": "search_deadline_exceeded",
                 "phase": "retrieve",
-                "message": str(exc),
-            }
-            envelope = _command_error_envelope(args, "deadline_exceeded", error)
-            progress_stream.terminal(envelope)
-            if args.json:
-                print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
-            sys.exit(7)
-        except MaintenanceRequired as exc:
-            error = {
+                "message": detail,
+            },
+            7,
+        )
+    _exit_with_error(
+        args,
+        progress_stream,
+        "internal_failure",
+        {
+            "code": "postgresql_operation_failed",
+            "phase": "done",
+            "message": detail,
+        },
+        1,
+        human_message=f"PostgreSQL operation failed: {detail}",
+    )
+
+
+def _run_postgres_cli(args: argparse.Namespace) -> Never:
+    progress_stream = _ProgressStream(args)
+    try:
+        sys.exit(_dispatch_postgres(args, progress_stream))
+    except (ReadDeadlineExceeded, SearchDeadlineExceeded) as error:
+        _exit_with_error(
+            args,
+            progress_stream,
+            "deadline_exceeded",
+            {
+                "code": "search_deadline_exceeded",
+                "phase": "retrieve",
+                "message": str(error),
+            },
+            7,
+        )
+    except MaintenanceRequired as error:
+        _exit_with_error(
+            args,
+            progress_stream,
+            "maintenance_required",
+            {
                 "code": "maintenance_required",
                 "phase": "migration",
-                "message": str(exc),
-                "pending_versions": [migration.version for migration in exc.pending],
-            }
-            envelope = _command_error_envelope(args, "maintenance_required", error)
-            progress_stream.terminal(envelope)
-            if args.json:
-                print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
-            sys.exit(6)
-        except ModelUnavailable as exc:
-            error = {
-                "code": exc.code,
-                "phase": exc.phase,
-                "message": str(exc),
-                "available_vram_bytes": exc.available_vram_bytes,
-                "required_vram_bytes": exc.required_vram_bytes,
-                "total_vram_bytes": exc.total_vram_bytes,
+                "message": str(error),
+                "pending_versions": [migration.version for migration in error.pending],
+            },
+            6,
+        )
+    except ModelUnavailable as error:
+        _exit_with_error(
+            args,
+            progress_stream,
+            "semantic_unavailable",
+            {
+                "code": error.code,
+                "phase": error.phase,
+                "message": str(error),
+                "available_vram_bytes": error.available_vram_bytes,
+                "required_vram_bytes": error.required_vram_bytes,
+                "total_vram_bytes": error.total_vram_bytes,
                 "literal_requirement": (
                     "Literal search is required for complete current results"
                 ),
                 "literal_command": _literal_fallback_command(args),
-            }
-            envelope = _command_error_envelope(
-                args,
-                "semantic_unavailable",
-                error,
-            )
-            progress_stream.terminal(envelope)
-            if args.json:
-                print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
-            elif not progress_stream.ndjson:
-                print(
-                    f"Semantic unavailable [{exc.code}] during {exc.phase}: {exc}\n"
-                    "Semantic freshness: unavailable.\n"
-                    "Literal search is required for complete current results.\n"
-                    f"Run: {_literal_fallback_command(args)}",
-                    file=sys.stderr,
-                )
-            sys.exit(8)
-        except (OSError, psycopg.Error, RuntimeError, ValueError) as exc:
-            detail = (
-                exc.diag.message_primary
-                if isinstance(exc, psycopg.Error) and exc.diag.message_primary
-                else str(exc)
-            )
-            if args.command == "search" and isinstance(
-                exc,
-                (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled),
-            ):
-                error = {
-                    "code": "search_deadline_exceeded",
-                    "phase": "retrieve",
-                    "message": detail,
-                }
-                envelope = _command_error_envelope(
-                    args,
-                    "deadline_exceeded",
-                    error,
-                )
-                progress_stream.terminal(envelope)
-                if args.json:
-                    print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
-                sys.exit(7)
-            error = {
-                "code": "postgresql_operation_failed",
-                "phase": "done",
-                "message": detail,
-            }
-            envelope = _command_error_envelope(args, "internal_failure", error)
-            progress_stream.terminal(envelope)
-            if args.json:
-                print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
-            elif not progress_stream.ndjson:
-                print(
-                    f"PostgreSQL operation failed: {detail}",
-                    file=sys.stderr,
-                )
-            sys.exit(1)
+            },
+            8,
+            human_message=(
+                f"Semantic unavailable [{error.code}] during {error.phase}: {error}\n"
+                "Semantic freshness: unavailable.\n"
+                "Literal search is required for complete current results.\n"
+                f"Run: {_literal_fallback_command(args)}"
+            ),
+        )
+    except (OSError, psycopg.Error, RuntimeError, ValueError) as error:
+        _exit_postgres_operation_error(args, progress_stream, error)
+
+
+def _ensure_legacy_available(args: argparse.Namespace) -> None:
     if args.command == "resolve":
         print("PostgreSQL connection is required for resolve", file=sys.stderr)
         sys.exit(1)
-
-    # Check FTS5 availability before opening the database.
     try:
         ensure_fts5()
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
         sys.exit(1)
 
-    conn: sqlite3.Connection | None = None
-    db_path = None
+
+def _report_project_rebuild_error(
+    error: ProjectRebuildError,
+    db_path: Path | None,
+    connection: sqlite3.Connection | None,
+) -> sqlite3.Connection | None:
+    if db_path is None:
+        print(str(error), file=sys.stderr)
+    elif connection is not None and is_database_damage(error.cause):
+        damaged_connection = connection
+        connection = None
+        print(
+            discard_damaged_database(
+                damaged_connection,
+                db_path,
+                format_exception_detail(error.cause),
+                "SQLite stopped the operation with an explicit damage result.",
+            ),
+            file=sys.stderr,
+        )
+    else:
+        diagnostic = format_index_error(db_path, error.cause, connection)
+        print(
+            f"Project index rebuild failed for {error.project_path}. "
+            f"{diagnostic} The transaction was rolled back; "
+            "prior index contents remain intact.",
+            file=sys.stderr,
+        )
+    return connection
+
+
+def _report_legacy_database_error(
+    error: OSError | sqlite3.DatabaseError,
+    db_path: Path | None,
+    connection: sqlite3.Connection | None,
+) -> sqlite3.Connection | None:
+    if db_path is None:
+        print(f"{error.__class__.__name__}: {error}", file=sys.stderr)
+    elif connection is not None and is_database_damage(error):
+        damaged_connection = connection
+        connection = None
+        print(
+            discard_damaged_database(
+                damaged_connection,
+                db_path,
+                format_exception_detail(error),
+                "SQLite stopped the operation with an explicit damage result.",
+            ),
+            file=sys.stderr,
+        )
+    else:
+        print(format_index_error(db_path, error, connection), file=sys.stderr)
+    return connection
+
+
+def _run_legacy_cli(args: argparse.Namespace) -> Never:
+    _ensure_legacy_available(args)
+    connection: sqlite3.Connection | None = None
+    db_path: Path | None = None
     try:
         db_path = get_db_path()
-        conn = open_db(db_path)
-        exit_code = args.func(args, conn)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        connection = open_db(db_path)
+        exit_code = args.func(args, connection)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
         exit_code = 1
-    except ProjectRebuildError as exc:
-        if db_path is None:
-            print(str(exc), file=sys.stderr)
-        elif conn is not None and is_database_damage(exc.cause):
-            damaged_conn = conn
-            conn = None
-            print(
-                discard_damaged_database(
-                    damaged_conn,
-                    db_path,
-                    format_exception_detail(exc.cause),
-                    "SQLite stopped the operation with an explicit damage result.",
-                ),
-                file=sys.stderr,
-            )
-        else:
-            diagnostic = format_index_error(db_path, exc.cause, conn)
-            print(
-                f"Project index rebuild failed for {exc.project_path}. "
-                f"{diagnostic} The transaction was rolled back; "
-                "prior index contents remain intact.",
-                file=sys.stderr,
-            )
+    except ProjectRebuildError as error:
+        connection = _report_project_rebuild_error(error, db_path, connection)
         exit_code = 1
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
         exit_code = 1
     except sqlite3.ProgrammingError:
         raise
-    except (OSError, sqlite3.DatabaseError) as exc:
-        if db_path is None:
-            print(f"{exc.__class__.__name__}: {exc}", file=sys.stderr)
-        elif conn is not None and is_database_damage(exc):
-            damaged_conn = conn
-            conn = None
-            print(
-                discard_damaged_database(
-                    damaged_conn,
-                    db_path,
-                    format_exception_detail(exc),
-                    "SQLite stopped the operation with an explicit damage result.",
-                ),
-                file=sys.stderr,
-            )
-        else:
-            print(format_index_error(db_path, exc, conn), file=sys.stderr)
+    except (OSError, sqlite3.DatabaseError) as error:
+        connection = _report_legacy_database_error(error, db_path, connection)
         exit_code = 1
     finally:
-        if conn is not None:
-            close_db(conn)
-
+        if connection is not None:
+            close_db(connection)
     sys.exit(exit_code)
+
+
+def main(*, request_started: float | None = None) -> None:
+    """Entry point for cc-search-chats CLI."""
+    if request_started is None:
+        request_started = monotonic()
+    parser = build_parser()
+    args = parser.parse_args()
+    args.request_started = request_started
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+    _validate_search_args(args, parser, request_started)
+    if _uses_postgres(args):
+        _run_postgres_cli(args)
+    _run_legacy_cli(args)
