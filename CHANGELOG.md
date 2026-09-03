@@ -3,6 +3,11 @@
 ## Unreleased
 
 **Fixed:**
+- Codex lifecycle and inter-agent metadata now remain excluded when native
+  payloads add keys, preventing `thread_settings_applied.thread_id` from
+  blocking otherwise searchable sessions. The first index after this change
+  reparses every Codex source from byte zero so unchanged deterministic
+  failures are retried.
 - Exact semantic retrieval now ranks a bounded, narrow candidate set before
   loading message payloads and uses semantic-only transaction-local `work_mem`.
   This prevents the full-set window sort and hash-join spill that exceeded the

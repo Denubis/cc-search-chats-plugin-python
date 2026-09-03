@@ -15,6 +15,7 @@ from psycopg import sql
 
 from cc_search_chats.cli import _postgres_envelope
 from cc_search_chats.core.identity import Provider
+from cc_search_chats.providers import codex as codex_module
 from cc_search_chats.providers.source_discovery import (
     ConfiguredSourceRoot,
     SourceDiagnostic,
@@ -752,11 +753,128 @@ def test_parser_state_version_change_forces_full_reparse(
     )
 
 
-def test_native_record_policy_bumps_both_parser_state_versions() -> None:
+def test_native_record_policy_parser_state_versions() -> None:
     assert refresh_module._PARSER_STATE_VERSIONS == {
         Provider.CLAUDE: 3,
-        Provider.CODEX: 3,
+        Provider.CODEX: 4,
     }
+
+
+def test_codex_added_lifecycle_key_indexes_complete_and_searchable(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    codex_root = tmp_path / "codex"
+    day = codex_root / "2026" / "08" / "11"
+    day.mkdir(parents=True)
+    shutil.copy(
+        FIXTURES / "codex_modern_primary_145.jsonl",
+        day / "rollout-lifecycle.jsonl",
+    )
+
+    result = refresh_native_sources(
+        postgres_connection,
+        source_roots=(_source_root(Provider.CODEX, codex_root),),
+    )
+
+    coverage = cast(
+        "dict[str, object]",
+        _postgres_envelope(
+            postgres_connection,
+            "index",
+            refresh_result=result,
+        )["coverage"],
+    )
+    assert coverage["completeness"] == "complete"
+    assert coverage["blocked_files"] == 0
+    hits = search_messages(postgres_connection, "modern visible")
+    assert hits
+    assert {hit.provider for hit in hits} == {"codex"}
+    assert (
+        search_messages(
+            postgres_connection,
+            "synthetic lifecycle developer instructions",
+        )
+        == ()
+    )
+
+
+def test_codex_parser_state_bump_retries_unchanged_deterministic_failure(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_root = tmp_path / "codex"
+    day = codex_root / "2026" / "08" / "11"
+    day.mkdir(parents=True)
+    source = day / "rollout-retry.jsonl"
+    shutil.copy(FIXTURES / "codex_modern_primary_145.jsonl", source)
+    root = _source_root(Provider.CODEX, codex_root)
+    installed_parser_version = refresh_module._PARSER_STATE_VERSIONS[Provider.CODEX]
+    new_matcher = codex_module._matches_excluded_keyset
+
+    def old_exact_matcher(
+        payload: dict[str, object], required_keysets: set[frozenset[str]]
+    ) -> bool:
+        return frozenset(payload) in required_keysets
+
+    monkeypatch.setitem(refresh_module._PARSER_STATE_VERSIONS, Provider.CODEX, 3)
+    monkeypatch.setattr(codex_module, "_matches_excluded_keyset", old_exact_matcher)
+    before = source.stat()
+
+    failed = inspect_native_sources(
+        postgres_connection,
+        source_roots=(root,),
+    )
+
+    assert failed.blocked_source_count == 1
+    assert search_messages(postgres_connection, "modern visible") == ()
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT failure_class, failure_code, parser_state_version
+            FROM cc_search_chats.source_failure_current
+            """
+        )
+    ) == ("deterministic", "unknown_event", 3)
+
+    monkeypatch.setattr(codex_module, "_matches_excluded_keyset", new_matcher)
+    monkeypatch.setitem(
+        refresh_module._PARSER_STATE_VERSIONS,
+        Provider.CODEX,
+        installed_parser_version,
+    )
+    retried = refresh_native_sources(
+        postgres_connection,
+        source_roots=(root,),
+    )
+
+    after = source.stat()
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    coverage = cast(
+        "dict[str, object]",
+        _postgres_envelope(
+            postgres_connection,
+            "index",
+            refresh_result=retried,
+        )["coverage"],
+    )
+    assert coverage["completeness"] == "complete"
+    assert coverage["blocked_files"] == 0
+    assert search_messages(postgres_connection, "modern visible")
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.source_failure_current"
+            )
+        )[0]
+        == 0
+    )
 
 
 def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(

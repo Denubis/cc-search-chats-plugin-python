@@ -694,6 +694,21 @@ class TestCodexSchemaFamilies:
             CodexDiagnosticCode.EXCLUDED_LIFECYCLE_EVENT
         ]
 
+    def test_added_thread_settings_key_fixture_is_excluded(self) -> None:
+        result = parse_fixture(
+            "codex_modern_primary_145.jsonl", session_id="codex-modern-primary"
+        )
+
+        assert all(
+            "synthetic lifecycle developer instructions" not in message.text
+            for message in result.messages
+        )
+        assert [
+            diagnostic.code
+            for diagnostic in result.diagnostics
+            if diagnostic.record_ordinal == 13
+        ] == [CodexDiagnosticCode.EXCLUDED_LIFECYCLE_EVENT]
+
     @pytest.mark.parametrize(
         "payload",
         [
@@ -758,6 +773,12 @@ class TestCodexSchemaFamilies:
                 "status": "complete",
                 "tools": [],
             },
+            {
+                "type": "web_search_call",
+                "action": {},
+                "status": "complete",
+                "future_metadata": {"synthetic": True},
+            },
         ],
     )
     def test_observed_internal_response_items_are_explicitly_excluded(
@@ -814,6 +835,24 @@ class TestCodexSchemaFamilies:
                     {
                         "type": "event_msg",
                         "payload": {"type": "task_started", "unexpected": True},
+                    }
+                ),
+            ),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("session"),
+        )
+
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.UNKNOWN_EVENT
+        ]
+
+    def test_unregistered_lifecycle_type_stays_unknown(self) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "future_lifecycle", "thread_id": "thread"},
                     }
                 ),
             ),
@@ -1763,6 +1802,30 @@ class TestCodexFailClosedDiagnostics:
             assert codes == set()
         else:
             assert codes == {expected}
+
+    def test_added_inter_agent_metadata_keys_remain_excluded(self) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:00Z",
+                        "type": "inter_agent_communication_metadata",
+                        "thread_id": "synthetic-thread",
+                        "payload": {
+                            "trigger_turn": False,
+                            "future_metadata": {"synthetic": True},
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="metadata-session"),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert {diagnostic.code for diagnostic in result.diagnostics} == {
+            CodexDiagnosticCode.EXCLUDED_INTER_AGENT_METADATA
+        }
 
     @pytest.mark.parametrize(
         "outer_type",

@@ -1,4 +1,4 @@
-# 0003. Persist visible conversation and bounded tool metadata
+# 0003. Persist visible conversation, bounded tool metadata, and monotone exclusions
 
 Status: Accepted
 Date: 2026-09-03
@@ -52,6 +52,13 @@ records to its operator; read commands do not repeat them.
 
 Claude discovery does not descend into directories whose names begin with `.`.
 
+On 2026-09-03, Codex lifecycle and inter-agent exclusion key sets became
+required minima rather than exact schemas. A payload is recognized as excluded
+when its registered type is known and its keys are a superset of at least one
+registered required-key set. Extra metadata cannot turn a known non-conversation
+event into searchable content or block its source. A registered type missing a
+required key, or an unregistered type, remains unknown and fails closed.
+
 ## Consequences
 
 Existing persisted tool-result and injected-context rows leave current state on
@@ -63,3 +70,8 @@ digest changed are re-embedded.
 The retained `tool_output` database value remains valid historical/schema
 vocabulary, so this decision needs no schema migration. Repair accounting is
 run-scoped because no repair-count checkpoint column exists.
+
+The Codex parser-state version advances for the monotone exclusion rule. The
+first index under this change reparses every Codex source from byte zero so a
+deterministic failure recorded by the previous exact matcher is retried even
+when its file metadata is unchanged.

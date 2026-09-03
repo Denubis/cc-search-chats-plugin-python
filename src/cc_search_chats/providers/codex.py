@@ -1241,6 +1241,14 @@ def _tool_text(value: object) -> str | None:
     return None
 
 
+def _matches_excluded_keyset(
+    payload: dict[str, object], required_keysets: set[frozenset[str]]
+) -> bool:
+    """Recognize excluded metadata when every required key is present."""
+    payload_keys = frozenset(payload)
+    return any(required_keys <= payload_keys for required_keys in required_keysets)
+
+
 def _parse_response_item(
     record: _DecodedRecord,
     *,
@@ -1268,8 +1276,8 @@ def _parse_response_item(
                 "reasoning item is deliberately non-searchable",
             ),
         )
-    if isinstance(item_type, str) and frozenset(payload) in (
-        _INTER_AGENT_RESPONSE_KEYSETS.get(item_type, set())
+    if isinstance(item_type, str) and _matches_excluded_keyset(
+        payload, _INTER_AGENT_RESPONSE_KEYSETS.get(item_type, set())
     ):
         return (), (
             _diagnostic(
@@ -1363,9 +1371,9 @@ def _parse_event(
             "event_msg payload is not an object",
         )
     event_type = payload.get("type")
-    if isinstance(event_type, str) and frozenset(
-        payload
-    ) in _LIFECYCLE_EVENT_KEYSETS.get(event_type, set()):
+    if isinstance(event_type, str) and _matches_excluded_keyset(
+        payload, _LIFECYCLE_EVENT_KEYSETS.get(event_type, set())
+    ):
         return None, _diagnostic(
             CodexDiagnosticCode.EXCLUDED_LIFECYCLE_EVENT,
             record.envelope,
@@ -1528,9 +1536,11 @@ def _inter_agent_metadata_shape(record: _DecodedRecord) -> bool:
     """Recognize the audited trigger-turn inter-agent metadata wrapper."""
     payload = record.payload.get("payload")
     return (
-        _metadata_outer_shape(record)
+        set(record.payload) >= {"type", "timestamp", "payload"}
+        and isinstance(record.payload.get("timestamp"), str)
+        and is_valid_native_timestamp(record.payload["timestamp"])
         and _is_json_object(payload)
-        and set(payload) == {"trigger_turn"}
+        and set(payload) >= {"trigger_turn"}
         and isinstance(payload.get("trigger_turn"), bool)
     )
 

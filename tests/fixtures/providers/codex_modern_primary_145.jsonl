@@ -11,3 +11,4 @@
 {"timestamp":"2026-08-11T03:00:06Z","type":"response_item","payload":{"type":"message","id":"modern-after-id","role":"assistant","content":[{"type":"output_text","text":"modern after compact"}]}}
 {"timestamp":"2026-08-11T03:00:07Z","type":"compacted","payload":{"future_summary_shape":"not recognized"}}
 {"timestamp":"2026-08-11T03:00:08Z","type":"response_item","payload":{"type":"message","id":"modern-after-unknown-id","role":"assistant","content":[{"type":"output_text","text":"modern after unknown compact"}]}}
+{"timestamp":"2026-08-11T03:00:09Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"synthetic-thread","thread_settings":{"collaboration_mode":{"settings":{"developer_instructions":"synthetic lifecycle developer instructions"}}}}}
