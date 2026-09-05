@@ -77,8 +77,8 @@ The migration result must report `applied_schema_version == 10`. Re-running it i
 idempotent. Routine search/index commands must have reported
 `maintenance_required` without schema mutation before this explicit step.
 
-Capture stdout/stderr separately. Stdout must parse as one schema-v4 object.
-Stderr must parse as ordered schema-v4 NDJSON ending in exactly one terminal
+Capture stdout/stderr separately. Stdout must parse as one schema-v5 object.
+Stderr must parse as ordered schema-v5 NDJSON ending in exactly one terminal
 event.
 
 ## 4. Publish one coherent corpus

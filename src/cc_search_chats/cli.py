@@ -127,7 +127,7 @@ if TYPE_CHECKING:
     from cc_search_chats.providers.source_discovery import ConfiguredSourceRoot
 
 _DEFAULT_POSTGRES_DSN = "service=cc_search_chats"
-_POSTGRES_SCHEMA_VERSION = 4
+_POSTGRES_SCHEMA_VERSION = 5
 _SEARCH_DEADLINE_SECONDS = 5.0
 _SEARCH_RENDER_RESERVE_SECONDS = 0.1
 _INDEX_STATE_SCAN_BUDGET_SECONDS = (
@@ -222,7 +222,6 @@ class _ProgressStream:
         owner: int | None = None,
         corpus_generation: int | None = None,
         semantic_build: int | None = None,
-        source_watermark: object = None,
         deadline_ms: int | None = None,
         retrieval_mode: str | None = None,
         mode: str | None = None,
@@ -252,7 +251,6 @@ class _ProgressStream:
                 "owner": owner,
                 "corpus_generation": corpus_generation,
                 "semantic_build": semantic_build,
-                "source_watermark": source_watermark,
                 "deadline_ms": deadline_ms,
                 "retrieval_mode": retrieval_mode,
                 "mode": mode,
@@ -426,7 +424,6 @@ class _ProgressStream:
                 "int | None",
                 semantic.get("semantic_build"),
             ),
-            source_watermark=coverage.get("source_watermarks"),
             deadline_ms=cast("int | None", envelope.get("deadline_ms")),
             retrieval_mode=cast("str | None", envelope.get("retrieval_mode")),
             mode=cast("str | None", envelope.get("mode")),
@@ -473,7 +470,7 @@ def _error_envelope(
             "configured_root_count": 0,
             "resolved_root_count": 0,
             "roots": [],
-            "repositories": [],
+            "repository_count": 0,
             "discovered_files": 0,
             "metadata_checked_files": 0,
             "unchanged_files": 0,
@@ -491,7 +488,6 @@ def _error_envelope(
             "unreadable_files": 0,
             "unknown_sessions": 0,
             "unrecognized_conversation_records": 0,
-            "source_watermarks": [],
             "completeness": "unknown",
         },
         "refresh": {
@@ -811,18 +807,16 @@ def _refresh_metrics(
     )
 
 
-def _postgres_repositories(connection: psycopg.Connection) -> list[object]:
-    return [
-        value
-        for (value,) in connection.execute(
+def _postgres_repository_count(connection: psycopg.Connection) -> int:
+    return next(
+        connection.execute(
             """
-            SELECT DISTINCT COALESCE(repository, cwd) AS project
+            SELECT count(DISTINCT COALESCE(repository, cwd))
             FROM cc_search_chats.message_current
             WHERE COALESCE(repository, cwd) IS NOT NULL
-            ORDER BY project
             """
         )
-    ]
+    )[0]
 
 
 def _postgres_unknown_sessions(connection: psycopg.Connection) -> int:
@@ -839,42 +833,6 @@ def _postgres_unknown_sessions(connection: psycopg.Connection) -> int:
             """
         )
     )[0]
-
-
-def _postgres_source_watermarks(
-    connection: psycopg.Connection,
-) -> list[dict[str, object]]:
-    return [
-        {
-            "provider": provider,
-            "resolved_root": resolved_root,
-            "source_file_relative": source_file_relative,
-            "observed_size": observed_size,
-            "complete_byte_offset": complete_byte_offset,
-            "next_record_ordinal": next_record_ordinal,
-            "pending_bytes": pending_bytes,
-        }
-        for (
-            provider,
-            resolved_root,
-            source_file_relative,
-            observed_size,
-            complete_byte_offset,
-            next_record_ordinal,
-            pending_bytes,
-        ) in connection.execute(
-            """
-            SELECT root.provider, root.resolved_path,
-                   source.source_file_relative, source.observed_size,
-                   source.complete_byte_offset, source.next_record_ordinal,
-                   source.pending_bytes
-            FROM cc_search_chats.source_file_current AS source
-            JOIN cc_search_chats.source_root_current AS root
-              USING (source_root_id)
-            ORDER BY root.configured_order, source.source_file_relative
-            """
-        )
-    ]
 
 
 def _coverage_completeness(metrics: _RefreshMetrics) -> str:
@@ -909,7 +867,7 @@ def _postgres_coverage(
         "configured_root_count": len(roots),
         "resolved_root_count": len(roots),
         "roots": roots,
-        "repositories": _postgres_repositories(connection),
+        "repository_count": _postgres_repository_count(connection),
         "discovered_files": metrics.discovered_files,
         "metadata_checked_files": metrics.metadata_checked_files,
         "unchanged_files": max(
@@ -933,7 +891,6 @@ def _postgres_coverage(
         "unreadable_files": metrics.transient_failure_files,
         "unknown_sessions": _postgres_unknown_sessions(connection),
         "unrecognized_conversation_records": unrecognized_records,
-        "source_watermarks": _postgres_source_watermarks(connection),
         "completeness": _coverage_completeness(metrics),
     }
 

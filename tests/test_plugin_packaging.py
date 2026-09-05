@@ -99,7 +99,7 @@ def test_search_skill_has_intentional_codex_discovery_metadata() -> None:
     assert metadata["policy"] == {"allow_implicit_invocation": True}
 
 
-def test_search_guidance_describes_the_v4_explicit_mode_contract() -> None:
+def test_search_guidance_describes_the_v5_explicit_mode_contract() -> None:
     documents = {
         "README": (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
         "CLAUDE": (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8"),
@@ -108,7 +108,7 @@ def test_search_guidance_describes_the_v4_explicit_mode_contract() -> None:
     }
 
     for name, document in documents.items():
-        schema_markers = ("schema version 4", "schema v4", "`schema_version: 4`")
+        schema_markers = ("schema version 5", "schema v5", "`schema_version: 5`")
         assert any(marker in document.lower() for marker in schema_markers), name
         assert "PostgreSQL" in document, name
         assert "Ponytail" in document, name

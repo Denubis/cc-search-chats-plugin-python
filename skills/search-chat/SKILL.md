@@ -6,7 +6,7 @@ allowed-tools: ["Bash(cc-search-chats:*)"]
 
 # Search Chat History
 
-Use the PostgreSQL-backed CLI with `--json`. Require `schema_version: 4` before
+Use the PostgreSQL-backed CLI with `--json`. Require `schema_version: 5` before
 interpreting stdout. Progress is an independent NDJSON stream on stderr.
 
 ## Execution boundary
@@ -77,7 +77,7 @@ mode and is the only complete occurrence mode. Ranked results are bounded top
 results. No flag exposes reasoning/thinking, system/developer instructions,
 injected context, or unrecognized record shapes.
 
-## Interpret schema v4
+## Interpret schema v5
 
 Every command object contains `command`, terminal `status`, `coverage`,
 `refresh`, `semantic`, `indexed_at`, `corpus_age_ms`, and `warnings`. Read the
@@ -121,5 +121,5 @@ Exact resolution statuses are `resolved`, `no_match`, `multiple_matches`,
 `unsupported_provider_schema`. Report the status rather than turning every
 non-result into “not found.”
 
-If `schema_version` is missing or not `4`, stop: the plugin instructions and CLI
+If `schema_version` is missing or not `5`, stop: the plugin instructions and CLI
 are out of sync.

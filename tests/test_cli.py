@@ -35,6 +35,7 @@ from cc_search_chats import __version__
 from cc_search_chats.cli import (
     _bounded_query_embedding,
     _contain_semantic_index,
+    _error_envelope,
     _index_age,
     _ProgressStream,
     build_parser,
@@ -434,6 +435,33 @@ def test_index_age_renders_minutes_hours_and_days(age_ms: int, rendered: str) ->
     assert _index_age(age_ms) == rendered
 
 
+def test_error_envelope_uses_bounded_coverage_shape() -> None:
+    envelope = _error_envelope("search", "failed", {"code": "test_error"})
+
+    coverage = envelope["coverage"]
+    assert isinstance(coverage, dict)
+    assert coverage["repository_count"] == 0
+    assert "repositories" not in coverage
+    assert "source_watermarks" not in coverage
+    assert {key for key, value in coverage.items() if isinstance(value, list)} == {
+        "roots"
+    }
+
+
+def test_progress_events_omit_source_watermark() -> None:
+    args = build_parser().parse_args(["list", "--json"])
+    stderr = io.StringIO()
+
+    with redirect_stderr(stderr):
+        progress = _ProgressStream(args)
+        progress.emit("scan", "running")
+        progress.terminal(_error_envelope("list", "failed", {"code": "test_error"}))
+
+    events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+    assert len(events) == 2
+    assert all("source_watermark" not in event for event in events)
+
+
 def test_progress_heartbeat_tracks_the_active_phase() -> None:
     args = build_parser().parse_args(["list", "--json"])
     stderr = io.StringIO()
@@ -556,7 +584,7 @@ def _prepare_postgres_index_main(monkeypatch: pytest.MonkeyPatch, *argv: str) ->
     )
 
 
-def test_index_bus_failure_returns_schema_v4_json_containment_error(
+def test_index_bus_failure_returns_schema_v5_json_containment_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -583,7 +611,7 @@ def test_index_bus_failure_returns_schema_v4_json_containment_error(
     assert captured.out.endswith("\n")
     assert captured.out.count("\n") == 1
     envelope = json.loads(captured.out)
-    assert envelope["schema_version"] == 4
+    assert envelope["schema_version"] == 5
     assert envelope["command"] == "index"
     assert envelope["status"] == "containment_unavailable"
     assert envelope["error"]["code"] == "systemd_scope_unavailable"
@@ -845,7 +873,7 @@ def test_index_process_boundary_reports_containment_failure(
 
     assert result.returncode == 9
     envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 4
+    assert envelope["schema_version"] == 5
     assert envelope["command"] == "index"
     assert envelope["status"] == "containment_unavailable"
     assert envelope["error"]["code"] == "systemd_scope_unavailable"

@@ -340,7 +340,7 @@ def test_human_semantic_search_does_not_print_revision_warning(
     assert any(warning["code"] == "model_revision_unverified" for warning in warnings)
 
 
-def test_json_index_stderr_is_pure_v4_ndjson(
+def test_json_index_stderr_is_pure_v5_ndjson(
     postgres_cluster,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -375,4 +375,4 @@ def test_json_index_stderr_is_pure_v4_ndjson(
     assert stopped.value.code == 0
     events = [json.loads(line) for line in output.err.splitlines()]
     assert events
-    assert all(event["schema_version"] == 4 for event in events)
+    assert all(event["schema_version"] == 5 for event in events)

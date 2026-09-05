@@ -80,18 +80,18 @@ set -g uat_dir (mktemp -d)
 or exit 1
 
 function assert_progress --argument-names path
-    # Invariant: stderr is pure ordered schema-v4 NDJSON with exactly one final terminal event.
-    python -c 'import json,sys; lines=open(sys.argv[1],encoding="utf-8").read().splitlines(); assert lines and all(line.strip() for line in lines); events=[json.loads(line) for line in lines]; assert all(event["schema_version"]==4 for event in events); assert [event["sequence"] for event in events]==list(range(1,len(events)+1)); assert sum(event["event"]=="terminal" for event in events)==1; assert events[-1]["event"]=="terminal"' "$path"
+    # Invariant: stderr is pure ordered schema-v5 NDJSON with exactly one final terminal event.
+    python -c 'import json,sys; lines=open(sys.argv[1],encoding="utf-8").read().splitlines(); assert lines and all(line.strip() for line in lines); events=[json.loads(line) for line in lines]; assert all(event["schema_version"]==5 for event in events); assert [event["sequence"] for event in events]==list(range(1,len(events)+1)); assert sum(event["event"]=="terminal" for event in events)==1; assert events[-1]["event"]=="terminal"' "$path"
 end
 
 function assert_reviewed_coverage --argument-names path
     # Invariant: coverage stays at the reviewed baseline and has no transient source failures.
-    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); coverage=data["coverage"]; refresh=data["refresh"]; expected_completeness=sys.argv[2]; expected_blocked=int(sys.argv[3]); expected_skipped=int(sys.argv[4]); assert data["schema_version"]==4; assert coverage["completeness"]==expected_completeness; assert coverage["blocked_files"]==expected_blocked; assert coverage["skipped_records"]==expected_skipped; assert coverage["transient_failure_files"]==0; assert refresh["blocked_sources"]==expected_blocked; assert refresh["transient_failure_sources"]==0' "$path" "$UAT_EXPECTED_COMPLETENESS" "$UAT_EXPECTED_BLOCKED_SOURCES" "$UAT_EXPECTED_SKIPPED_RECORDS"
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); coverage=data["coverage"]; refresh=data["refresh"]; expected_completeness=sys.argv[2]; expected_blocked=int(sys.argv[3]); expected_skipped=int(sys.argv[4]); assert data["schema_version"]==5; assert coverage["completeness"]==expected_completeness; assert coverage["blocked_files"]==expected_blocked; assert coverage["skipped_records"]==expected_skipped; assert coverage["transient_failure_files"]==0; assert refresh["blocked_sources"]==expected_blocked; assert refresh["transient_failure_sources"]==0' "$path" "$UAT_EXPECTED_COMPLETENESS" "$UAT_EXPECTED_BLOCKED_SOURCES" "$UAT_EXPECTED_SKIPPED_RECORDS"
 end
 
 function assert_complete_status --argument-names path
     # Invariant: status selects one complete joint corpus with legible bounded staleness and four roots.
-    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); state=data["index_state"]; semantic=data["semantic"]; refresh=data["refresh"]; assert data["schema_version"]==4 and data["command"]=="index" and data["status"]=="complete"; assert data["selected"] is True and data["completed"]==data["total"]; assert semantic["fresh"] is True and semantic["corpus_generation"]==refresh["corpus_generation"]; assert data["coverage"]["configured_root_count"]==4 and data["coverage"]["resolved_root_count"]==4; assert set(state)=={"made_at","now","age_ms","corpus_generation","semantic_build","unindexed","unindexed_reason"}; assert isinstance(state["made_at"],str) and state["made_at"]==data["indexed_at"]; assert isinstance(state["now"],str) and state["now"]; assert isinstance(state["age_ms"],int) and state["age_ms"]>=0 and state["age_ms"]==data["corpus_age_ms"]; assert state["corpus_generation"]==refresh["corpus_generation"] and isinstance(state["corpus_generation"],int); assert state["semantic_build"]==semantic["semantic_build"] and isinstance(state["semantic_build"],int); unindexed=state["unindexed"]; reason=state["unindexed_reason"]; counts=isinstance(unindexed,dict) and set(unindexed)=={"files","directories","bytes"} and all(isinstance(unindexed[key],int) and unindexed[key]>=0 for key in unindexed) and reason is None; closed=unindexed is None and isinstance(reason,str) and bool(reason); assert counts or closed' "$path"
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); state=data["index_state"]; semantic=data["semantic"]; refresh=data["refresh"]; assert data["schema_version"]==5 and data["command"]=="index" and data["status"]=="complete"; assert data["selected"] is True and data["completed"]==data["total"]; assert semantic["fresh"] is True and semantic["corpus_generation"]==refresh["corpus_generation"]; assert data["coverage"]["configured_root_count"]==4 and data["coverage"]["resolved_root_count"]==4; assert set(state)=={"made_at","now","age_ms","corpus_generation","semantic_build","unindexed","unindexed_reason"}; assert isinstance(state["made_at"],str) and state["made_at"]==data["indexed_at"]; assert isinstance(state["now"],str) and state["now"]; assert isinstance(state["age_ms"],int) and state["age_ms"]>=0 and state["age_ms"]==data["corpus_age_ms"]; assert state["corpus_generation"]==refresh["corpus_generation"] and isinstance(state["corpus_generation"],int); assert state["semantic_build"]==semantic["semantic_build"] and isinstance(state["semantic_build"],int); unindexed=state["unindexed"]; reason=state["unindexed_reason"]; counts=isinstance(unindexed,dict) and set(unindexed)=={"files","directories","bytes"} and all(isinstance(unindexed[key],int) and unindexed[key]>=0 for key in unindexed) and reason is None; closed=unindexed is None and isinstance(reason,str) and bool(reason); assert counts or closed' "$path"
 end
 
 function assert_user_units
@@ -150,7 +150,7 @@ function publish_intentionally
     or return 1
 
     # Invariant: intentional indexing publishes a newer joint corpus with a complete fresh semantic build.
-    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); baseline=json.load(open(sys.argv[2],encoding="utf-8")); generation=data["refresh"]["corpus_generation"]; build=data["semantic"]["semantic_build"]; assert data["schema_version"]==4 and data["command"]=="index" and data["status"]=="complete"; assert isinstance(generation,int) and generation>baseline["refresh"]["corpus_generation"]; assert isinstance(build,int) and build>baseline["semantic"]["semantic_build"]; assert data["semantic"]["corpus_generation"]==generation and data["semantic"]["fresh"] is True; assert data["semantic"]["completed_units"]==data["semantic"]["total_units"]' "$uat_dir/published-index.json" "$uat_dir/baseline-status.json"
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); baseline=json.load(open(sys.argv[2],encoding="utf-8")); generation=data["refresh"]["corpus_generation"]; build=data["semantic"]["semantic_build"]; assert data["schema_version"]==5 and data["command"]=="index" and data["status"]=="complete"; assert isinstance(generation,int) and generation>baseline["refresh"]["corpus_generation"]; assert isinstance(build,int) and build>baseline["semantic"]["semantic_build"]; assert data["semantic"]["corpus_generation"]==generation and data["semantic"]["fresh"] is True; assert data["semantic"]["completed_units"]==data["semantic"]["total_units"]' "$uat_dir/published-index.json" "$uat_dir/baseline-status.json"
     or return 1
 
     cc-search-chats index --json >$uat_dir/unchanged-index.json 2>$uat_dir/unchanged-index.ndjson
@@ -161,7 +161,7 @@ function publish_intentionally
     or return 1
 
     # Invariant: an unchanged second index is a no-op that retains generation and semantic build identity.
-    python -c 'import json,sys; current=json.load(open(sys.argv[1],encoding="utf-8")); published=json.load(open(sys.argv[2],encoding="utf-8")); assert current["schema_version"]==4 and current["status"]=="complete"; assert current["refresh"]["corpus_generation"]==published["refresh"]["corpus_generation"]; assert current["semantic"]["semantic_build"]==published["semantic"]["semantic_build"]; assert current["semantic"]["corpus_generation"]==published["semantic"]["corpus_generation"]' "$uat_dir/unchanged-index.json" "$uat_dir/published-index.json"
+    python -c 'import json,sys; current=json.load(open(sys.argv[1],encoding="utf-8")); published=json.load(open(sys.argv[2],encoding="utf-8")); assert current["schema_version"]==5 and current["status"]=="complete"; assert current["refresh"]["corpus_generation"]==published["refresh"]["corpus_generation"]; assert current["semantic"]["semantic_build"]==published["semantic"]["semantic_build"]; assert current["semantic"]["corpus_generation"]==published["semantic"]["corpus_generation"]' "$uat_dir/unchanged-index.json" "$uat_dir/published-index.json"
     or return 1
 
     cc-search-chats index --status --json >$uat_dir/post-index-status.json 2>$uat_dir/post-index-status.ndjson
@@ -192,7 +192,7 @@ function run_case --argument-names label provider expected_root session query co
     or return 1
 
     # Invariant: literal mode finds the expected native control and search does not publish a new selected pair.
-    set -l locator (python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); prior=json.load(open(sys.argv[2],encoding="utf-8")); provider=sys.argv[3]; session=sys.argv[4]; query=sys.argv[5]; assert data["schema_version"]==4 and data["status"]=="complete"; assert data["mode"]=="literal" and data["retrieval_mode"]=="literal"; matches=[result for result in data["results"] if result["identity"]["provider"]==provider and result["identity"]["source_session_id"]==session and query in result["text"]]; assert matches; assert data["refresh"]["corpus_generation"]==prior["refresh"]["corpus_generation"]; assert data["semantic"]["semantic_build"]==prior["semantic"]["semantic_build"]; print(matches[0]["identity"]["canonical_locator"])' "$literal" "$uat_dir/post-index-status.json" "$provider" "$session" "$query")
+    set -l locator (python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); prior=json.load(open(sys.argv[2],encoding="utf-8")); provider=sys.argv[3]; session=sys.argv[4]; query=sys.argv[5]; assert data["schema_version"]==5 and data["status"]=="complete"; assert data["mode"]=="literal" and data["retrieval_mode"]=="literal"; matches=[result for result in data["results"] if result["identity"]["provider"]==provider and result["identity"]["source_session_id"]==session and query in result["text"]]; assert matches; assert data["refresh"]["corpus_generation"]==prior["refresh"]["corpus_generation"]; assert data["semantic"]["semantic_build"]==prior["semantic"]["semantic_build"]; print(matches[0]["identity"]["canonical_locator"])' "$literal" "$uat_dir/post-index-status.json" "$provider" "$session" "$query")
     or return 1
 
     set -l resolved "$uat_dir/$label.resolve.json"
@@ -205,7 +205,7 @@ function run_case --argument-names label provider expected_root session query co
     or return 1
 
     # Invariant: exact reference-only resolution preserves identity and aliases while omitting message bodies.
-    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; assert data["schema_version"]==4 and data["status"]=="resolved" and data["messages"]; matches=[message for message in data["messages"] if message["identity"]["canonical_locator"]==locator]; assert matches; assert all("text" not in message and message["identity"]["physical_aliases"] for message in matches)' "$resolved" "$locator"
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; assert data["schema_version"]==5 and data["status"]=="resolved" and data["messages"]; matches=[message for message in data["messages"] if message["identity"]["canonical_locator"]==locator]; assert matches; assert all("text" not in message and message["identity"]["physical_aliases"] for message in matches)' "$resolved" "$locator"
     or return 1
 
     psql service=cc_search_chats -v ON_ERROR_STOP=1 -v locator="$locator" -At -c "SELECT DISTINCT root.resolved_path FROM cc_search_chats.message_current AS message JOIN cc_search_chats.physical_alias_current AS alias USING (provider, source_session_id, logical_message_id, content_class) JOIN cc_search_chats.source_root_current AS root USING (source_root_id) WHERE message.canonical_locator = :'locator' ORDER BY root.resolved_path" >$uat_dir/$label.provenance-roots.txt
@@ -227,7 +227,7 @@ function run_case --argument-names label provider expected_root session query co
     or return 1
 
     # Invariant: semantic mode has no deadline, returns hybrid RRF evidence, and the first semantic call after index is cold.
-    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; cold=sys.argv[3]=="cold"; timing=data["semantic"]; assert data["schema_version"]==4 and data["status"]=="complete" and data["deadline_ms"] is None; assert data["mode"]=="semantic" and data["retrieval_mode"]=="hybrid"; matches=[result for result in data["results"] if result["identity"]["canonical_locator"]==locator]; assert matches; ranking=matches[0]["ranking"]; assert ranking["method"]=="rrf" and ranking["semantic_rank"] is not None and ranking["semantic_chunk_ordinal"] is not None; assert all(warning["code"]!="semantic_search_degraded" for warning in data["warnings"]); assert (not cold) or (timing["warm_reused"] is False and isinstance(timing["model_load_ms"],int) and timing["model_load_ms"]>0)' "$semantic" "$locator" "$cold_check"
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; cold=sys.argv[3]=="cold"; timing=data["semantic"]; assert data["schema_version"]==5 and data["status"]=="complete" and data["deadline_ms"] is None; assert data["mode"]=="semantic" and data["retrieval_mode"]=="hybrid"; matches=[result for result in data["results"] if result["identity"]["canonical_locator"]==locator]; assert matches; ranking=matches[0]["ranking"]; assert ranking["method"]=="rrf" and ranking["semantic_rank"] is not None and ranking["semantic_chunk_ordinal"] is not None; assert all(warning["code"]!="semantic_search_degraded" for warning in data["warnings"]); assert (not cold) or (timing["warm_reused"] is False and isinstance(timing["model_load_ms"],int) and timing["model_load_ms"]>0)' "$semantic" "$locator" "$cold_check"
     or return 1
 
     if test "$cold_check" = cold
@@ -245,7 +245,7 @@ function run_case --argument-names label provider expected_root session query co
         or return 1
 
         # Invariant: the immediate second semantic call starts inside thirty seconds and reuses the warm model without loading it again.
-        python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; gap_ms=(int(sys.argv[4])-int(sys.argv[3]))/1000000; timing=data["semantic"]; assert gap_ms<30000; assert data["schema_version"]==4 and data["status"]=="complete" and data["deadline_ms"] is None; assert data["mode"]=="semantic" and data["retrieval_mode"]=="hybrid"; assert timing["warm_reused"] is True and timing["model_load_ms"]==0; assert any(result["identity"]["canonical_locator"]==locator for result in data["results"])' "$warm_semantic" "$locator" "$cold_finished" "$warm_started"
+        python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); locator=sys.argv[2]; gap_ms=(int(sys.argv[4])-int(sys.argv[3]))/1000000; timing=data["semantic"]; assert gap_ms<30000; assert data["schema_version"]==5 and data["status"]=="complete" and data["deadline_ms"] is None; assert data["mode"]=="semantic" and data["retrieval_mode"]=="hybrid"; assert timing["warm_reused"] is True and timing["model_load_ms"]==0; assert any(result["identity"]["canonical_locator"]==locator for result in data["results"])' "$warm_semantic" "$locator" "$cold_finished" "$warm_started"
         or return 1
     end
 
@@ -261,7 +261,7 @@ function probe_exhaustive
     or return 1
 
     # Invariant: exhaustive literal mode is unbounded, includes tools, and still contains the Claude control.
-    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); query=sys.argv[2]; assert data["schema_version"]==4 and data["status"]=="complete"; assert data["mode"]=="literal" and data["retrieval_mode"]=="exhaustive_literal"; assert data["exhaustive"] is True and data["result_limit"] is None and data["deadline_ms"] is None; assert any(query in result["text"] for result in data["results"])' "$uat_dir/claude-exhaustive.json" "$UAT_CLAUDE_STANDARD_QUERY"
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); query=sys.argv[2]; assert data["schema_version"]==5 and data["status"]=="complete"; assert data["mode"]=="literal" and data["retrieval_mode"]=="exhaustive_literal"; assert data["exhaustive"] is True and data["result_limit"] is None and data["deadline_ms"] is None; assert any(query in result["text"] for result in data["results"])' "$uat_dir/claude-exhaustive.json" "$UAT_CLAUDE_STANDARD_QUERY"
 end
 
 function probe_events --argument-names from_utc
@@ -275,7 +275,7 @@ function probe_events --argument-names from_utc
     or return 1
 
     # Invariant: the published generation exports all four human controls as content-free canonical events.
-    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); published=json.load(open(sys.argv[2],encoding="utf-8")); expected={("claude",sys.argv[3]),("claude",sys.argv[4]),("codex",sys.argv[5]),("codex",sys.argv[6])}; generation=published["refresh"]["corpus_generation"]; events=data["events"]; keys={"event_id","occurred_at_utc","canonical_locator","provider","source_session_id","session_kind","cwd","repository","submitted_by","retention_status","physical_alias_count","source_corpus_generation"}; assert data["schema_version"]==4 and data["command"]=="events" and data["status"]=="complete"; assert data["window"]=={"from_utc":sys.argv[7],"until_utc":sys.argv[8]}; assert data["source_corpus_generation"]==generation; assert data["population"]["retained"]>=4 and events; assert set(events[0])==keys and "text" not in set(events[0]); assert all(set(event)==keys and event["source_corpus_generation"]==generation for event in events); observed={(event["provider"],event["source_session_id"]) for event in events}; assert expected<=observed' "$uat_dir/events.json" "$uat_dir/published-index.json" "$UAT_CLAUDE_STANDARD_SESSION" "$UAT_CLAUDE_PONYTAIL_SESSION" "$UAT_CODEX_STANDARD_SESSION" "$UAT_CODEX_PONYTAIL_SESSION" "$from_utc" "$until_utc"
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); published=json.load(open(sys.argv[2],encoding="utf-8")); expected={("claude",sys.argv[3]),("claude",sys.argv[4]),("codex",sys.argv[5]),("codex",sys.argv[6])}; generation=published["refresh"]["corpus_generation"]; events=data["events"]; keys={"event_id","occurred_at_utc","canonical_locator","provider","source_session_id","session_kind","cwd","repository","submitted_by","retention_status","physical_alias_count","source_corpus_generation"}; assert data["schema_version"]==5 and data["command"]=="events" and data["status"]=="complete"; assert data["window"]=={"from_utc":sys.argv[7],"until_utc":sys.argv[8]}; assert data["source_corpus_generation"]==generation; assert data["population"]["retained"]>=4 and events; assert set(events[0])==keys and "text" not in set(events[0]); assert all(set(event)==keys and event["source_corpus_generation"]==generation for event in events); observed={(event["provider"],event["source_session_id"]) for event in events}; assert expected<=observed' "$uat_dir/events.json" "$uat_dir/published-index.json" "$UAT_CLAUDE_STANDARD_SESSION" "$UAT_CLAUDE_PONYTAIL_SESSION" "$UAT_CODEX_STANDARD_SESSION" "$UAT_CODEX_PONYTAIL_SESSION" "$from_utc" "$until_utc"
 end
 
 function execute_uat
@@ -286,8 +286,8 @@ function execute_uat
     assert_progress "$uat_dir/index-migrate.stderr.ndjson"
     or return 1
 
-    # Invariant: the separately authorized migration evidence is one schema-v4 index result at ledger version 10.
-    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); assert data["schema_version"]==4 and data["command"]=="index" and data["status"]=="complete"; assert data["applied_schema_version"]==10' "$uat_dir/index-migrate.stdout.json"
+    # Invariant: the separately authorized migration evidence is one schema-v5 index result at ledger version 10.
+    python -c 'import json,sys; data=json.load(open(sys.argv[1],encoding="utf-8")); assert data["schema_version"]==5 and data["command"]=="index" and data["status"]=="complete"; assert data["applied_schema_version"]==10' "$uat_dir/index-migrate.stdout.json"
     or return 1
 
     assert_user_units

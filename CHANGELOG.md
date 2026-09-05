@@ -2,9 +2,16 @@
 
 ## Unreleased
 
+**Changed:**
+- PostgreSQL JSON and NDJSON use schema version 5. Coverage drops the
+  corpus-sized `repositories` and `source_watermarks` lists, adds
+  `repository_count`, and progress events drop `source_watermark`. On a
+  production-scale corpus this shrank a roughly 3.8 MB answer to a few
+  kilobytes. Consumers must require `schema_version: 5`.
+
 **Fixed:**
 - `index` now preflights its bounded systemd user scope before re-exec and
-  returns a schema-v4 `containment_unavailable` answer with a host-approval
+  returns a schema-v5 `containment_unavailable` answer with a host-approval
   remedy instead of losing the CLI envelope when the scope cannot be created.
 
 ## cc-search-chats 2.2.1

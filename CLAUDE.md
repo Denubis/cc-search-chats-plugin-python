@@ -84,16 +84,17 @@ They do not use the operator's production database.
   timezone-aware bounds. It exports canonical human-message timestamps and
   provenance without message bodies, plus positive retained, excluded, and
   unresolved population counts.
-- PostgreSQL JSON stdout uses schema version 4. Every command returns an object
+- PostgreSQL JSON stdout uses schema version 5. Every command returns an object
   with `command`, `status`, `coverage`, `refresh`, `semantic`, `indexed_at`,
-  `corpus_age_ms`, and `warnings`. Search adds `mode`, `retrieval_mode`, and
-  `index_state`; `index --status` adds `index_state`. Public generation
-  identity is `refresh.corpus_generation`; semantic identity is
+  `corpus_age_ms`, and `warnings`. Coverage carries bounded roots plus counts
+  and string diagnostics, with no corpus-sized lists. Search adds `mode`,
+  `retrieval_mode`, and `index_state`; `index --status` adds `index_state`.
+  Public generation identity is `refresh.corpus_generation`; semantic identity is
   `semantic.semantic_build` plus `semantic.corpus_generation`; events use
   `source_corpus_generation`. Semantic searches add
   `semantic.model_load_ms`, `semantic.query_embed_ms`, and
   `semantic.warm_reused`; a reused helper reports zero model-load milliseconds.
-  JSON/non-TTY progress is ordered schema-v4 NDJSON on stderr and ends with one
+  JSON/non-TTY progress is ordered schema-v5 NDJSON on stderr and ends with one
   terminal event; stdout remains one JSON document.
 - Schema migration is explicit `index --migrate` maintenance. Other PostgreSQL
   commands report `maintenance_required` without changing schema.
@@ -123,7 +124,7 @@ locks, or runtime state.
   current rows, incremental refresh, bounded event export, exact resolution,
   and semantic retrieval
 - `src/cc_search_chats/semantic/` — local-only model preflight and embedding
-- `src/cc_search_chats/cli.py` — imperative shell and v4 output/progress contract
+- `src/cc_search_chats/cli.py` — imperative shell and v5 output/progress contract
 - `skills/search-chat/` and `commands/search-chat.md` — agent consumers
 - `docs/architecture/database.md` — data ownership and relational invariants
 - `docs/runbooks/postgresql-index-maintenance.md` — migration, recovery, and

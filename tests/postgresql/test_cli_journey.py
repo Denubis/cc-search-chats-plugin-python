@@ -30,21 +30,22 @@ def _run(
     return stopped.value.code, output
 
 
-def _assert_v4_envelope(
+def _assert_v5_envelope(
     payload: dict[str, object],
     command: str,
     *,
     status: str = "complete",
 ) -> None:
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert payload["command"] == command
     assert payload["status"] == status
     assert isinstance(payload["coverage"], dict)
-    assert set(payload["coverage"]) >= {
+    coverage = cast("dict[str, object]", payload["coverage"])
+    assert set(coverage) >= {
         "configured_root_count",
         "resolved_root_count",
         "roots",
-        "repositories",
+        "repository_count",
         "discovered_files",
         "read_files",
         "indexed_files",
@@ -55,8 +56,12 @@ def _assert_v4_envelope(
         "unreadable_files",
         "unknown_sessions",
         "unrecognized_conversation_records",
-        "source_watermarks",
         "completeness",
+    }
+    assert "repositories" not in coverage
+    assert "source_watermarks" not in coverage
+    assert {key for key, value in coverage.items() if isinstance(value, list)} == {
+        "roots"
     }
     assert isinstance(payload["refresh"], dict)
     refresh = cast("dict[str, object]", payload["refresh"])
@@ -149,7 +154,6 @@ def _progress_events(stderr: str) -> list[dict[str, object]]:
             "owner",
             "corpus_generation",
             "semantic_build",
-            "source_watermark",
             "deadline_ms",
             "retrieval_mode",
             "mode",
@@ -165,6 +169,7 @@ def _progress_events(stderr: str) -> list[dict[str, object]]:
         }
         for event in events
     )
+    assert all("source_watermark" not in event for event in events)
     assert sum(event["event"] == "terminal" for event in events) == 1
     assert events[-1]["event"] == "terminal"
     return events
@@ -300,7 +305,7 @@ def test_postgresql_cli_journey_with_events(
     code, indexed = _run(monkeypatch, capsys, "index", "--json")
     assert code == 0
     indexed_payload = json.loads(indexed.out)
-    _assert_v4_envelope(indexed_payload, "index")
+    _assert_v5_envelope(indexed_payload, "index")
     assert (
         indexed_payload["corpus_generation"]
         == indexed_payload["refresh"]["corpus_generation"]
@@ -325,11 +330,7 @@ def test_postgresql_cli_journey_with_events(
     assert coverage["unreadable_files"] == 0
     assert coverage["unknown_sessions"] == 1
     assert coverage["unrecognized_conversation_records"] == 0
-    assert coverage["repositories"] == [
-        "/synthetic/repository",
-        "/synthetic/unmapped",
-    ]
-    assert len(coverage["source_watermarks"]) == 4
+    assert coverage["repository_count"] == 2
     assert coverage["completeness"] == "complete"
     index_progress = _progress_events(indexed.err)
     assert {event["phase"] for event in index_progress} >= {
@@ -351,7 +352,7 @@ def test_postgresql_cli_journey_with_events(
     code, unchanged = _run(monkeypatch, capsys, "index", "--json")
     assert code == 0
     unchanged_payload = json.loads(unchanged.out)
-    _assert_v4_envelope(unchanged_payload, "index")
+    _assert_v5_envelope(unchanged_payload, "index")
     unchanged_coverage = unchanged_payload["coverage"]
     unchanged_refresh = unchanged_payload["refresh"]
     assert (
@@ -381,7 +382,7 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     status_payload = json.loads(status_output.out)
-    _assert_v4_envelope(status_payload, "index")
+    _assert_v5_envelope(status_payload, "index")
     status_index_state = _assert_index_state(status_payload)
     assert (
         status_index_state["corpus_generation"] == indexed_payload["corpus_generation"]
@@ -444,7 +445,7 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0, json.loads(exported.out)["error"]
     exported_payload = json.loads(exported.out)
-    _assert_v4_envelope(exported_payload, "events")
+    _assert_v5_envelope(exported_payload, "events")
     assert exported_payload["warnings"] == []
     assert exported_payload["window"] == {
         "from_utc": "2026-08-11T00:00:00Z",
@@ -551,7 +552,7 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     stale_payload = json.loads(stale_search.out)
-    _assert_v4_envelope(stale_payload, "search")
+    _assert_v5_envelope(stale_payload, "search")
     assert stale_payload["mode"] == "literal"
     assert stale_payload["results"] == []
     stale_index_state = _assert_index_state(stale_payload)
@@ -730,7 +731,7 @@ def test_postgresql_cli_journey_with_events(
         "--json",
     )
     searched_payload = json.loads(searched.out)
-    _assert_v4_envelope(searched_payload, "search")
+    _assert_v5_envelope(searched_payload, "search")
     result = searched_payload["results"][0]
     assert code == 0
     assert result["provider"] == "codex"
@@ -745,7 +746,7 @@ def test_postgresql_cli_journey_with_events(
     code, resolved_many = _run(monkeypatch, capsys, "resolve", "--stdin", "--json")
     assert code == 3
     resolved_payload = json.loads(resolved_many.out)
-    _assert_v4_envelope(resolved_payload, "resolve", status="partial")
+    _assert_v5_envelope(resolved_payload, "resolve", status="partial")
     resolutions = resolved_payload["resolutions"]
     assert [value["locator"] for value in resolutions] == [
         locator,
@@ -774,7 +775,7 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     exhaustive_payload = json.loads(exhaustive.out)
-    _assert_v4_envelope(exhaustive_payload, "search")
+    _assert_v5_envelope(exhaustive_payload, "search")
     assert exhaustive_payload["exhaustive"] is True
     assert exhaustive_payload["result_limit"] is None
     assert [value["content_class"] for value in exhaustive_payload["results"]] == [
@@ -791,7 +792,7 @@ def test_postgresql_cli_journey_with_events(
         code, output = _run(monkeypatch, capsys, *command)
         assert code == 0
         payload = json.loads(output.out)
-        _assert_v4_envelope(
+        _assert_v5_envelope(
             payload,
             command[0],
             status=("resolved" if command[0] in {"context", "resolve"} else "complete"),
@@ -809,7 +810,7 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     reference_payload = json.loads(reference.out)
-    _assert_v4_envelope(reference_payload, "resolve", status="resolved")
+    _assert_v5_envelope(reference_payload, "resolve", status="resolved")
     assert reference_payload["messages"]
     assert all("text" not in message for message in reference_payload["messages"])
 
@@ -822,7 +823,7 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 2
     malformed_payload = json.loads(malformed.out)
-    _assert_v4_envelope(
+    _assert_v5_envelope(
         malformed_payload,
         "resolve",
         status="malformed_locator",
@@ -841,7 +842,7 @@ def test_postgresql_cli_journey_with_events(
         "--json",
     )
     assert code == 3
-    _assert_v4_envelope(
+    _assert_v5_envelope(
         json.loads(stale.out),
         "resolve",
         status="stale_source",
@@ -911,7 +912,7 @@ def test_extract_requires_provider_when_native_session_ids_collide(
 
     assert code == 3
     payload = json.loads(ambiguous.out)
-    _assert_v4_envelope(payload, "extract", status="multiple_matches")
+    _assert_v5_envelope(payload, "extract", status="multiple_matches")
     assert payload["messages"] == []
     assert payload["matches"] == [
         {"provider": "claude", "source_session_id": "claude-session-primary"},
@@ -929,7 +930,7 @@ def test_extract_requires_provider_when_native_session_ids_collide(
     )
     assert code == 0
     qualified_payload = json.loads(qualified.out)
-    _assert_v4_envelope(qualified_payload, "extract")
+    _assert_v5_envelope(qualified_payload, "extract")
     assert qualified_payload["messages"]
     assert {
         message["identity"]["provider"] for message in qualified_payload["messages"]

@@ -243,11 +243,11 @@ checkpoint.
 
 ## JSON and Progress Contract
 
-The default PostgreSQL surface emits JSON schema version 4. Each `--json`
+The default PostgreSQL surface emits JSON schema version 5. Each `--json`
 command writes one stdout object containing:
 
 - `schema_version`, `command`, and terminal `status`
-- `coverage` with roots, repositories, file counts, diagnostics, and watermarks
+- `coverage` with roots, a repository count, file counts, and diagnostics
 - `refresh.corpus_generation`, `semantic.semantic_build`,
   `semantic.corpus_generation`, and their state/progress fields; semantic
   search also reports `semantic.model_load_ms`, `semantic.query_embed_ms`, and
@@ -283,12 +283,12 @@ messages with retained, excluded, and unresolved authorship counts. The export
 and every event carry `source_corpus_generation`.
 
 Progress never contaminates JSON stdout. JSON or non-TTY execution writes
-ordered schema-v4 NDJSON events to stderr, including periodic heartbeats and
+ordered schema-v5 NDJSON events to stderr, including periodic heartbeats and
 exactly one terminal event. Use `--progress human` for concise terminal text.
 
 A direct `cc-search-chats index` preflights its exact bounded systemd user-scope
 wrapper before re-exec and never indexes uncontained. If that scope cannot be
-created, schema-v4 output reports `status: containment_unavailable`, error code
+created, schema-v5 output reports `status: containment_unavailable`, error code
 `systemd_scope_unavailable`, and exit 9. The remedy is: "You are probably
 blocked by your sandbox: ask the user for permission to run `cc-search-chats
 index` on the host through the configured approval route." The read-only

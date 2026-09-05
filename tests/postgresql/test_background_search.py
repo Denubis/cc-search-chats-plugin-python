@@ -105,8 +105,8 @@ def _run(
     return code, payload
 
 
-def _assert_v4_error_envelope(payload: dict[str, object]) -> None:
-    assert payload["schema_version"] == 4
+def _assert_v5_error_envelope(payload: dict[str, object]) -> None:
+    assert payload["schema_version"] == 5
     refresh = cast("dict[str, object]", payload["refresh"])
     assert refresh["corpus_generation"] is None
     semantic = cast("dict[str, object]", payload["semantic"])
@@ -249,7 +249,7 @@ def test_search_reports_pending_migration_without_creating_schema(
     )
 
     assert code == 6
-    _assert_v4_error_envelope(payload)
+    _assert_v5_error_envelope(payload)
     assert payload["status"] == "maintenance_required"
     error = cast("dict[str, object]", payload["error"])
     assert error["pending_versions"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
@@ -417,7 +417,7 @@ def test_search_deadline_expires_before_connection(
     expired = json.loads(capsys.readouterr().out)
 
     assert stopped.value.code == 7
-    _assert_v4_error_envelope(expired)
+    _assert_v5_error_envelope(expired)
     assert expired["status"] == "deadline_exceeded"
     assert expired["error"]["code"] == "search_deadline_exceeded"
 
@@ -454,7 +454,7 @@ def test_search_read_deadline_expires_while_read_queue_is_locked(
         locked = json.loads(capsys.readouterr().out)
 
     assert stopped.value.code == 7
-    _assert_v4_error_envelope(locked)
+    _assert_v5_error_envelope(locked)
     assert elapsed < 1
     assert locked["status"] == "deadline_exceeded"
     assert locked["error"]["code"] == "search_deadline_exceeded"
