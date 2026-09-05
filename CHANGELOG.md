@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## cc-search-chats 2.3.0
 
 **Changed:**
 - PostgreSQL JSON and NDJSON use schema version 5. Coverage drops the
