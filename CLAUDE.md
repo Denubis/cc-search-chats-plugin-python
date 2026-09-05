@@ -89,6 +89,10 @@ They do not use the operator's production database.
   `corpus_age_ms`, and `warnings`. Coverage carries bounded roots plus counts
   and string diagnostics, with no corpus-sized lists. Search adds `mode`,
   `retrieval_mode`, and `index_state`; `index --status` adds `index_state`.
+  `coverage.completeness` is partial only when refresh state is partial/failed
+  or failed, blocked, or transient source counts are positive. Pending JSONL
+  tails remain complete processing coverage and are reported separately by
+  `coverage.pending_tail_files`, `refresh.pending_bytes`, and `index_state`.
   Public generation identity is `refresh.corpus_generation`; semantic identity is
   `semantic.semantic_build` plus `semantic.corpus_generation`; events use
   `source_corpus_generation`. Semantic searches add

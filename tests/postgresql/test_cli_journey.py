@@ -56,6 +56,7 @@ def _assert_v5_envelope(
         "unreadable_files",
         "unknown_sessions",
         "unrecognized_conversation_records",
+        "pending_tail_files",
         "completeness",
     }
     assert "repositories" not in coverage

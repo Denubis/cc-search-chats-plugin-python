@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+**Changed:**
+- `coverage.completeness` now describes refresh processing outcomes, so an
+  in-flight JSONL tail no longer makes an otherwise successful generation
+  partial. Schema version 5 additively reports affected sources in
+  `coverage.pending_tail_files`; tail bytes remain in `refresh.pending_bytes`
+  and `index_state.unindexed`.
+
 ## cc-search-chats 2.3.0
 
 **Changed:**

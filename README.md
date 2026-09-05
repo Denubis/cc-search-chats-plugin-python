@@ -247,7 +247,13 @@ The default PostgreSQL surface emits JSON schema version 5. Each `--json`
 command writes one stdout object containing:
 
 - `schema_version`, `command`, and terminal `status`
-- `coverage` with roots, a repository count, file counts, and diagnostics
+- `coverage` with roots, a repository count, file counts, and diagnostics;
+  `completeness` describes the selected generation's processing outcome and is
+  partial only for a partial/failed refresh or failed, blocked, or transient
+  source files
+- `coverage.pending_tail_files` and `refresh.pending_bytes`, which report
+  in-flight JSONL tails as staleness that is not searchable yet without making
+  processing coverage partial
 - `refresh.corpus_generation`, `semantic.semantic_build`,
   `semantic.corpus_generation`, and their state/progress fields; semantic
   search also reports `semantic.model_load_ms`, `semantic.query_embed_ms`, and

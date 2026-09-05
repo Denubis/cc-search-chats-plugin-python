@@ -437,6 +437,20 @@ class _ProgressStream:
             refresh=refresh,
             semantic=semantic,
         )
+        pending_tail_files = coverage.get("pending_tail_files")
+        pending_bytes = refresh.get("pending_bytes")
+        if (
+            not self._ndjson
+            and isinstance(pending_tail_files, int)
+            and pending_tail_files > 0
+            and isinstance(pending_bytes, int)
+        ):
+            file_label = "file" if pending_tail_files == 1 else "files"
+            print(
+                f"pending tail: {pending_tail_files} {file_label}, "
+                f"{pending_bytes} bytes not searchable yet",
+                file=self._stderr,
+            )
 
     @property
     def ndjson(self) -> bool:
@@ -488,6 +502,7 @@ def _error_envelope(
             "unreadable_files": 0,
             "unknown_sessions": 0,
             "unrecognized_conversation_records": 0,
+            "pending_tail_files": 0,
             "completeness": "unknown",
         },
         "refresh": {
@@ -841,7 +856,6 @@ def _coverage_completeness(metrics: _RefreshMetrics) -> str:
         or metrics.failed_files
         or metrics.blocked_files
         or metrics.transient_failure_files
-        or metrics.pending_bytes
     )
     return "partial" if incomplete else "complete"
 
@@ -891,6 +905,7 @@ def _postgres_coverage(
         "unreadable_files": metrics.transient_failure_files,
         "unknown_sessions": _postgres_unknown_sessions(connection),
         "unrecognized_conversation_records": unrecognized_records,
+        "pending_tail_files": sum(int(root["pending_files"]) for root in roots),
         "completeness": _coverage_completeness(metrics),
     }
 

@@ -111,10 +111,14 @@ Human search output places the mode line first and the index made/now/age plus
 missing-chat header before results. `index_state.unindexed: null` means the
 bounded scan did not complete; report `unindexed_reason` instead of guessing.
 
-Treat `coverage.completeness != "complete"`, unreadable files, pending bytes,
-unrecognized records, warnings, or stale semantic state as evidence limits—not
-as a clean absence result. An empty result is meaningful only after the searched
-roots, filters, freshness, and positive controls are established.
+Treat `coverage.completeness != "complete"`, unreadable files, unrecognized
+records, warnings, or stale semantic state as evidence limits—not as a clean
+absence result. Coverage is partial only when refresh processing is partial or
+failed, or failed, blocked, or transient source files are positive. Read
+`coverage.pending_tail_files` with `refresh.pending_bytes` as separate in-flight
+staleness evidence even when coverage is complete. An empty result is meaningful
+only after the searched roots, filters, freshness, and positive controls are
+established.
 
 Exact resolution statuses are `resolved`, `no_match`, `multiple_matches`,
 `source_unavailable`, `stale_source`, `stale_index`, `malformed_locator`, and

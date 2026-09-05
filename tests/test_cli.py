@@ -35,9 +35,11 @@ from cc_search_chats import __version__
 from cc_search_chats.cli import (
     _bounded_query_embedding,
     _contain_semantic_index,
+    _coverage_completeness,
     _error_envelope,
     _index_age,
     _ProgressStream,
+    _RefreshMetrics,
     build_parser,
     main,
 )
@@ -441,11 +443,62 @@ def test_error_envelope_uses_bounded_coverage_shape() -> None:
     coverage = envelope["coverage"]
     assert isinstance(coverage, dict)
     assert coverage["repository_count"] == 0
+    assert coverage["pending_tail_files"] == 0
     assert "repositories" not in coverage
     assert "source_watermarks" not in coverage
     assert {key for key, value in coverage.items() if isinstance(value, list)} == {
         "roots"
     }
+
+
+def _complete_refresh_metrics(
+    *,
+    state: str = "complete",
+    failed_files: int = 0,
+    blocked_files: int = 0,
+    transient_failure_files: int = 0,
+    pending_bytes: int = 0,
+) -> _RefreshMetrics:
+    return _RefreshMetrics(
+        corpus_generation=1,
+        run_id=1,
+        state=state,
+        discovered_files=1,
+        changed_files=1,
+        failed_files=failed_files,
+        read_files=1,
+        removed_files=0,
+        advanced_files=0,
+        metadata_checked_files=1,
+        attempted_files=1,
+        attempted_content_bytes=1,
+        blocked_files=blocked_files,
+        transient_failure_files=transient_failure_files,
+        pending_bytes=pending_bytes,
+        skipped_records=0,
+    )
+
+
+def test_coverage_completeness_treats_pending_tail_as_staleness() -> None:
+    metrics = _complete_refresh_metrics(pending_bytes=1)
+
+    assert _coverage_completeness(metrics) == "complete"
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        _complete_refresh_metrics(failed_files=1),
+        _complete_refresh_metrics(blocked_files=1),
+        _complete_refresh_metrics(transient_failure_files=1),
+        _complete_refresh_metrics(state="partial"),
+        _complete_refresh_metrics(state="failed"),
+    ],
+)
+def test_coverage_completeness_preserves_failure_signals(
+    metrics: _RefreshMetrics,
+) -> None:
+    assert _coverage_completeness(metrics) == "partial"
 
 
 def test_progress_events_omit_source_watermark() -> None:

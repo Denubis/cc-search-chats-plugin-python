@@ -52,5 +52,8 @@ and must be described as literal results. Also check `coverage`,
 `semantic.corpus_generation`, `corpus_age_ms`, `warnings`, and terminal
 `status`. For semantic search also read `semantic.model_load_ms`,
 `semantic.query_embed_ms`, `semantic.warm_reused`, and `deadline_ms: null`; an
-empty result is not proof of absence when coverage is partial,
-staleness is unknown, or filters exclude the intended corpus.
+empty result is not proof of absence when coverage is partial, staleness is
+unknown, or filters exclude the intended corpus. Coverage is partial only for a
+partial/failed refresh or positive failed, blocked, or transient source counts;
+`coverage.pending_tail_files` and `refresh.pending_bytes` instead report
+in-flight staleness that is not searchable yet.
