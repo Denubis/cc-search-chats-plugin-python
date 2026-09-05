@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## cc-search-chats 2.3.1
 
 **Changed:**
 - `coverage.completeness` now describes refresh processing outcomes, so an

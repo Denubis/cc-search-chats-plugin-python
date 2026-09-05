@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cc-search-chats"
-version = "2.3.0"
+version = "2.3.1"
 description = "Search and extract Claude Code chat history"
 requires-python = ">=3.14"
 readme = "README.md"
