@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed:**
+- `index` now preflights its bounded systemd user scope before re-exec and
+  returns a schema-v4 `containment_unavailable` answer with a host-approval
+  remedy instead of losing the CLI envelope when the scope cannot be created.
+
 ## cc-search-chats 2.2.1
 
 **Fixed:**

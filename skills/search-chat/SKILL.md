@@ -21,6 +21,10 @@ Claude Code's allowed Bash invocation runs in its ordinary host environment.
 For either provider, report an environmental failure as process-scoped unless a
 host probe established the corresponding host fact.
 
+An `index` answer with `status: containment_unavailable` means the caller's
+process could not create the systemd user scope; ask the user for permission to
+run it on the host rather than retrying in place.
+
 ## Choose the smallest search
 
 ```console

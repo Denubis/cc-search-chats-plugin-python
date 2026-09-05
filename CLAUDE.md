@@ -1,6 +1,6 @@
 # cc-search-chats
 
-Last verified: 2026-09-02
+Last verified: 2026-09-05
 
 ## Purpose
 
@@ -46,7 +46,10 @@ They do not use the operator's production database.
   launches, joins, or waits for index work. `index`, run by a person, an agent,
   or the nightly timer, is the only builder and always publishes literal and
   semantic state together (ADRs 0002 and 0004). Search never migrates or
-  performs maintenance in its own process.
+  performs maintenance in its own process. `index` preflights its systemd user
+  scope before re-exec, reports `containment_unavailable` (exit 9) with a
+  host-route remedy when the scope cannot be created, and never indexes
+  uncontained.
 - `--literal` is exact full-text PostgreSQL search and loads no model or GPU.
   `--semantic` is model-ranked hybrid search that fuses bounded full-text and
   embedding candidates with exact reciprocal-rank-fusion arithmetic. Both modes

@@ -174,6 +174,14 @@ current.
   ordinary history.
 - **Stale exact source:** refresh and repeat exact resolution. Do not substitute
   a ranked match.
+- **Containment unavailable (`containment_unavailable`):** an agent sandbox
+  should ask the user for permission to run `cc-search-chats index` through the
+  configured host route rather than retrying in place. On the host, inspect a
+  broken user session with `systemctl --user status`; verify
+  `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`, and use
+  `loginctl enable-linger` when the operator intends the user manager to persist
+  without a login session. The packaged service sets `CC_SEARCH_CONTAINED=1`
+  and applies its own bounds, so it skips the ad-hoc scope.
 - **Database/storage unavailable:** restore the configured boundary. Do not use
   the legacy local backend or root filesystem as fallback.
 

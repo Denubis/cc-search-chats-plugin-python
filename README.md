@@ -286,6 +286,16 @@ Progress never contaminates JSON stdout. JSON or non-TTY execution writes
 ordered schema-v4 NDJSON events to stderr, including periodic heartbeats and
 exactly one terminal event. Use `--progress human` for concise terminal text.
 
+A direct `cc-search-chats index` preflights its exact bounded systemd user-scope
+wrapper before re-exec and never indexes uncontained. If that scope cannot be
+created, schema-v4 output reports `status: containment_unavailable`, error code
+`systemd_scope_unavailable`, and exit 9. The remedy is: "You are probably
+blocked by your sandbox: ask the user for permission to run `cc-search-chats
+index` on the host through the configured approval route." The read-only
+`cc-search-chats index --status` needs no scope. The packaged service supplies
+`CC_SEARCH_CONTAINED=1` and its own bounds, so it does not create a nested
+scope.
+
 ## Scheduled Maintenance
 
 The distribution includes one low-priority full-index service and its

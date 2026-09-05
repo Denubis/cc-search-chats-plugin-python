@@ -8,6 +8,7 @@ import json
 import os
 import shlex
 import sqlite3
+import subprocess
 import sys
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -132,6 +133,12 @@ _SEARCH_RENDER_RESERVE_SECONDS = 0.1
 _INDEX_STATE_SCAN_BUDGET_SECONDS = (
     _SEARCH_DEADLINE_SECONDS - _SEARCH_RENDER_RESERVE_SECONDS
 )
+_CONTAINMENT_PREFLIGHT_TIMEOUT_SECONDS = 10.0
+_CONTAINMENT_REMEDY = (
+    "You are probably blocked by your sandbox: ask the user for permission to run "
+    "`cc-search-chats index` on the host through the configured approval route. "
+    "Indexing never runs uncontained; `cc-search-chats index --status` needs no scope."
+)
 _LITERAL_MODE_HELP = "exact PostgreSQL full-text search; no model, no GPU"
 _SEMANTIC_MODE_HELP = (
     "model-ranked search: hybrid fusion of full-text and embedding candidates by "
@@ -141,6 +148,19 @@ _SEMANTIC_MODE_HELP = (
 
 class SearchDeadlineExceeded(TimeoutError):
     """The ranked search request no longer has a safe answer budget."""
+
+
+class SystemdScopeUnavailable(RuntimeError):
+    """The index process could not enter its required systemd user scope."""
+
+    def __init__(self, systemd_detail: str) -> None:
+        self.code = "systemd_scope_unavailable"
+        self.phase = "containment"
+        self.systemd_detail = systemd_detail
+        super().__init__(
+            "indexing could not create its systemd user scope from this process: "
+            f"{systemd_detail}"
+        )
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -1285,16 +1305,8 @@ def _append_envelope_warning(
     warnings.append(warning)
 
 
-def _contain_semantic_index(args: argparse.Namespace) -> None:
-    """Re-enter indexing in a host-safe, low-priority systemd scope."""
-    if (
-        args.command != "index"
-        or args.status
-        or os.environ.get("CC_SEARCH_CONTAINED") == "1"
-        or "/run-r" in Path("/proc/self/cgroup").read_text(encoding="utf-8")
-    ):
-        return
-    command = [
+def _containment_command(payload: Sequence[str]) -> list[str]:
+    return [
         "systemd-run",
         "--user",
         "--scope",
@@ -1308,16 +1320,74 @@ def _contain_semantic_index(args: argparse.Namespace) -> None:
         "--property=CPUWeight=25",
         "--property=IOWeight=25",
         "--",
-        "ionice",
-        "--class=idle",
-        *sys.argv,
+        *payload,
     ]
+
+
+def _preflight_failure_detail(stderr: str, returncode: int) -> str:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if lines:
+        return lines[-1]
+    if returncode < 0:
+        return f"systemd-run was terminated by signal {-returncode}"
+    return f"systemd-run exited with status {returncode} without diagnostics"
+
+
+def _preflight_containment(command: Sequence[str]) -> None:
+    separator = command.index("--")
+    preflight = [*command[: separator + 1], "true"]
+    try:
+        result = subprocess.run(
+            preflight,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_CONTAINMENT_PREFLIGHT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise SystemdScopeUnavailable("systemd-run executable was not found") from error
+    except subprocess.TimeoutExpired as error:
+        raise SystemdScopeUnavailable(
+            "systemd-run preflight timed out after "
+            f"{_CONTAINMENT_PREFLIGHT_TIMEOUT_SECONDS:g} seconds"
+        ) from error
+    except OSError as error:
+        raise SystemdScopeUnavailable(
+            f"systemd-run could not be executed: {error}"
+        ) from error
+    if result.returncode != 0:
+        raise SystemdScopeUnavailable(
+            _preflight_failure_detail(result.stderr, result.returncode)
+        )
+
+
+def _contain_semantic_index(args: argparse.Namespace) -> None:
+    """Re-enter indexing in a host-safe, low-priority systemd scope."""
+    if (
+        args.command != "index"
+        or args.status
+        or os.environ.get("CC_SEARCH_CONTAINED") == "1"
+        or "/run-r" in Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    ):
+        return
+    command = _containment_command(
+        [
+            "ionice",
+            "--class=idle",
+            *sys.argv,
+        ]
+    )
+    _preflight_containment(command)
     try:
         os.execvp(command[0], command)
     except OSError as error:
-        raise RuntimeError(
-            "indexing requires a working systemd user session for resource containment"
-        ) from error
+        detail = (
+            "systemd-run executable was not found"
+            if isinstance(error, FileNotFoundError)
+            else f"systemd-run could not be executed: {error}"
+        )
+        raise SystemdScopeUnavailable(detail) from error
 
 
 def _literal_fallback_command(args: argparse.Namespace) -> str:
@@ -2885,6 +2955,21 @@ def _run_postgres_cli(args: argparse.Namespace) -> Never:
     progress_stream = _ProgressStream(args)
     try:
         sys.exit(_dispatch_postgres(args, progress_stream))
+    except SystemdScopeUnavailable as error:
+        _exit_with_error(
+            args,
+            progress_stream,
+            "containment_unavailable",
+            {
+                "code": error.code,
+                "phase": error.phase,
+                "message": str(error),
+                "remedy": _CONTAINMENT_REMEDY,
+                "systemd_detail": error.systemd_detail,
+            },
+            9,
+            human_message=f"{error}\n{_CONTAINMENT_REMEDY}",
+        )
     except (ReadDeadlineExceeded, SearchDeadlineExceeded) as error:
         _exit_with_error(
             args,

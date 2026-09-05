@@ -10,7 +10,10 @@ allowed-tools: ["Bash(cc-search-chats:*)"]
 Use `cc-search-chats --json` and require `schema_version: 4`. In a sandboxed
 caller, request the configured host approval route on the first attempt; do not
 infer host PostgreSQL, D-Bus, CUDA, or model-cache state from a sandbox failure,
-and do not invent connection or cache environment variables.
+and do not invent connection or cache environment variables. An `index` answer
+with `status: containment_unavailable` means the caller's process could not
+create the systemd user scope; ask the user for permission to run it on the host
+rather than retrying in place.
 
 - Topic: `cc-search-chats search "QUERY" --semantic --json`
 - Exact/filter search: `cc-search-chats search "QUERY" --literal --json`

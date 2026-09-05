@@ -15,8 +15,10 @@ import errno
 import fcntl
 import io
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, redirect_stderr, redirect_stdout, suppress
@@ -53,7 +55,6 @@ from cc_search_chats.storage.index import (
 )
 
 if TYPE_CHECKING:
-    import subprocess
     from collections.abc import Generator
 
 # ============================================================
@@ -494,12 +495,204 @@ def test_human_progress_renders_one_live_rate_line(
 # ============================================================
 
 
+def _install_fake_systemd_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    returncode: int = 0,
+    stderr: str = "",
+    sleep_seconds: float = 0,
+) -> Path:
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    argv_log = tmp_path / "systemd-run-argv.jsonl"
+    executable = fake_bin / "systemd-run"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "\n"
+        'log_path = Path(os.environ["CC_SEARCH_SYSTEMD_RUN_LOG"])\n'
+        'with log_path.open("a", encoding="utf-8") as stream:\n'
+        '    stream.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+        'sleep_seconds = float(os.environ.get("CC_SEARCH_SYSTEMD_RUN_SLEEP", "0"))\n'
+        "if sleep_seconds:\n"
+        "    time.sleep(sleep_seconds)\n"
+        'detail = os.environ.get("CC_SEARCH_SYSTEMD_RUN_STDERR", "")\n'
+        "if detail:\n"
+        "    print(detail, file=sys.stderr)\n"
+        'raise SystemExit(int(os.environ.get("CC_SEARCH_SYSTEMD_RUN_EXIT", "0")))\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(fake_bin))
+    monkeypatch.setenv("CC_SEARCH_SYSTEMD_RUN_LOG", str(argv_log))
+    monkeypatch.setenv("CC_SEARCH_SYSTEMD_RUN_EXIT", str(returncode))
+    monkeypatch.setenv("CC_SEARCH_SYSTEMD_RUN_STDERR", stderr)
+    monkeypatch.setenv("CC_SEARCH_SYSTEMD_RUN_SLEEP", str(sleep_seconds))
+    return argv_log
+
+
+def _systemd_run_invocations(argv_log: Path) -> list[list[str]]:
+    return [
+        json.loads(line) for line in argv_log.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _prepare_postgres_index_main(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
+    monkeypatch.delenv("CC_SEARCH_DB_PATH", raising=False)
+    monkeypatch.delenv("CC_SEARCH_CONTAINED", raising=False)
+    monkeypatch.setenv("PGHOST", "127.0.0.1")
+    monkeypatch.setenv("PGPORT", "1")
+    monkeypatch.setenv("PGSERVICEFILE", "/nonexistent")
+    monkeypatch.setattr(sys, "argv", ["cc-search-chats", "index", *argv])
+    monkeypatch.setattr(
+        cli_module,
+        "_handle_postgres",
+        lambda *_args: pytest.fail("attempted a PostgreSQL operation"),
+    )
+
+
+def test_index_bus_failure_returns_schema_v4_json_containment_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    detail = "Failed to connect to bus: No data available"
+    argv_log = _install_fake_systemd_run(
+        tmp_path,
+        monkeypatch,
+        returncode=1,
+        stderr=detail,
+    )
+    _prepare_postgres_index_main(monkeypatch, "--json")
+    monkeypatch.setattr(
+        os,
+        "execvp",
+        lambda *_args: pytest.fail("attempted exec after failed preflight"),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    assert exit_info.value.code == 9
+    captured = capsys.readouterr()
+    assert captured.out.endswith("\n")
+    assert captured.out.count("\n") == 1
+    envelope = json.loads(captured.out)
+    assert envelope["schema_version"] == 4
+    assert envelope["command"] == "index"
+    assert envelope["status"] == "containment_unavailable"
+    assert envelope["error"]["code"] == "systemd_scope_unavailable"
+    assert envelope["error"]["phase"] == "containment"
+    assert envelope["error"]["systemd_detail"] == detail
+    assert "blocked by your sandbox" in envelope["error"]["remedy"]
+    assert "ask the user for permission" in envelope["error"]["remedy"]
+    progress = [json.loads(line) for line in captured.err.splitlines()]
+    assert progress
+    assert progress[-1]["event"] == "terminal"
+    assert progress[-1]["state"] == envelope["status"]
+    assert _systemd_run_invocations(argv_log) == [
+        [
+            "--user",
+            "--scope",
+            "--quiet",
+            "--setenv=CC_SEARCH_CONTAINED=1",
+            "--nice=10",
+            "--property=MemoryHigh=24G",
+            "--property=MemoryMax=32G",
+            "--property=MemorySwapMax=4G",
+            "--property=TasksMax=256",
+            "--property=CPUWeight=25",
+            "--property=IOWeight=25",
+            "--",
+            "true",
+        ]
+    ]
+
+
+def test_index_bus_failure_in_non_tty_mode_emits_terminal_ndjson_with_remedy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_fake_systemd_run(
+        tmp_path,
+        monkeypatch,
+        returncode=1,
+        stderr="Failed to connect to bus: No data available",
+    )
+    _prepare_postgres_index_main(monkeypatch)
+    monkeypatch.setattr(
+        os,
+        "execvp",
+        lambda *_args: pytest.fail("attempted exec after failed preflight"),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    assert exit_info.value.code == 9
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    progress = [json.loads(line) for line in captured.err.splitlines()]
+    assert progress
+    terminal = progress[-1]
+    assert terminal["event"] == "terminal"
+    assert terminal["state"] == "containment_unavailable"
+    assert terminal["error"]["remedy"] == cli_module._CONTAINMENT_REMEDY
+
+
+def test_index_bus_failure_with_human_progress_prints_done_line_and_remedy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    detail = "Failed to connect to bus: No data available"
+    _install_fake_systemd_run(
+        tmp_path,
+        monkeypatch,
+        returncode=1,
+        stderr=detail,
+    )
+    _prepare_postgres_index_main(monkeypatch, "--progress", "human")
+    monkeypatch.setattr(
+        os,
+        "execvp",
+        lambda *_args: pytest.fail("attempted exec after failed preflight"),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    assert exit_info.value.code == 9
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = cli_module.SystemdScopeUnavailable(detail)
+    expected = (
+        "done: containment_unavailable\n"
+        + str(error)
+        + "\n"
+        + cli_module._CONTAINMENT_REMEDY
+        + "\n"
+    )
+    assert captured.err == expected
+    for line in captured.err.splitlines():
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(line)
+
+
 def test_index_reexecs_inside_bounded_systemd_scope(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    argv_log = _install_fake_systemd_run(tmp_path, monkeypatch)
     args = build_parser().parse_args(["index"])
     monkeypatch.setattr(sys, "argv", ["cc-search-chats", "index"])
-    launched = []
+    launched: list[list[str]] = []
     monkeypatch.setattr(
         "os.execvp", lambda _executable, command: launched.append(command)
     )
@@ -507,6 +700,9 @@ def test_index_reexecs_inside_bounded_systemd_scope(
     _contain_semantic_index(args)
 
     command = launched[0]
+    preflight = ["systemd-run", *_systemd_run_invocations(argv_log)[0]]
+    separator = command.index("--")
+    assert preflight == [*command[: separator + 1], "true"]
     assert command[:3] == ["systemd-run", "--user", "--scope"]
     assert "--setenv=CC_SEARCH_CONTAINED=1" in command
     assert "--nice=10" in command
@@ -514,15 +710,16 @@ def test_index_reexecs_inside_bounded_systemd_scope(
     assert "--property=IOWeight=25" in command
     assert "--property=MemoryMax=32G" in command
     assert "--property=TasksMax=256" in command
-    separator = command.index("--")
     assert command[separator + 1 : separator + 3] == ["ionice", "--class=idle"]
     assert command[separator + 3 :] == ["cc-search-chats", "index"]
     assert "--property=IOSchedulingClass=idle" not in command
 
 
 def test_index_does_not_nest_scope_inside_packaged_service(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    argv_log = _install_fake_systemd_run(tmp_path, monkeypatch)
     args = build_parser().parse_args(["index"])
     monkeypatch.setenv("CC_SEARCH_CONTAINED", "1")
     monkeypatch.setattr(
@@ -531,6 +728,132 @@ def test_index_does_not_nest_scope_inside_packaged_service(
     )
 
     _contain_semantic_index(args)
+
+    assert not argv_log.exists()
+
+
+def test_index_missing_systemd_run_returns_containment_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    _prepare_postgres_index_main(monkeypatch, "--json")
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    assert exit_info.value.code == 9
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["status"] == "containment_unavailable"
+    assert envelope["error"]["code"] == "systemd_scope_unavailable"
+    assert envelope["error"]["systemd_detail"] == (
+        "systemd-run executable was not found"
+    )
+
+
+def test_index_systemd_scope_preflight_timeout_returns_containment_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_fake_systemd_run(tmp_path, monkeypatch, sleep_seconds=0.2)
+    _prepare_postgres_index_main(monkeypatch, "--json")
+    monkeypatch.setattr(
+        cli_module,
+        "_CONTAINMENT_PREFLIGHT_TIMEOUT_SECONDS",
+        0.01,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        os,
+        "execvp",
+        lambda *_args: pytest.fail("attempted exec after timed-out preflight"),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    assert exit_info.value.code == 9
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["status"] == "containment_unavailable"
+    assert envelope["error"]["code"] == "systemd_scope_unavailable"
+    assert "timed out" in envelope["error"]["systemd_detail"]
+
+
+def test_index_silent_systemd_scope_failure_reports_exact_exit_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_fake_systemd_run(tmp_path, monkeypatch, returncode=3)
+    _prepare_postgres_index_main(monkeypatch, "--json")
+    monkeypatch.setattr(
+        os,
+        "execvp",
+        lambda *_args: pytest.fail("attempted exec after failed preflight"),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    assert exit_info.value.code == 9
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["error"]["systemd_detail"] == (
+        "systemd-run exited with status 3 without diagnostics"
+    )
+
+
+def test_index_process_boundary_reports_containment_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detail = "Failed to connect to bus: No data available"
+    _install_fake_systemd_run(
+        tmp_path,
+        monkeypatch,
+        returncode=1,
+        stderr=detail,
+    )
+    environment = os.environ.copy()
+    environment.pop("CC_SEARCH_DB_PATH", None)
+    environment.pop("CC_SEARCH_CONTAINED", None)
+    environment.update(
+        {
+            "PGHOST": "127.0.0.1",
+            "PGPORT": "1",
+            "PGSERVICEFILE": "/nonexistent",
+        }
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from cc_search_chats.bootstrap import main; main()",
+            "index",
+            "--json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=5,
+    )
+
+    assert result.returncode == 9
+    envelope = json.loads(result.stdout)
+    assert envelope["schema_version"] == 4
+    assert envelope["command"] == "index"
+    assert envelope["status"] == "containment_unavailable"
+    assert envelope["error"]["code"] == "systemd_scope_unavailable"
+    assert envelope["error"]["phase"] == "containment"
+    assert envelope["error"]["systemd_detail"] == detail
+    progress = [json.loads(line) for line in result.stderr.splitlines()]
+    assert progress[-1]["event"] == "terminal"
+    assert progress[-1]["state"] == "containment_unavailable"
 
 
 def test_client_admission_blocks_once_until_release(
