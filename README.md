@@ -2,7 +2,7 @@
 
 Search and recover context from native Claude Code and Codex chat history.
 
-Current release: cc-search-chats 2.3.2
+Current release: cc-search-chats 2.3.3
 
 The CLI reads vendor JSONL session logs without modifying them, maintains a
 normalized PostgreSQL search projection, and supports PostgreSQL full-text

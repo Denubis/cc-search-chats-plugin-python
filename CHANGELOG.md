@@ -1,5 +1,18 @@
 # Changelog
 
+## cc-search-chats 2.3.3
+
+**Fixed:**
+- Codex token-usage records and legacy ghost snapshots are recognized as
+  non-searchable metadata, allowing surrounding conversation to be indexed.
+  Additional metadata fields remain excluded; malformed or unrecognized
+  shapes still fail closed.
+- Legacy Codex image blocks without a `detail` field and interruption events
+  without a turn ID remain excluded without blocking their conversations.
+- The Codex parser-state version advances so the next index retries previously
+  blocked files even when their native bytes have not changed. Existing
+  embeddings are reused for unchanged conversation text.
+
 ## cc-search-chats 2.3.2
 
 **New:**
