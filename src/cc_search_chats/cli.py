@@ -1099,7 +1099,7 @@ def _print_index_state_header(envelope: Mapping[str, object]) -> None:
 def _print_human_search(
     args: argparse.Namespace,
     envelope: Mapping[str, object],
-    warnings: Sequence[Mapping[str, str]],
+    warnings: Sequence[Mapping[str, object]],
     results: Sequence[Mapping[str, object]],
 ) -> None:
     print(
@@ -1269,7 +1269,7 @@ def _unresolved_search_results(
 
 def _append_envelope_warning(
     envelope: Mapping[str, object],
-    warning: Mapping[str, str],
+    warning: Mapping[str, object],
 ) -> None:
     warnings = envelope["warnings"]
     if not isinstance(warnings, list):
@@ -1383,6 +1383,29 @@ def _literal_fallback_command(args: argparse.Namespace) -> str:
             if value is not None:
                 command.extend((flag, str(value)))
     return shlex.join(command)
+
+
+def _model_resource_diagnostics(error: ModelUnavailable) -> dict[str, object]:
+    return {
+        "available_vram_bytes": error.available_vram_bytes,
+        "required_vram_bytes": error.required_vram_bytes,
+        "total_vram_bytes": error.total_vram_bytes,
+        "gpu_processes": (
+            None
+            if error.gpu_processes is None
+            else [
+                {
+                    "gpu_uuid": process.gpu_uuid,
+                    "pid": process.pid,
+                    "process_name": process.process_name,
+                    "used_memory_mib": process.used_memory_mib,
+                    "current_process": process.current_process,
+                }
+                for process in error.gpu_processes
+            ]
+        ),
+        "gpu_processes_unavailable_reason": (error.gpu_processes_unavailable_reason),
+    }
 
 
 @dataclass(frozen=True)
@@ -1877,7 +1900,7 @@ class _SearchState:
     component_depth: int
     retrieval_mode: str
     hybrid_rankings: dict[str, HybridHit]
-    warnings: list[dict[str, str]]
+    warnings: list[dict[str, object]]
     model_load_ms: int | None = None
     query_embed_ms: int | None = None
     warm_reused: bool | None = None
@@ -1954,7 +1977,7 @@ def _literal_search_state(context: _PostgresContext) -> _SearchState:
 
 def _append_revision_warning(
     connection: psycopg.Connection,
-    warnings: list[dict[str, str]],
+    warnings: list[dict[str, object]],
 ) -> None:
     revision_warning = verify_model_revision(
         connection,
@@ -1991,12 +2014,13 @@ def _semantic_search_state(
             )
     except (ModelUnavailable, RuntimeError, TypeError, ValueError) as error:
         state.retrieval_mode = "literal_fallback"
-        state.warnings.append(
-            {
-                "code": "semantic_search_degraded",
-                "detail": f"{type(error).__name__}: {error}",
-            }
-        )
+        warning: dict[str, object] = {
+            "code": "semantic_search_degraded",
+            "detail": f"{type(error).__name__}: {error}",
+        }
+        if isinstance(error, ModelUnavailable):
+            warning.update(_model_resource_diagnostics(error))
+        state.warnings.append(warning)
         context.progress_stream.emit(
             "query_embed",
             "degraded",
@@ -2105,7 +2129,7 @@ def _resolve_or_degrade_search(
     ) as error:
         if answer_deadline is None:
             raise
-        deadline_warning = {
+        deadline_warning: dict[str, object] = {
             "code": "deadline_degraded",
             "detail": f"{type(error).__name__}: {error}",
         }
@@ -2976,9 +3000,7 @@ def _run_postgres_cli(args: argparse.Namespace) -> Never:
                 "code": error.code,
                 "phase": error.phase,
                 "message": str(error),
-                "available_vram_bytes": error.available_vram_bytes,
-                "required_vram_bytes": error.required_vram_bytes,
-                "total_vram_bytes": error.total_vram_bytes,
+                **_model_resource_diagnostics(error),
                 "literal_requirement": (
                     "Literal search is required for complete current results"
                 ),

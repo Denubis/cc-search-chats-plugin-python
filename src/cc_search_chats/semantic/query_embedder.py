@@ -21,6 +21,7 @@ from cc_search_chats import __version__
 from cc_search_chats.queueing import _runtime_dir
 from cc_search_chats.semantic.model import (
     DIMENSIONS,
+    GpuProcess,
     ModelUnavailable,
     embed_query,
     local_model_revision,
@@ -143,6 +144,21 @@ def _model_unavailable(error: ModelUnavailable) -> dict[str, object]:
         "code": error.code,
         "phase": error.phase,
         "available_vram_bytes": error.available_vram_bytes,
+        "gpu_processes": (
+            None
+            if error.gpu_processes is None
+            else [
+                {
+                    "gpu_uuid": process.gpu_uuid,
+                    "pid": process.pid,
+                    "process_name": process.process_name,
+                    "used_memory_mib": process.used_memory_mib,
+                    "current_process": process.current_process,
+                }
+                for process in error.gpu_processes
+            ]
+        ),
+        "gpu_processes_unavailable_reason": (error.gpu_processes_unavailable_reason),
         "required_vram_bytes": error.required_vram_bytes,
         "total_vram_bytes": error.total_vram_bytes,
     }
@@ -769,6 +785,60 @@ def _optional_vram_bytes(value: object, field: str) -> int | None:
     raise TypeError(f"query embedder returned malformed {field}")
 
 
+def _required_string(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise TypeError(f"query embedder returned malformed {field}")
+    return value
+
+
+def _positive_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise TypeError(f"query embedder returned malformed {field}")
+    return value
+
+
+def _optional_nonnegative_int(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TypeError(f"query embedder returned malformed {field}")
+    return value
+
+
+def _required_bool(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"query embedder returned malformed {field}")
+    return value
+
+
+def _gpu_process(value: object) -> GpuProcess:
+    if not isinstance(value, Mapping):
+        raise TypeError("query embedder returned malformed gpu_processes entry")
+    return GpuProcess(
+        gpu_uuid=_required_string(value.get("gpu_uuid"), "gpu_uuid"),
+        pid=_positive_int(value.get("pid"), "gpu process pid"),
+        process_name=_required_string(value.get("process_name"), "gpu process name"),
+        used_memory_mib=_optional_nonnegative_int(
+            value.get("used_memory_mib"), "used_memory_mib"
+        ),
+        current_process=_required_bool(value.get("current_process"), "current_process"),
+    )
+
+
+def _gpu_processes(value: object) -> tuple[GpuProcess, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise TypeError("query embedder returned malformed gpu_processes")
+    return tuple(_gpu_process(item) for item in value)
+
+
+def _optional_string(value: object, field: str) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    raise TypeError(f"query embedder returned malformed {field}")
+
+
 def _embedding_result(response: Mapping[str, object]) -> QueryEmbeddingResult:
     kind = response.get("kind")
     if kind == "model_unavailable":
@@ -778,6 +848,11 @@ def _embedding_result(response: Mapping[str, object]) -> QueryEmbeddingResult:
             phase=str(response.get("phase", "query_embed")),
             available_vram_bytes=_optional_vram_bytes(
                 response.get("available_vram_bytes"), "available_vram_bytes"
+            ),
+            gpu_processes=_gpu_processes(response.get("gpu_processes")),
+            gpu_processes_unavailable_reason=_optional_string(
+                response.get("gpu_processes_unavailable_reason"),
+                "gpu_processes_unavailable_reason",
             ),
             required_vram_bytes=_optional_vram_bytes(
                 response.get("required_vram_bytes"), "required_vram_bytes"

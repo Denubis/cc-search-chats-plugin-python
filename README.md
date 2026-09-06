@@ -2,7 +2,7 @@
 
 Search and recover context from native Claude Code and Codex chat history.
 
-Current release: cc-search-chats 2.3.1
+Current release: cc-search-chats 2.3.2
 
 The CLI reads vendor JSONL session logs without modifying them, maintains a
 normalized PostgreSQL search projection, and supports PostgreSQL full-text
@@ -16,80 +16,21 @@ The plugin supplies the agent workflow; it invokes an independently installed
 `cc-search-chats` executable. Python 3.14+, PostgreSQL 18, and pgvector are
 required.
 
-Install the CLI with the semantic extra for hybrid search:
-
-```console
-uv tool install \
-  'cc-search-chats[semantic] @ git+https://github.com/Denubis/cc-search-chats-plugin-python@main'
-```
-
-For PostgreSQL full-text search without semantic dependencies:
-
-```console
-uv tool install \
-  'cc-search-chats @ git+https://github.com/Denubis/cc-search-chats-plugin-python@main'
-```
-
-Pin a commit instead of `main` when reproducible installation matters. Verify
-the executable before installing either plugin:
-
-```console
-cc-search-chats --version
-cc-search-chats --help
-```
-
-Claude Code plugin:
-
-```text
-/plugin marketplace add Denubis/cc-search-chats-plugin-python
-/plugin install cc-search-chats@cc-search-chats-marketplace
-```
-
-Codex plugin:
-
-```console
-codex plugin marketplace add Denubis/cc-search-chats-plugin-python --ref main
-codex plugin add cc-search-chats@cc-search-chats-marketplace
-```
-
-Start a new agent session after installing or updating a plugin.
+For a complete laptop deployment, follow the tracked
+[laptop deployment runbook](docs/runbooks/laptop-deployment.md). It has separate
+paths for a clean projection rebuild and a preserving upgrade. Both install the
+semantic-capable CLI from an exact accepted Git commit, prove the installed
+provenance, configure PostgreSQL, install the Codex host-routing rule and both
+plugins, and activate scheduled maintenance only after positive smoke checks.
 
 ## PostgreSQL Setup
 
-The default connection is libpq service `cc_search_chats`. PostgreSQL and
-pgvector must already exist; the application creates only its own schema.
-Provision the role/database once as a PostgreSQL administrator:
-
-```sql
-CREATE ROLE cc_search_chats_owner LOGIN;
-GRANT SET ON PARAMETER temp_file_limit TO cc_search_chats_owner;
-\password cc_search_chats_owner
-CREATE DATABASE cc_search_chats OWNER cc_search_chats_owner;
-\connect cc_search_chats
-CREATE EXTENSION vector;
-```
-
-Configure `~/.pg_service.conf`:
-
-```ini
-[cc_search_chats]
-host=127.0.0.1
-port=5432
-dbname=cc_search_chats
-user=cc_search_chats_owner
-```
-
-Put the password in `~/.pgpass` with mode `0600`, not in the systemd unit:
-
-```text
-127.0.0.1:5432:cc_search_chats:cc_search_chats_owner:YOUR_PASSWORD
-```
-
-Large deployments should provision the database's default and temporary
-tablespaces on operator-managed external storage before the first migration.
-The CLI does not create a database, extension, tablespace, mount, or fallback
-storage location. See
-[`docs/runbooks/postgresql-index-maintenance.md`](docs/runbooks/postgresql-index-maintenance.md).
+The default connection is libpq service `cc_search_chats`. The application
+creates only its schema objects; database, role, pgvector, credentials,
+tablespaces, mounts, backup, and reset decisions belong to the operator. The
+laptop runbook owns their deployment order, while the
+[PostgreSQL maintenance runbook](docs/runbooks/postgresql-index-maintenance.md)
+owns database-specific migration, recovery, and pruning checks.
 
 ## Semantic Runtime
 
@@ -120,10 +61,9 @@ cannot run.
 
 ## Quick Start
 
-```console
-# Explicit schema maintenance before using a newly installed schema version
-cc-search-chats index --migrate --json
+After completing the deployment runbook:
 
+```console
 # Model-ranked hybrid natural-language search over the committed snapshot
 cc-search-chats search "database migration" --semantic
 
@@ -163,9 +103,9 @@ states whether it loaded or reused the warm model. JSON names `mode`, delivered
 `indexed_at`, `corpus_age_ms`, and the mode-specific deadline. Run
 `cc-search-chats index` intentionally when the selected corpus is too old.
 
-`index --migrate` is the only CLI path that applies pending schema migrations.
-Search and routine index/status commands report `maintenance_required` without
-DDL until the operator runs that explicit action.
+Search and routine index/status commands never apply schema changes. A
+`maintenance_required` result routes the operator back to the deployment and
+PostgreSQL runbooks rather than authorizing an inline repair.
 
 ## Search Scope
 
@@ -272,7 +212,11 @@ command writes one stdout object containing:
 
 A semantic request that cannot complete model ranking returns literal results
 with `retrieval_mode: literal_fallback` and a `semantic_search_degraded` warning.
-Human output prints an equally explicit warning before those results.
+On a VRAM allocation failure, that warning includes the process-scoped
+`gpu_processes` snapshot: GPU UUID, PID, executable name, used MiB, and whether
+the row is the failing helper itself. If the installed `nvidia-smi` probe
+cannot run, `gpu_processes_unavailable_reason` says why. Human output prints
+the same consumer list before the literal results.
 
 Search/extract/context/resolve messages carry provider-qualified canonical
 identity plus verified physical source coordinates. Exact resolution statuses
@@ -304,32 +248,12 @@ scope.
 
 ## Scheduled Maintenance
 
-The distribution includes one low-priority full-index service and its
-persistent nightly timer. Copy both packaged units to
-`~/.config/systemd/user/`. Optional operator configuration belongs in
-`~/.config/cc-search-chats/index.env`, which the service reads if present. For
-example:
-
-```text
-CC_SEARCH_CLAUDE_ROOTS=/home/USER/.claude/projects:/home/USER/.claude-ponytail/projects
-CC_SEARCH_CODEX_ROOTS=/home/USER/.codex/sessions:/home/USER/.codex-ponytail/sessions
-```
-
-Keep libpq credentials in `.pgpass` and cache configuration in the operator's
-existing environment. The packaged unit supplies neither.
-
-```console
-systemctl --user daemon-reload
-systemctl --user enable --now cc-search-chats-index.timer
-```
-
-The timer runs the same intentional `cc-search-chats index` build nightly at
-03:00 with up to 30 minutes randomized delay. Keep it enabled through migration
-and UAT, and confirm that its next activation falls outside the planned UAT
-window. A person or agent may run that command directly when a newer corpus is
-required. Search never starts it, and no resident daemon is required. The query
-embedder is separate from systemd: the first semantic search starts it ad hoc,
-and it exits after the configured idle warm window.
+The distribution includes one low-priority full-index service and persistent
+nightly timer. The [laptop deployment
+runbook](docs/runbooks/laptop-deployment.md#install-scheduled-maintenance) owns
+installation, executable-path verification, activation order, and optional
+source-root configuration. Search never starts the service. The query embedder
+is an independent ad hoc process that exits after its idle warm window.
 
 ## Recovery and Release Boundaries
 
@@ -338,7 +262,9 @@ checksummed; their bytes are immutable. Legacy full-snapshot relations remain
 quarantined through migration and positive four-corpus UAT. Pruning them is a
 separate human-authorized operation requiring a matching fresh dry-run,
 accepted exact-commit validation, complete current semantic join, and repeated
-post-prune checks. See the maintenance runbook and
+post-prune checks. Deployment and upgrade sequencing lives in the
+[laptop deployment runbook](docs/runbooks/laptop-deployment.md); see also the
+maintenance runbook and
 [`docs/uat/cross-vendor-search-wip.md`](docs/uat/cross-vendor-search-wip.md).
 
 Message attribution, receipt correlation, rendered archives, summaries, and

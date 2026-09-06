@@ -7,6 +7,10 @@ Ponytail Claude/Codex native sessions. It does not authorize installation,
 production migration, or prune. Append actual results only after the human
 authorizes and performs UAT.
 
+The canonical installation and upgrade order is the [laptop deployment
+runbook](../runbooks/laptop-deployment.md). This document owns only installed
+acceptance behavior and its evidence.
+
 Semantic search has no answer deadline. This UAT requires one cold hybrid result,
 an immediate warm-helper reuse, and hybrid results for all four vendor/root
 controls; a `literal_fallback` is a rejection of the candidate, not a pass.
@@ -63,6 +67,7 @@ set -x UAT_EXPECTED_BLOCKED_SOURCES 'REPLACE REVIEWED BASELINE COUNT'
 set -x UAT_EXPECTED_SKIPPED_RECORDS 'REPLACE REVIEWED BASELINE COUNT'
 set -x UAT_MIGRATION_JSON '/REPLACE/WITH/index-migrate.stdout.json'
 set -x UAT_MIGRATION_NDJSON '/REPLACE/WITH/index-migrate.stderr.ndjson'
+set -x UAT_EVIDENCE_ROOT "$HOME/.local/state/cc-search-chats/uat"
 ```
 
 The explicit plural roots are part of the test. They include only session
@@ -73,10 +78,14 @@ directories; they do not point at either isolated home.
 Machine-readable invocations keep stdout JSON and stderr NDJSON separate. The
 script retains those artifacts, the user-unit and timer observations, two human
 staleness displays, the provenance rows, query-helper lifecycle evidence, and a
-locator ledger in one evidence directory.
+locator ledger in one evidence directory. That directory contains returned chat
+text and operational metadata: keep it private and remove it when its accepted
+evidence-retention period ends.
 
 ```fish
-set -g uat_dir (mktemp -d)
+install -d -m 700 "$UAT_EVIDENCE_ROOT"
+or exit 1
+set -g uat_dir (mktemp -d "$UAT_EVIDENCE_ROOT/uat-XXXXXXXX")
 or exit 1
 
 function assert_progress --argument-names path
@@ -352,11 +361,15 @@ function execute_uat
     if set -q CC_SEARCH_RUNTIME_DIR
         set helper_runtime "$CC_SEARCH_RUNTIME_DIR"
     end
-    ps -u (id -u) -o pid=,args= >$uat_dir/final-user-processes.txt
-    or return 1
+    set -l helper_count (pgrep -c -u (id -u) -f -- 'cc_search_chats\.semantic\.query_embedder')
+    set -l helper_probe_status $status
+    if test $helper_probe_status -gt 1
+        return 1
+    end
+    printf '%s\n' "$helper_count" >$uat_dir/final-query-embedder-count.txt
 
-    # Invariant: sixty seconds after the final semantic call, no helper process or socket remains and its lifetime lock is acquirable.
-    python -c 'import fcntl,sys; from pathlib import Path; processes=Path(sys.argv[1]).read_text(encoding="utf-8"); rows=[line.split(None,2) for line in processes.splitlines() if line.strip()]; helpers=[row for row in rows if len(row)==3 and Path(row[1]).name.startswith("python") and " -m cc_search_chats.semantic.query_embedder" in row[2]]; socket_path=Path(sys.argv[2]); lock_path=Path(sys.argv[3]); assert processes.strip() and not helpers; assert not socket_path.exists(); lock_path.parent.mkdir(mode=0o700,parents=True,exist_ok=True); handle=lock_path.open("a+"); fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB); print("query embedder absent; socket absent; lifetime lock acquired")' "$uat_dir/final-user-processes.txt" "$helper_runtime/query-embedder.sock" "$helper_runtime/query-embedder.lock" >$uat_dir/final-query-embedder-state.txt
+    # Invariant: sixty seconds after the final semantic call, the helper count is zero, no socket remains, and its lifetime lock is acquirable. Do not retain unrelated process arguments.
+    python -c 'import fcntl,sys; from pathlib import Path; count=int(Path(sys.argv[1]).read_text(encoding="utf-8")); socket_path=Path(sys.argv[2]); lock_path=Path(sys.argv[3]); assert count==0; assert not socket_path.exists(); lock_path.parent.mkdir(mode=0o700,parents=True,exist_ok=True); handle=lock_path.open("a+"); fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB); print("query embedder absent; socket absent; lifetime lock acquired")' "$uat_dir/final-query-embedder-count.txt" "$helper_runtime/query-embedder.sock" "$helper_runtime/query-embedder.lock" >$uat_dir/final-query-embedder-state.txt
     or return 1
 
     printf 'UAT evidence: %s\n' "$uat_dir"

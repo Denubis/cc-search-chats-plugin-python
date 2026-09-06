@@ -15,6 +15,7 @@ from psycopg.conninfo import conninfo_to_dict
 
 from cc_search_chats.cli import main
 from cc_search_chats.semantic import SemanticChunk, query_embedder
+from cc_search_chats.semantic.model import GpuProcess, ModelUnavailable
 from cc_search_chats.semantic.query_embedder import QueryEmbeddingResult
 from cc_search_chats.storage.postgresql import migrate
 from cc_search_chats.storage.postgresql import search_messages as literal_search
@@ -588,6 +589,50 @@ def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
         warning["code"] != "deadline_degraded"
         for warning in cast("list[dict[str, object]]", degraded_payload["warnings"])
     )
+
+    def gpu_allocation_failure(*_args, **_kwargs):
+        raise ModelUnavailable(
+            "this process could not allocate VRAM",
+            code="vram_unavailable",
+            phase="model_load",
+            gpu_processes=(
+                GpuProcess(
+                    gpu_uuid="GPU-fixture",
+                    pid=7654,
+                    process_name="/opt/breeze-tts/bin/python3",
+                    used_memory_mib=7982,
+                    current_process=False,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(
+        "cc_search_chats.cli._bounded_query_embedding", gpu_allocation_failure
+    )
+    code, gpu_degraded_payload = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "visible assistant",
+        "--semantic",
+        "--json",
+    )
+    assert code == 0
+    gpu_warning = next(
+        warning
+        for warning in cast("list[dict[str, object]]", gpu_degraded_payload["warnings"])
+        if warning["code"] == "semantic_search_degraded"
+    )
+    assert gpu_warning["gpu_processes"] == [
+        {
+            "current_process": False,
+            "gpu_uuid": "GPU-fixture",
+            "pid": 7654,
+            "process_name": "/opt/breeze-tts/bin/python3",
+            "used_memory_mib": 7982,
+        }
+    ]
+    assert gpu_warning["gpu_processes_unavailable_reason"] is None
 
     monkeypatch.setattr("cc_search_chats.cli._bounded_query_embedding", query_embedding)
     monkeypatch.setattr(

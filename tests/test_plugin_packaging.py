@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -17,10 +18,34 @@ CODEX_MARKETPLACE = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 ANTIGRAVITY_MANIFEST = REPO_ROOT / "plugin.json"
 CODEX_RULE = REPO_ROOT / "rules" / "cc-search-chats.rules"
 CODEX_RULE_INSTALLER = REPO_ROOT / "scripts" / "install_codex_rule.py"
-EXPECTED_CLI_VERSION = "2.3.1"
+EXPECTED_CLI_VERSION = "2.3.2"
 SEARCH_SKILL = REPO_ROOT / "skills" / "search-chat" / "SKILL.md"
 SEARCH_COMMAND = REPO_ROOT / "commands" / "search-chat.md"
 SEARCH_UAT = REPO_ROOT / "docs" / "uat" / "cross-vendor-search-wip.md"
+LAPTOP_DEPLOYMENT = REPO_ROOT / "docs" / "runbooks" / "laptop-deployment.md"
+
+EXPECTED_SDIST_ROOTS = {
+    ".agents",
+    ".claude-plugin",
+    ".codex-plugin",
+    ".pre-commit-config.yaml",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "CLAUDE.md",
+    "LICENSE",
+    "README.md",
+    "commands",
+    "complexipy-snapshot.json",
+    "docs",
+    "plugin.json",
+    "pyproject.toml",
+    "rules",
+    "scripts",
+    "skills",
+    "src",
+    "tests",
+    "uv.lock",
+}
 
 
 def test_cli_release_version_is_synchronized() -> None:
@@ -56,6 +81,45 @@ def test_cli_release_version_is_synchronized() -> None:
     assert f"## cc-search-chats {EXPECTED_CLI_VERSION}" in changelog
     assert project["project"]["scripts"]["cc-search-chats"] == (
         "cc_search_chats.bootstrap:main"
+    )
+
+
+def test_source_distribution_has_an_explicit_release_surface() -> None:
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    sdist = project["tool"]["hatch"]["build"]["targets"]["sdist"]
+    assert set(sdist["only-include"]) == EXPECTED_SDIST_ROOTS
+
+
+def test_laptop_deployment_is_the_resolvable_operational_entrypoint() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    deployment = LAPTOP_DEPLOYMENT.read_text(encoding="utf-8")
+    headings = set(re.findall(r"^## (.+)$", deployment, flags=re.MULTILINE))
+
+    assert "docs/runbooks/laptop-deployment.md" in readme
+    assert {"Clean install or rebuild", "Preserving upgrade"} <= headings
+
+    quick_start = readme.split("## Quick Start", 1)[1].split("\n## ", 1)[0]
+    assert "index --migrate" not in quick_start
+
+    relative_links = re.findall(r"\[[^]]+\]\(([^)]+\.md)(?:#[^)]+)?\)", deployment)
+    assert relative_links
+    for target in relative_links:
+        assert (LAPTOP_DEPLOYMENT.parent / target).resolve().is_file(), target
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish is unavailable")
+def test_laptop_deployment_fish_commands_have_valid_syntax() -> None:
+    deployment = LAPTOP_DEPLOYMENT.read_text(encoding="utf-8")
+    blocks = re.findall(r"```fish\n(.*?)\n```", deployment, flags=re.DOTALL)
+    assert blocks
+
+    subprocess.run(
+        ["fish", "--no-execute"],
+        input="\n".join(blocks),
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -157,9 +221,17 @@ def test_cross_vendor_uat_fish_script_has_valid_syntax() -> None:
     )
 
 
+def test_cross_vendor_uat_does_not_retain_unrelated_process_arguments() -> None:
+    document = SEARCH_UAT.read_text(encoding="utf-8")
+
+    assert "ps -u " not in document
+    assert "final-user-processes.txt" not in document
+    assert "final-query-embedder-state.txt" in document
+
+
 @pytest.mark.skipif(shutil.which("codex") is None, reason="Codex CLI is unavailable")
 @pytest.mark.parametrize("subcommand", ["search", "extract", "list", "index"])
-def test_codex_rule_routes_chat_commands_through_approval(subcommand: str) -> None:
+def test_codex_rule_allows_chat_commands_on_the_host(subcommand: str) -> None:
     result = subprocess.run(
         [
             "codex",
@@ -176,7 +248,7 @@ def test_codex_rule_routes_chat_commands_through_approval(subcommand: str) -> No
     )
 
     payload = json.loads(result.stdout)
-    assert payload["decision"] == "prompt"
+    assert payload["decision"] == "allow"
     assert payload["matchedRules"][0]["prefixRuleMatch"]["matchedPrefix"] == [
         "cc-search-chats"
     ]

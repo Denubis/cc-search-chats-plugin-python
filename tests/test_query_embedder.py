@@ -15,7 +15,7 @@ import pytest
 
 from cc_search_chats import __version__
 from cc_search_chats.semantic import query_embedder
-from cc_search_chats.semantic.model import DIMENSIONS, ModelUnavailable
+from cc_search_chats.semantic.model import DIMENSIONS, GpuProcess, ModelUnavailable
 from cc_search_chats.semantic.query_embedder import (
     query_embedder_paths,
     request_query_embedding,
@@ -185,6 +185,15 @@ def test_helper_preserves_model_unavailable_protocol_fields(tmp_path: Path) -> N
             available_vram_bytes=100,
             required_vram_bytes=200,
             total_vram_bytes=300,
+            gpu_processes=(
+                GpuProcess(
+                    gpu_uuid="GPU-fixture",
+                    pid=7654,
+                    process_name="/opt/breeze-tts/bin/python3",
+                    used_memory_mib=7982,
+                    current_process=False,
+                ),
+            ),
         )
 
     thread = Thread(
@@ -213,6 +222,16 @@ def test_helper_preserves_model_unavailable_protocol_fields(tmp_path: Path) -> N
         {
             "available_vram_bytes": 100,
             "code": "insufficient_vram",
+            "gpu_processes": [
+                {
+                    "current_process": False,
+                    "gpu_uuid": "GPU-fixture",
+                    "pid": 7654,
+                    "process_name": "/opt/breeze-tts/bin/python3",
+                    "used_memory_mib": 7982,
+                }
+            ],
+            "gpu_processes_unavailable_reason": None,
             "kind": "model_unavailable",
             "message": "fixture VRAM unavailable",
             "phase": "model_preflight",
@@ -220,6 +239,18 @@ def test_helper_preserves_model_unavailable_protocol_fields(tmp_path: Path) -> N
             "total_vram_bytes": 300,
         },
     ]
+    with pytest.raises(ModelUnavailable) as reconstructed:
+        query_embedder._embedding_result(responses[-1])
+    assert reconstructed.value.gpu_processes == (
+        GpuProcess(
+            gpu_uuid="GPU-fixture",
+            pid=7654,
+            process_name="/opt/breeze-tts/bin/python3",
+            used_memory_mib=7982,
+            current_process=False,
+        ),
+    )
+    assert reconstructed.value.gpu_processes_unavailable_reason is None
     _request(path, {"kind": "shutdown"})
     thread.join(timeout=1)
     assert not thread.is_alive()

@@ -1,6 +1,6 @@
 # cc-search-chats
 
-Last verified: 2026-09-05
+Last verified: 2026-09-06
 
 ## Purpose
 
@@ -65,7 +65,11 @@ They do not use the operator's production database.
   `CC_SEARCH_SEMANTIC_WARM_SECONDS` value changes that idle bound. It is not a
   systemd unit. Query-time model or helper failure returns literal results with
   `retrieval_mode: literal_fallback`, an explicit human warning, and
-  `semantic_search_degraded`. A caller must not read the degraded answer as semantic.
+  `semantic_search_degraded`. A VRAM allocation warning includes a process-scoped
+  `gpu_processes` snapshot with GPU UUID, PID, executable, used MiB, and
+  `current_process`, or `gpu_processes_unavailable_reason` when the local
+  `nvidia-smi` diagnostic cannot run. A caller must not read the degraded answer
+  as semantic.
 - Search and `index --status` report `index_state`: when the selected index
   was made, the current time, its age, corpus/semantic identity, and a
   deadline-bounded count of unindexed native files, directories, and bytes or
@@ -159,6 +163,10 @@ locks, or runtime state.
 
 ## Boundaries
 
+- `docs/runbooks/laptop-deployment.md` is the canonical owner for clean laptop
+  installation, preserving upgrades, installed provenance, plugin/rule setup,
+  timer activation, and deployment completion. Do not recreate those procedures
+  in project notes.
 - Installation, production migration, production UAT, pruning, pushing, and
   publication are separate release actions.
 - Database/tablespace provisioning, backup, mount validation, and credentials are

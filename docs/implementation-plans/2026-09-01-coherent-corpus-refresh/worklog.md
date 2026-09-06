@@ -181,6 +181,8 @@
   documented schema-v3 coherent corpus/build identity, age fields, migration 7,
   and one full index before a positive installed smoke can pass. The note still
   grants no commit, installation, migration, build, UAT, timer, or prune
-  authority.
+  authority. This records the historical action; on 2026-09-06 its operational
+  content moved to the tracked `docs/runbooks/laptop-deployment.md`, and the note
+  was removed.
 - No commit, installation, production migration, production build, service or
   timer change, UAT execution, or prune was performed.

@@ -47,7 +47,7 @@ from cc_search_chats.core.discovery import encode_project_path
 from cc_search_chats.core.models import SessionMeta
 from cc_search_chats.queueing import client_admission
 from cc_search_chats.semantic import ModelUnavailable, query_embedder
-from cc_search_chats.semantic.model import DIMENSIONS
+from cc_search_chats.semantic.model import DIMENSIONS, GpuProcess
 from cc_search_chats.semantic.query_embedder import query_embedder_paths
 from cc_search_chats.storage.index import (
     ProjectRebuildError,
@@ -103,6 +103,15 @@ def test_semantic_failure_names_phase_and_prints_literal_fallback(
             "fixture model load failed",
             code="model_load_failed",
             phase="model_load",
+            gpu_processes=(
+                GpuProcess(
+                    gpu_uuid="GPU-fixture",
+                    pid=7654,
+                    process_name="/opt/breeze-tts/bin/python3",
+                    used_memory_mib=7982,
+                    current_process=False,
+                ),
+            ),
         )
 
     monkeypatch.setattr("cc_search_chats.cli._handle_postgres", unavailable)
@@ -115,6 +124,25 @@ def test_semantic_failure_names_phase_and_prints_literal_fallback(
     assert "model_load" in error
     assert "Literal search is required for complete current results" in error
     assert "cc-search-chats search 'needle phrase' --literal" in error
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "needle phrase", "--semantic", "--json"],
+    )
+    with pytest.raises(SystemExit, match="8"):
+        main()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["gpu_processes"] == [
+        {
+            "current_process": False,
+            "gpu_uuid": "GPU-fixture",
+            "pid": 7654,
+            "process_name": "/opt/breeze-tts/bin/python3",
+            "used_memory_mib": 7982,
+        }
+    ]
+    assert payload["error"]["gpu_processes_unavailable_reason"] is None
 
 
 def test_postgresql_search_does_not_wait_on_a_local_admission_lock(

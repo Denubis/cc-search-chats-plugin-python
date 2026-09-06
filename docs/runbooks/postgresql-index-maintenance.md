@@ -1,23 +1,26 @@
 # PostgreSQL index maintenance
 
-Last verified: 2026-09-03
+Last verified: 2026-09-06
 
-This runbook separates read-only inspection, candidate migration, production
-UAT, and irreversible legacy pruning. Preparing or testing code does not
+This runbook owns PostgreSQL inspection, migration, recovery, and irreversible
+legacy pruning. The canonical [laptop deployment
+runbook](laptop-deployment.md) owns clean installation, preserving upgrade,
+exact CLI provenance, plugins, Codex policy, systemd activation, and the order
+in which these database procedures are used. Preparing or testing code does not
 authorize installation, production migration, UAT, or prune.
 
 ## 1. Establish the exact candidate
 
-Before production work, require:
+Before production database work, complete the laptop runbook's common release
+boundary and installed-CLI proof. Then require:
 
 - the intended commit is accepted and present on clean local `main`;
 - local `main`, freshly fetched `origin/main`, and the installation target name
   the same exact SHA;
-- the CLI is installed non-editably from that SHA with the `semantic` extra;
-- installed `direct_url.json` commit ID and imported module path identify that
-  installation—not merely the package version;
-- both pytest partitions, Ruff lint/format, ty, and `git diff --check` passed on
-  the exact candidate.
+- the installed CLI provenance identifies that exact SHA and the global uv-tool
+  environment;
+- the semantic dependencies and pinned local model revision passed the host
+  checks in the laptop runbook.
 
 Stop if any SHA differs or a worktree is dirty. Preserve unrelated user changes.
 
@@ -107,10 +110,11 @@ VRAM pressure makes its query model unavailable, that search reports
 accepted coexistence limit, not permission for search to wait on or join the
 index.
 
-The first index after this release reparses every source from byte zero because
-both provider parser-state versions changed; expect a long run. Only messages
-whose repaired, filtered embedding-input digest changed are re-embedded. The
-nightly timer performs this full reparse if nobody runs it by hand.
+When the release changelog says a provider parser-state version changed, expect
+the next index to reparse that provider's sources from byte zero. Only messages
+whose filtered embedding-input digest changed are re-embedded. The laptop
+deployment runbook keeps the nightly timer from overlapping the intentional
+deployment build.
 
 Require positive root/file counts; zero resolved roots is not passing. Complete
 coverage may include counted, operator-visible skipped records and repaired

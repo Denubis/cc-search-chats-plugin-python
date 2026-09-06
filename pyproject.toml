@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cc-search-chats"
-version = "2.3.1"
+version = "2.3.2"
 description = "Search and extract Claude Code chat history"
 requires-python = ">=3.14"
 readme = "README.md"
@@ -26,6 +26,33 @@ semantic = [
     "torch>=2.9,<3",
     "transformers>=5.2,<6",
 ]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    ".agents",
+    ".claude-plugin",
+    ".codex-plugin",
+    ".pre-commit-config.yaml",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "CLAUDE.md",
+    "LICENSE",
+    "README.md",
+    "commands",
+    "complexipy-snapshot.json",
+    "docs",
+    "plugin.json",
+    "pyproject.toml",
+    "rules",
+    "scripts",
+    "skills",
+    "src",
+    "tests",
+    "uv.lock",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cc_search_chats"]
 
 [dependency-groups]
 dev = [
@@ -112,6 +139,7 @@ ignore = [
 ]
 "src/cc_search_chats/semantic/model.py" = [
     "N818",  # public name; rename is a contract change
+    "S603",  # resolved nvidia-smi executable runs with a fixed diagnostic argument vector
 ]
 "src/cc_search_chats/semantic/query_embedder.py" = [
     "S603",  # fixed interpreter/module command launches the detached local helper

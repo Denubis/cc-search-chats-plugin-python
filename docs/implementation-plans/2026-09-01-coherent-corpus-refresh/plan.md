@@ -387,23 +387,22 @@ misleading age or update state, a second automatic run inside the quiet period,
 a half-published corpus, or an invocation at/over five seconds. Script success
 does not imply human acceptance.
 
-## Project-note maintenance boundary
+## Superseded project-note maintenance boundary
 
-`.notes/feedback_main-merge-production-install-gate.md` exists and currently
-hard-codes schema version 2 in its production smoke gate. Do not edit it without
-separate human approval. The exact later proposal is to change item 5 to require
-the release's documented schema version—version 3 for this cutover—so future
-release work cannot accept the wrong installed output contract. Evidence is the
-accepted design's v3 authority row plus the completed all-command v3 journeys.
+This plan originally assigned a schema-version correction to
+`.notes/feedback_main-merge-production-install-gate.md`. On 2026-09-06 the human
+directed that project notes must not own operational instructions. The tracked
+`docs/runbooks/laptop-deployment.md` now owns the current release and deployment
+gate; this historical plan does not override it.
 
 ## Git, production, and recovery boundaries
 
 - Planning and implementation do not authorize a commit. Present the reviewed
   diff and fresh verification before requesting commit authority.
-- A later release must follow the main/install provenance note: accepted tree,
-  clean `main`, local/remote exact SHA agreement, exact-SHA noneditable uv-tool
-  installation with semantic extra, direct-URL/import-path proof, then explicit
-  production migration and full build.
+- A later release must follow the tracked laptop deployment runbook: accepted
+  tree, clean `main`, local/remote exact SHA agreement, exact-SHA noneditable
+  uv-tool installation with semantic extra, direct-URL/import-path proof, then
+  explicit production migration and full build.
 - Production migration 7 may temporarily leave no selected coherent corpus when
   the old literal/semantic pair is mismatched. The timer stays disabled; the
   operator immediately runs the authorized full `index`, and search must report

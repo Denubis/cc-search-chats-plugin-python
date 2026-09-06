@@ -1,5 +1,22 @@
 # Changelog
 
+## cc-search-chats 2.3.2
+
+**New:**
+- VRAM allocation failures now report a process-scoped snapshot of active GPU
+  compute processes, including PID, executable, memory use, and whether the
+  process is the failing search itself. If `nvidia-smi` cannot provide that
+  snapshot, the failure says why.
+- A canonical laptop deployment runbook now separates disposable clean/rebuild
+  installation from backup-first preserving upgrades and installed acceptance.
+
+**Changed:**
+- The tracked Codex execution-policy rule allows every `cc-search-chats`
+  subcommand to use the host PostgreSQL service, systemd user manager, model
+  cache, and GPU after the operator installs the rule.
+- Source distributions now use an explicit release allowlist so project notes,
+  nested worktrees, caches, and other private local state are not packaged.
+
 ## cc-search-chats 2.3.1
 
 **Changed:**

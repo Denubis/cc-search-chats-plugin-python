@@ -1,7 +1,10 @@
 """Offline-only adapter for the pinned local Nemotron embedding model."""
 
+import csv
 import os
 import re
+import shutil
+import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, redirect_stderr
@@ -49,6 +52,17 @@ class _ChunkTokenizer(Protocol):
     ) -> Mapping[str, Sequence[int] | Sequence[tuple[int, int]]]: ...
 
 
+@dataclass(frozen=True, slots=True)
+class GpuProcess:
+    """One active NVIDIA compute process observed at an allocation failure."""
+
+    gpu_uuid: str
+    pid: int
+    process_name: str
+    used_memory_mib: int | None
+    current_process: bool
+
+
 class ModelUnavailable(RuntimeError):
     """The exact configured local semantic runtime cannot be used."""
 
@@ -61,6 +75,8 @@ class ModelUnavailable(RuntimeError):
         available_vram_bytes: int | None = None,
         required_vram_bytes: int | None = None,
         total_vram_bytes: int | None = None,
+        gpu_processes: Sequence[GpuProcess] | None = None,
+        gpu_processes_unavailable_reason: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -68,6 +84,8 @@ class ModelUnavailable(RuntimeError):
         self.available_vram_bytes = available_vram_bytes
         self.required_vram_bytes = required_vram_bytes
         self.total_vram_bytes = total_vram_bytes
+        self.gpu_processes = None if gpu_processes is None else tuple(gpu_processes)
+        self.gpu_processes_unavailable_reason = gpu_processes_unavailable_reason
 
 
 def _configured_model_path() -> Path:
@@ -245,6 +263,92 @@ def _embed_batch(texts: Sequence[str], prefix: str) -> list[list[float]]:
     return vector.float().cpu().tolist()
 
 
+def _used_memory_mib(value: str) -> int | None:
+    normalized = value.strip()
+    if normalized in {"", "N/A", "[N/A]"}:
+        return None
+    return int(normalized)
+
+
+def _gpu_process_snapshot() -> tuple[tuple[GpuProcess, ...], str | None]:
+    executable = shutil.which("nvidia-smi")
+    if executable is None:
+        return (), "nvidia-smi is unavailable to this process"
+    command = [
+        executable,
+        "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2.0,
+        )
+    except subprocess.TimeoutExpired:
+        return (), "nvidia-smi compute-process query timed out after 2 seconds"
+    except OSError as error:
+        return (), f"nvidia-smi could not run in this process: {error}"
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
+        return (), f"nvidia-smi compute-process query failed: {detail}"
+    try:
+        processes = tuple(
+            GpuProcess(
+                gpu_uuid=row[0].strip(),
+                pid=int(row[1].strip()),
+                process_name=row[2].strip(),
+                used_memory_mib=_used_memory_mib(row[3]),
+                current_process=int(row[1].strip()) == os.getpid(),
+            )
+            for row in csv.reader(StringIO(result.stdout))
+            if row
+        )
+    except (IndexError, ValueError) as error:
+        return (), (
+            "nvidia-smi returned malformed compute-process data: "
+            f"{type(error).__name__}"
+        )
+    return (
+        tuple(
+            sorted(
+                processes,
+                key=lambda process: (
+                    process.current_process,
+                    -(
+                        process.used_memory_mib
+                        if process.used_memory_mib is not None
+                        else -1
+                    ),
+                    process.pid,
+                ),
+            )
+        ),
+        None,
+    )
+
+
+def _gpu_process_summary(
+    processes: Sequence[GpuProcess], unavailable_reason: str | None
+) -> str:
+    if unavailable_reason is not None:
+        return f"active GPU compute processes could not be listed: {unavailable_reason}"
+    if not processes:
+        return "nvidia-smi reported no active GPU compute processes at failure"
+    rendered = []
+    for process in processes:
+        memory = (
+            f"{process.used_memory_mib} MiB"
+            if process.used_memory_mib is not None
+            else "memory unavailable"
+        )
+        current = " (current process)" if process.current_process else ""
+        rendered.append(f"PID {process.pid} {process.process_name}: {memory}{current}")
+    return f"active GPU compute processes at failure: {'; '.join(rendered)}"
+
+
 def _vram_unavailable(torch, *, phase: str, error: BaseException) -> ModelUnavailable:
     try:
         available, total = torch.cuda.mem_get_info()
@@ -256,12 +360,17 @@ def _vram_unavailable(torch, *, phase: str, error: BaseException) -> ModelUnavai
         if available is not None and total is not None
         else ""
     )
+    gpu_processes, unavailable_reason = _gpu_process_snapshot()
     return ModelUnavailable(
-        f"VRAM is unavailable for the pinned semantic model{capacity}: {error}",
+        "this process could not allocate VRAM for the pinned semantic model"
+        f"{capacity}: {error}; "
+        f"{_gpu_process_summary(gpu_processes, unavailable_reason)}",
         code="vram_unavailable",
         phase=phase,
         available_vram_bytes=available,
         total_vram_bytes=total,
+        gpu_processes=gpu_processes,
+        gpu_processes_unavailable_reason=unavailable_reason,
     )
 
 

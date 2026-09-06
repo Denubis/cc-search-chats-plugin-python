@@ -1,6 +1,8 @@
 """Semantic runtime failure remains explicit and offline."""
 
 import io
+import os
+import shutil
 import subprocess
 import sys
 from contextlib import redirect_stderr
@@ -292,6 +294,28 @@ def test_terminal_vram_failure_is_named_and_reports_measurable_capacity(
     class FakeTorch:
         cuda = FakeCuda()
 
+    def nvidia_smi(command, **kwargs):
+        assert command == [
+            "/fixture/nvidia-smi",
+            "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+            "--format=csv,noheader,nounits",
+        ]
+        assert kwargs == {
+            "capture_output": True,
+            "check": False,
+            "text": True,
+            "timeout": 2.0,
+        }
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "GPU-fixture, 7654, /opt/breeze-tts/bin/python3, 7982\n"
+                f"GPU-fixture, {os.getpid()}, /opt/cc-search/bin/python, 14320\n"
+            ),
+            stderr="",
+        )
+
     monkeypatch.setattr(
         semantic_model,
         "_runtime",
@@ -302,6 +326,8 @@ def test_terminal_vram_failure_is_named_and_reports_measurable_capacity(
         "_embed_batch",
         lambda _texts, _prefix: (_ for _ in ()).throw(FakeOutOfMemoryError("oom")),
     )
+    monkeypatch.setattr(shutil, "which", lambda _name: "/fixture/nvidia-smi")
+    monkeypatch.setattr(subprocess, "run", nvidia_smi)
 
     with pytest.raises(ModelUnavailable, match="VRAM") as raised:
         embed_passages(("one passage",))
@@ -310,6 +336,32 @@ def test_terminal_vram_failure_is_named_and_reports_measurable_capacity(
     assert raised.value.phase == "semantic_embed"
     assert raised.value.available_vram_bytes == 2_000
     assert raised.value.total_vram_bytes == 8_000
+    assert raised.value.gpu_processes is not None
+    assert [
+        (
+            process.pid,
+            process.process_name,
+            process.used_memory_mib,
+            process.current_process,
+        )
+        for process in raised.value.gpu_processes
+    ] == [
+        (7654, "/opt/breeze-tts/bin/python3", 7982, False),
+        (os.getpid(), "/opt/cc-search/bin/python", 14320, True),
+    ]
+    assert raised.value.gpu_processes_unavailable_reason is None
+    assert "active GPU compute processes at failure" in str(raised.value)
+    assert "PID 7654 /opt/breeze-tts/bin/python3: 7982 MiB" in str(raised.value)
+    assert "current process" in str(raised.value)
+
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    with pytest.raises(ModelUnavailable) as unavailable_snapshot:
+        embed_passages(("one passage",))
+    assert unavailable_snapshot.value.gpu_processes == ()
+    assert unavailable_snapshot.value.gpu_processes_unavailable_reason == (
+        "nvidia-smi is unavailable to this process"
+    )
+    assert "compute processes could not be listed" in str(unavailable_snapshot.value)
 
 
 def test_query_embedding_runtime_failure_is_named(
