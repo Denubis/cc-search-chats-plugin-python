@@ -71,7 +71,7 @@
       },
       {
         "name": "parse_codex_session",
-        "complexity": 52
+        "complexity": 48
       }
     ]
   },

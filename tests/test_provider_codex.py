@@ -95,6 +95,329 @@ def established_unknown_session(session_id: str) -> CodexParserState:
     )
 
 
+def laptop_metadata_record(kind: str) -> dict[str, object]:
+    """Build synthetic copies of the audited laptop metadata capabilities."""
+    if kind == "token_usage_record":
+        usage = {
+            "input_tokens": 20,
+            "cached_input_tokens": 5,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 10,
+            "reasoning_output_tokens": 4,
+            "total_tokens": 30,
+        }
+        payload: dict[str, object] = {
+            "thread_id": "metadata-session",
+            "turn_id": "synthetic-turn",
+            "session_id": "synthetic-session",
+            "root_turn_id": "synthetic-root-turn",
+            "response_id": "synthetic-response",
+            "usage": dict(usage),
+            "turn_token_usage": dict(usage),
+            "thread_token_usage": dict(usage),
+        }
+    else:
+        payload = {
+            "type": "ghost_snapshot",
+            "ghost_commit": {
+                "id": "synthetic-commit",
+                "parent": None,
+                "preexisting_untracked_files": ["synthetic-private.txt"],
+                "preexisting_untracked_dirs": ["synthetic-private-dir"],
+            },
+        }
+    return {
+        "type": "response_item" if kind == "ghost_snapshot" else kind,
+        "timestamp": "2026-09-06T09:00:00Z",
+        "ordinal": 17,
+        "payload": payload,
+    }
+
+
+class TestCodexLaptopMetadata:
+    @pytest.mark.parametrize("added_metadata", [False, True])
+    def test_legacy_turn_aborted_is_excluded(self, added_metadata: bool) -> None:
+        payload: dict[str, object] = {"type": "turn_aborted", "reason": "interrupted"}
+        if added_metadata:
+            payload["future_metadata"] = "private lifecycle metadata"
+        result = parse_codex_session(
+            (envelope({"type": "event_msg", "payload": payload}),),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.EXCLUDED_LIFECYCLE_EVENT
+        ]
+
+    def test_turn_aborted_without_reason_remains_unknown(self) -> None:
+        result = parse_codex_session(
+            (envelope({"type": "event_msg", "payload": {"type": "turn_aborted"}}),),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.UNKNOWN_EVENT
+        ]
+
+    @pytest.mark.parametrize("added_metadata", [False, True])
+    def test_legacy_input_image_is_excluded_beside_visible_prose(
+        self, added_metadata: bool
+    ) -> None:
+        block: dict[str, object] = {
+            "type": "input_image",
+            "image_url": "data:image/png;base64,synthetic-private-image",
+        }
+        if added_metadata:
+            block["future_metadata"] = "private image metadata"
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-09-06T09:00:00Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "visible prose"},
+                                block,
+                            ],
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert [message.text for message in result.messages] == ["visible prose"]
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.EXCLUDED_NON_TEXT_CONTENT
+        ]
+
+    @pytest.mark.parametrize("kind", ["token_usage_record", "ghost_snapshot"])
+    @pytest.mark.parametrize("added_metadata", [False, True])
+    def test_audited_metadata_is_excluded_beside_visible_prose(
+        self, kind: str, added_metadata: bool
+    ) -> None:
+        record = laptop_metadata_record(kind)
+        if added_metadata:
+            record["future_metadata"] = {"text": "private outer metadata"}
+            payload = record["payload"]
+            assert isinstance(payload, dict)
+            payload["future_metadata"] = {"text": "private payload metadata"}
+            for value in tuple(payload.values()):
+                if isinstance(value, dict):
+                    value["future_counter"] = "private nested metadata"
+        result = parse_codex_session(
+            sequential_envelopes(
+                record,
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-09-06T09:00:01Z",
+                    "payload": {"type": "user_message", "message": "visible prose"},
+                },
+            ),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert [message.text for message in result.messages] == ["visible prose"]
+        assert [diagnostic.code.value for diagnostic in result.diagnostics] == [
+            "excluded_metadata"
+        ]
+        assert result.diagnostics[0].record_ordinal == 0
+        assert result.boundaries == ()
+        assert result.next_state.source_session_id == "metadata-session"
+
+    def test_ghost_snapshot_parent_can_be_a_commit_id(self) -> None:
+        record = laptop_metadata_record("ghost_snapshot")
+        payload = record["payload"]
+        assert isinstance(payload, dict)
+        payload["ghost_commit"]["parent"] = "synthetic-parent"
+
+        result = parse_codex_session(
+            (envelope(record),),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code.value for diagnostic in result.diagnostics] == [
+            "excluded_metadata"
+        ]
+
+    def test_token_usage_without_optional_cache_write_counter_is_excluded(self) -> None:
+        record = laptop_metadata_record("token_usage_record")
+        payload = record["payload"]
+        assert isinstance(payload, dict)
+        for field in ("usage", "turn_token_usage", "thread_token_usage"):
+            del payload[field]["cache_write_input_tokens"]
+
+        result = parse_codex_session(
+            (envelope(record),),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code.value for diagnostic in result.diagnostics] == [
+            "excluded_metadata"
+        ]
+
+    @pytest.mark.parametrize(
+        ("kind", "path", "invalid"),
+        [
+            ("token_usage_record", ("timestamp",), "invalid"),
+            ("token_usage_record", ("payload", "thread_id"), None),
+            ("token_usage_record", ("payload", "usage"), []),
+            ("token_usage_record", ("payload", "usage", "input_tokens"), True),
+            ("token_usage_record", ("payload", "usage", "total_tokens"), "30"),
+            (
+                "token_usage_record",
+                ("payload", "usage", "cache_write_input_tokens"),
+                None,
+            ),
+            ("ghost_snapshot", ("payload", "ghost_commit"), "not an object"),
+            ("ghost_snapshot", ("payload", "ghost_commit", "id"), None),
+            ("ghost_snapshot", ("payload", "ghost_commit", "parent"), []),
+            (
+                "ghost_snapshot",
+                ("payload", "ghost_commit", "preexisting_untracked_files"),
+                [1],
+            ),
+            (
+                "ghost_snapshot",
+                ("payload", "ghost_commit", "preexisting_untracked_dirs"),
+                "directory",
+            ),
+        ],
+    )
+    def test_invalid_metadata_field_type_remains_unknown(
+        self, kind: str, path: tuple[str, ...], invalid: object
+    ) -> None:
+        record = laptop_metadata_record(kind)
+        container = record
+        for field in path[:-1]:
+            nested = container[field]
+            assert isinstance(nested, dict)
+            container = nested
+        container[path[-1]] = invalid
+        result = parse_codex_session(
+            (envelope(record),),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM
+            if kind == "ghost_snapshot"
+            else CodexDiagnosticCode.UNKNOWN_OUTER_TYPE
+        ]
+
+    @pytest.mark.parametrize(
+        ("kind", "path"),
+        [
+            *(
+                ("token_usage_record", ("payload", field))
+                for field in (
+                    "thread_id",
+                    "turn_id",
+                    "session_id",
+                    "root_turn_id",
+                    "response_id",
+                    "usage",
+                    "turn_token_usage",
+                    "thread_token_usage",
+                )
+            ),
+            *(
+                ("token_usage_record", ("payload", usage, field))
+                for usage in (
+                    "usage",
+                    "turn_token_usage",
+                    "thread_token_usage",
+                )
+                for field in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "reasoning_output_tokens",
+                    "total_tokens",
+                )
+            ),
+            ("ghost_snapshot", ("payload", "ghost_commit")),
+            *(
+                ("ghost_snapshot", ("payload", "ghost_commit", field))
+                for field in (
+                    "id",
+                    "parent",
+                    "preexisting_untracked_files",
+                    "preexisting_untracked_dirs",
+                )
+            ),
+        ],
+    )
+    def test_missing_required_metadata_field_remains_unknown(
+        self, kind: str, path: tuple[str, ...]
+    ) -> None:
+        record = laptop_metadata_record(kind)
+        container = record
+        for field in path[:-1]:
+            nested = container[field]
+            assert isinstance(nested, dict)
+            container = nested
+        del container[path[-1]]
+        result = parse_codex_session(
+            (envelope(record),),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM
+            if kind == "ghost_snapshot"
+            else CodexDiagnosticCode.UNKNOWN_OUTER_TYPE
+        ]
+
+    @pytest.mark.parametrize("kind", ["token_usage_record", "ghost_snapshot"])
+    @pytest.mark.parametrize("defect", ["conversation", "unregistered"])
+    def test_conversation_impostors_and_unregistered_metadata_remain_unknown(
+        self, kind: str, defect: str
+    ) -> None:
+        record = laptop_metadata_record(kind)
+        payload = record["payload"]
+        assert isinstance(payload, dict)
+        if defect == "conversation":
+            record["payload"] = {
+                "type": payload.get("type"),
+                "role": "user",
+                "content": [{"type": "input_text", "text": "must not disappear"}],
+            }
+        elif kind == "ghost_snapshot":
+            payload["type"] = "future_snapshot"
+        else:
+            record["type"] = "future_usage_record"
+        result = parse_codex_session(
+            (envelope(record),),
+            context=CodexSessionContext(),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM
+            if kind == "ghost_snapshot"
+            else CodexDiagnosticCode.UNKNOWN_OUTER_TYPE
+        ]
+
+
 class TestCodexSchemaFamilies:
     @pytest.mark.parametrize("wrapper", ["environment_context", "user_instructions"])
     def test_user_wrapper_block_is_dropped_beside_visible_prose(

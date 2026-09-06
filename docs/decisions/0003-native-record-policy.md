@@ -59,6 +59,14 @@ registered required-key set. Extra metadata cannot turn a known non-conversation
 event into searchable content or block its source. A registered type missing a
 required key, or an unregistered type, remains unknown and fails closed.
 
+The 2026-09-06 compatibility fix applies this boundary to Codex
+`token_usage_record` envelopes and legacy `ghost_snapshot` response items.
+Their audited metadata shapes are excluded with an `excluded_metadata`
+diagnostic; they do not create messages, alter session identity, or advance
+conversation epochs. Additional metadata fields remain excluded. Legacy
+`input_image` blocks without `detail` and `turn_aborted` events without a turn
+ID retain the existing non-text and lifecycle exclusions.
+
 ## Consequences
 
 Existing persisted tool-result and injected-context rows leave current state on

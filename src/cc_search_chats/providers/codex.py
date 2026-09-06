@@ -76,6 +76,21 @@ _TURN_CONTEXT_FIELDS = (
     | _TURN_CONTEXT_BOOLEAN_FIELDS
     | _TURN_CONTEXT_LIST_FIELDS
 )
+_TOKEN_USAGE_REQUIRED_COUNTERS = {
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+}
+_TOKEN_USAGE_ID_FIELDS = {
+    "thread_id",
+    "turn_id",
+    "session_id",
+    "root_turn_id",
+    "response_id",
+}
+_TOKEN_USAGE_FIELDS = {"usage", "turn_token_usage", "thread_token_usage"}
 
 _LIFECYCLE_EVENT_KEYSETS = {
     "task_started": {
@@ -204,6 +219,7 @@ _LIFECYCLE_EVENT_KEYSETS = {
         )
     },
     "turn_aborted": {
+        frozenset({"type", "reason"}),
         frozenset({"type", "reason", "turn_id"}),
         frozenset({"type", "completed_at", "duration_ms", "reason", "turn_id"}),
         frozenset(
@@ -434,6 +450,7 @@ class CodexDiagnosticCode(StrEnum):
     EXCLUDED_INTER_AGENT_METADATA = "excluded_inter_agent_metadata"
     EXCLUDED_NON_TEXT_CONTENT = "excluded_non_text_content"
     EXCLUDED_LIFECYCLE_EVENT = "excluded_lifecycle_event"
+    EXCLUDED_METADATA = "excluded_metadata"
     PARTIAL_TAIL = "partial_tail"
     INVALID_PAYLOAD = "invalid_payload"
     REPAIRED_UNICODE = "repaired_unicode"
@@ -999,6 +1016,15 @@ def _is_injected_user_element(value: str) -> bool:
     return False
 
 
+def _input_image_shape(block: dict[str, object]) -> bool:
+    """Recognize images with the legacy optional detail and additive metadata."""
+    return (
+        block.get("type") == "input_image"
+        and isinstance(block.get("image_url"), str)
+        and ("detail" not in block or isinstance(block["detail"], str))
+    )
+
+
 def _extract_message_text_block(
     block: object,
     role: str,
@@ -1032,12 +1058,7 @@ def _extract_message_text_block(
                 ),
             ),
         )
-    if (
-        block_type == "input_image"
-        and frozenset(block) == {"type", "detail", "image_url"}
-        and isinstance(block.get("detail"), str)
-        and isinstance(block.get("image_url"), str)
-    ):
+    if _input_image_shape(block):
         return (
             None,
             False,
@@ -1249,6 +1270,21 @@ def _matches_excluded_keyset(
     return any(required_keys <= payload_keys for required_keys in required_keysets)
 
 
+def _ghost_snapshot_shape(payload: dict[str, object]) -> bool:
+    """Recognize an audited ghost commit without exposing its filesystem metadata."""
+    commit = payload.get("ghost_commit")
+    return (
+        payload.get("type") == "ghost_snapshot"
+        and _is_json_object(commit)
+        and set(commit)
+        >= {"id", "parent", "preexisting_untracked_files", "preexisting_untracked_dirs"}
+        and isinstance(commit["id"], str)
+        and (commit["parent"] is None or isinstance(commit["parent"], str))
+        and _is_string_list(commit["preexisting_untracked_files"])
+        and _is_string_list(commit["preexisting_untracked_dirs"])
+    )
+
+
 def _parse_response_item(
     record: _DecodedRecord,
     *,
@@ -1268,6 +1304,14 @@ def _parse_response_item(
             ),
         )
     item_type = payload.get("type")
+    if _ghost_snapshot_shape(payload):
+        return (), (
+            _diagnostic(
+                CodexDiagnosticCode.EXCLUDED_METADATA,
+                record.envelope,
+                "ghost snapshot is deliberately non-searchable",
+            ),
+        )
     if item_type == "reasoning":
         return (), (
             _diagnostic(
@@ -1545,6 +1589,58 @@ def _inter_agent_metadata_shape(record: _DecodedRecord) -> bool:
     )
 
 
+def _token_usage_shape(value: object) -> bool:
+    """Require native integer counters; cache writes default to zero in Codex."""
+    if not _is_json_object(value) or not set(value) >= _TOKEN_USAGE_REQUIRED_COUNTERS:
+        return False
+    counters = _TOKEN_USAGE_REQUIRED_COUNTERS | (
+        {"cache_write_input_tokens"} if "cache_write_input_tokens" in value else set()
+    )
+    return all(
+        isinstance(value[field], int) and not isinstance(value[field], bool)
+        for field in counters
+    )
+
+
+def _token_usage_record_shape(record: _DecodedRecord) -> bool:
+    """Recognize token accounting with required minima and additive metadata."""
+    payload = record.payload.get("payload")
+    return (
+        set(record.payload) >= {"type", "timestamp", "payload"}
+        and isinstance(record.payload.get("timestamp"), str)
+        and is_valid_native_timestamp(record.payload["timestamp"])
+        and _is_json_object(payload)
+        and all(isinstance(payload.get(field), str) for field in _TOKEN_USAGE_ID_FIELDS)
+        and all(_token_usage_shape(payload.get(field)) for field in _TOKEN_USAGE_FIELDS)
+    )
+
+
+def _excluded_outer_metadata_diagnostic(record: _DecodedRecord) -> CodexDiagnostic:
+    """Classify audited outer metadata while retaining its prior failure policy."""
+    if record.payload.get("type") == "token_usage_record":
+        recognized = _token_usage_record_shape(record)
+        return _diagnostic(
+            CodexDiagnosticCode.EXCLUDED_METADATA
+            if recognized
+            else CodexDiagnosticCode.UNKNOWN_OUTER_TYPE,
+            record.envelope,
+            "token accounting is deliberately non-searchable"
+            if recognized
+            else "token_usage_record does not match an audited metadata shape",
+        )
+    if _inter_agent_metadata_shape(record):
+        return _diagnostic(
+            CodexDiagnosticCode.EXCLUDED_INTER_AGENT_METADATA,
+            record.envelope,
+            "inter-agent metadata is retained as provenance, not searchable text",
+        )
+    return _diagnostic(
+        CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
+        record.envelope,
+        "inter-agent metadata does not match an audited shape",
+    )
+
+
 def _candidate_alias(candidate: PhysicalMessageCandidate) -> PhysicalAlias:
     """Return the sole physical occurrence of an unpaired parser candidate."""
     return candidate.message.identity.physical_aliases[0]
@@ -1747,24 +1843,8 @@ def parse_codex_session(
                 seen_compaction_digests.add(record.envelope.source_digest)
                 conversation_epoch += 1
                 boundaries.append(boundary)
-        elif outer_type == "inter_agent_communication_metadata":
-            if _inter_agent_metadata_shape(record):
-                diagnostics.append(
-                    _diagnostic(
-                        CodexDiagnosticCode.EXCLUDED_INTER_AGENT_METADATA,
-                        record.envelope,
-                        "inter-agent metadata is retained as provenance, "
-                        "not searchable text",
-                    )
-                )
-            else:
-                diagnostics.append(
-                    _diagnostic(
-                        CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
-                        record.envelope,
-                        "inter-agent metadata does not match an audited shape",
-                    )
-                )
+        elif outer_type in {"inter_agent_communication_metadata", "token_usage_record"}:
+            diagnostics.append(_excluded_outer_metadata_diagnostic(record))
         else:
             diagnostics.append(
                 _diagnostic(
