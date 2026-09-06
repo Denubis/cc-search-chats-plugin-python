@@ -70,7 +70,7 @@ from cc_search_chats.storage.postgresql.semantic import (
 
 _PARSER_STATE_VERSIONS = {
     Provider.CLAUDE: 3,
-    Provider.CODEX: 4,
+    Provider.CODEX: 5,
 }
 _RETAINED_REFRESH_RUNS = 100
 _WAIT_HEARTBEAT_SECONDS = 5.0

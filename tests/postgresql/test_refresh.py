@@ -756,7 +756,7 @@ def test_parser_state_version_change_forces_full_reparse(
 def test_native_record_policy_parser_state_versions() -> None:
     assert refresh_module._PARSER_STATE_VERSIONS == {
         Provider.CLAUDE: 3,
-        Provider.CODEX: 4,
+        Provider.CODEX: 5,
     }
 
 
@@ -875,6 +875,168 @@ def test_codex_parser_state_bump_retries_unchanged_deterministic_failure(
         )[0]
         == 0
     )
+
+
+@pytest.mark.parametrize(
+    ("metadata_type", "failure_code"),
+    [
+        ("token_usage_record", "unknown_outer_type"),
+        ("ghost_snapshot", "unknown_response_item"),
+    ],
+)
+def test_codex_metadata_parser_bump_recovers_unchanged_blocked_source(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_type: str,
+    failure_code: str,
+) -> None:
+    codex_root = tmp_path / "codex"
+    day = codex_root / "2026" / "08" / "11"
+    day.mkdir(parents=True)
+    source = day / "rollout-metadata.jsonl"
+    fixture_records = (
+        (FIXTURES / "codex_modern_primary_145.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    before = fixture_records[0] + fixture_records[3]
+    after = fixture_records[5]
+    counters = {
+        "input_tokens": 10,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 12,
+    }
+    if metadata_type == "token_usage_record":
+        payload = {
+            "thread_id": "codex-modern-primary",
+            "turn_id": "synthetic-turn",
+            "session_id": "codex-modern-primary",
+            "root_turn_id": "synthetic-turn",
+            "response_id": "synthetic-response",
+            "usage": counters,
+            "turn_token_usage": counters,
+            "thread_token_usage": counters,
+            "future_detail": "excluded metadata sentinel",
+        }
+        outer_type = metadata_type
+    else:
+        payload = {
+            "type": "ghost_snapshot",
+            "ghost_commit": {
+                "id": "synthetic-commit",
+                "parent": None,
+                "preexisting_untracked_files": ["excluded metadata sentinel"],
+                "preexisting_untracked_dirs": [],
+            },
+        }
+        outer_type = "response_item"
+    metadata = (
+        json.dumps(
+            {
+                "timestamp": "2026-08-11T03:00:02Z",
+                "type": outer_type,
+                "payload": payload,
+            }
+        ).encode("utf-8")
+        + b"\n"
+    )
+    original_bytes = before + metadata + after
+    source.write_bytes(original_bytes)
+    original_stat = source.stat()
+    root = _source_root(Provider.CODEX, codex_root)
+    postgres_connection.execute(
+        """
+        INSERT INTO cc_search_chats.source_root_current (
+            source_root_id, provider, resolved_path, configured_order
+        ) VALUES (%s, 'codex', %s, 0)
+        """,
+        (root.source_root_id, str(root.path)),
+    )
+    postgres_connection.execute(
+        """
+        INSERT INTO cc_search_chats.source_failure_current (
+            source_root_id, source_file_relative, provider,
+            file_device, file_inode, observed_size, observed_mtime_ns,
+            parser_state_version, failure_record_ordinal,
+            failure_source_line, failure_source_byte_offset,
+            failure_code, failure_detail, failure_class,
+            attempted_content_bytes, consecutive_failures
+        ) VALUES (
+            %s, '2026/08/11/rollout-metadata.jsonl', 'codex', %s, %s, %s, %s,
+            4, 2, 3, %s, %s, 'metadata unrecognized by parser version 4',
+            'deterministic', %s, 1
+        )
+        """,
+        (
+            root.source_root_id,
+            original_stat.st_dev,
+            original_stat.st_ino,
+            original_stat.st_size,
+            original_stat.st_mtime_ns,
+            len(before),
+            failure_code,
+            len(original_bytes),
+        ),
+    )
+    with monkeypatch.context() as previous_parser:
+        previous_parser.setitem(
+            refresh_module._PARSER_STATE_VERSIONS, Provider.CODEX, 4
+        )
+        blocked = inspect_native_sources(postgres_connection, source_roots=(root,))
+    assert blocked.blocked_source_count == 1
+    assert blocked.attempted_content_bytes == 0
+    assert search_messages(postgres_connection, "modern visible") == ()
+
+    retried = refresh_native_sources(postgres_connection, source_roots=(root,))
+
+    current_stat = source.stat()
+    assert source.read_bytes() == original_bytes
+    assert (
+        current_stat.st_dev,
+        current_stat.st_ino,
+        current_stat.st_size,
+        current_stat.st_mtime_ns,
+    ) == (
+        original_stat.st_dev,
+        original_stat.st_ino,
+        original_stat.st_size,
+        original_stat.st_mtime_ns,
+    )
+    assert retried.attempted_content_bytes == len(original_bytes)
+    coverage = _postgres_envelope(postgres_connection, "index", refresh_result=retried)[
+        "coverage"
+    ]
+    assert isinstance(coverage, dict)
+    assert coverage["completeness"] == "complete"
+    assert coverage["blocked_files"] == 0
+    assert coverage["skipped_records"] == 0
+    assert {
+        hit.text for hit in search_messages(postgres_connection, "modern visible")
+    } == {
+        "modern visible user",
+        "modern visible assistant",
+    }
+    assert search_messages(postgres_connection, "excluded metadata sentinel") == ()
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.source_failure_current"
+            )
+        )[0]
+        == 0
+    )
+    assert next(
+        postgres_connection.execute(
+            """
+            SELECT parser_state_version, complete_byte_offset
+            FROM cc_search_chats.source_file_current
+            """
+        )
+    ) == (5, len(original_bytes))
 
 
 def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(
