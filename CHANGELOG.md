@@ -1,5 +1,28 @@
 # Changelog
 
+## cc-search-chats 2.3.4
+
+**Fixed:**
+- Indexing and semantic search no longer fail with `vram_unavailable` on a GPU
+  whose free memory is smaller than the pinned model. When the weights do not
+  fit beside the embedding reserve, the remainder is held in CPU RAM and still
+  executes on the GPU in bf16; a GPU with room for the whole model loads it
+  exactly as before. Offloaded weights never spill to disk.
+- A VRAM failure raised while choosing model placement keeps its
+  `vram_unavailable` code instead of being reported as `model_load_failed`.
+
+- Claude Code 2.1.267 and later add `rendered` and `renderedInHumanTurn` to
+  attachment records. The nine audited shapes are excluded as injected-context
+  metadata, so their sessions index again instead of blocking. Attachments with
+  any other unaudited key still fail closed.
+- The Claude parser-state version advances so the next index retries previously
+  blocked files even when their native bytes have not changed. Every Claude
+  source reparses once; existing embeddings are reused for unchanged text.
+
+**Changed:**
+- The `semantic` extra now requires `accelerate`, which Transformers needs to
+  place weights across GPU and CPU memory.
+
 ## cc-search-chats 2.3.3
 
 **Fixed:**
