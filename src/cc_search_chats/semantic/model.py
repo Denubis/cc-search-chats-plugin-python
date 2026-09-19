@@ -25,7 +25,8 @@ CHUNK_TARGET_TOKENS = 768
 MAX_MODEL_TOKENS = 1024
 CHUNK_OVERLAP_TOKENS = 96
 CHUNKER_ID = "nemotron-token-chunks-768-1024-96:v1"
-OFFLOAD_VRAM_RESERVE_BYTES = 2 * 2**30
+OFFLOAD_VRAM_RESERVE_FLOOR_BYTES = 2 * 2**30
+OFFLOAD_VRAM_RESERVE_TOTAL_DIVISOR = 10
 type ModelProgress = Callable[[str, str], None]
 _COMMIT_HASH = re.compile(r"[0-9a-f]{40}").fullmatch
 
@@ -193,17 +194,25 @@ def _model_weight_bytes(path: Path) -> int:
     return int(index["metadata"]["total_size"])
 
 
-def _gpu_weight_budget(*, free_vram_bytes: int, weight_bytes: int) -> int | None:
+def _gpu_weight_budget(
+    *, free_vram_bytes: int, reserve_bytes: int, weight_bytes: int
+) -> int | None:
     """Return the VRAM cap for resident weights, or None when every weight fits."""
-    budget = free_vram_bytes - OFFLOAD_VRAM_RESERVE_BYTES
+    budget = free_vram_bytes - reserve_bytes
     return None if weight_bytes <= budget else budget
 
 
 def _offload_placement(torch, weight_bytes: int) -> dict[str, object]:
     """Keep weights that exceed free VRAM in CPU RAM; they still execute on the GPU."""
-    free_vram_bytes, _ = torch.cuda.mem_get_info()
+    free_vram_bytes, total_vram_bytes = torch.cuda.mem_get_info()
+    reserve_bytes = max(
+        OFFLOAD_VRAM_RESERVE_FLOOR_BYTES,
+        total_vram_bytes // OFFLOAD_VRAM_RESERVE_TOTAL_DIVISOR,
+    )
     budget = _gpu_weight_budget(
-        free_vram_bytes=free_vram_bytes, weight_bytes=weight_bytes
+        free_vram_bytes=free_vram_bytes,
+        reserve_bytes=reserve_bytes,
+        weight_bytes=weight_bytes,
     )
     if budget is None:
         return {}
@@ -213,7 +222,7 @@ def _offload_placement(torch, weight_bytes: int) -> dict[str, object]:
             phase="model_load",
             error=RuntimeError(
                 f"{free_vram_bytes} free bytes leave no room for model weights "
-                f"after the {OFFLOAD_VRAM_RESERVE_BYTES}-byte embedding reserve"
+                f"after the {reserve_bytes}-byte embedding reserve"
             ),
         )
     return {"device_map": "auto", "max_memory": {0: budget, "cpu": weight_bytes}}

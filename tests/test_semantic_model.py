@@ -419,6 +419,7 @@ def _load_runtime_with_free_vram(
     snapshot: Path,
     *,
     free_vram_bytes: int,
+    total_vram_bytes: int = 64 * 2**30,
 ) -> tuple[dict[str, object], list[str]]:
     load_arguments: dict[str, object] = {}
     placements: list[str] = []
@@ -432,7 +433,7 @@ def _load_runtime_with_free_vram(
 
         @staticmethod
         def mem_get_info() -> tuple[int, int]:
-            return free_vram_bytes, 64 * 2**30
+            return free_vram_bytes, total_vram_bytes
 
     class FakeTorch:
         cuda = FakeCuda()
@@ -510,3 +511,40 @@ def test_free_vram_too_small_for_any_weights_is_a_named_vram_failure(
 
     assert raised.value.code == "vram_unavailable"
     assert raised.value.phase == "model_load"
+
+
+def test_offload_reserve_is_one_tenth_of_total_vram(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_weight_index(tmp_path, 36 * 2**30)
+
+    load_arguments, placements = _load_runtime_with_free_vram(
+        monkeypatch,
+        tmp_path,
+        free_vram_bytes=39 * 2**30,
+        total_vram_bytes=40 * 2**30,
+    )
+
+    max_memory = load_arguments["max_memory"]
+    assert isinstance(max_memory, dict)
+    assert max_memory[0] == 35 * 2**30
+    assert placements == []
+
+
+def test_offload_reserve_never_drops_below_two_gibibytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_weight_index(tmp_path, 16 * 2**30)
+
+    load_arguments, _ = _load_runtime_with_free_vram(
+        monkeypatch,
+        tmp_path,
+        free_vram_bytes=15 * 2**30,
+        total_vram_bytes=16 * 2**30,
+    )
+
+    max_memory = load_arguments["max_memory"]
+    assert isinstance(max_memory, dict)
+    assert max_memory[0] == 13 * 2**30
