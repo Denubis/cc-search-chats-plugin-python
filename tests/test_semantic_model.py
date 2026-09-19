@@ -392,3 +392,121 @@ def test_query_embedding_runtime_failure_is_named(
 
     assert raised.value.code == "query_embedding_failed"
     assert raised.value.phase == "query_embed"
+
+
+def _write_weight_index(snapshot: Path, total_size: int) -> None:
+    (snapshot / "model.safetensors.index.json").write_text(
+        f'{{"metadata": {{"total_size": {total_size}}}, "weight_map": {{}}}}',
+        encoding="utf-8",
+    )
+
+
+class _PlacedModel:
+    def __init__(self, placements: list[str]) -> None:
+        self.placements = placements
+        self.config = type("Config", (), {"use_cache": True})()
+
+    def to(self, device: str) -> _PlacedModel:
+        self.placements.append(device)
+        return self
+
+    def eval(self) -> _PlacedModel:
+        return self
+
+
+def _load_runtime_with_free_vram(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: Path,
+    *,
+    free_vram_bytes: int,
+) -> tuple[dict[str, object], list[str]]:
+    load_arguments: dict[str, object] = {}
+    placements: list[str] = []
+
+    class FakeCuda:
+        OutOfMemoryError = MemoryError
+
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def mem_get_info() -> tuple[int, int]:
+            return free_vram_bytes, 64 * 2**30
+
+    class FakeTorch:
+        cuda = FakeCuda()
+        bfloat16 = "bfloat16"
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(path: Path, **kwargs: object) -> _PlacedModel:
+            load_arguments.update(kwargs, path=path)
+            return _PlacedModel(placements)
+
+    class FakeTransformers:
+        AutoModel = FakeAutoModel
+
+    modules = {"torch": FakeTorch(), "transformers": FakeTransformers()}
+    monkeypatch.setattr(semantic_model, "_model_path", lambda: snapshot)
+    monkeypatch.setattr(semantic_model, "_tokenizer", object)
+    monkeypatch.setattr(semantic_model, "import_module", modules.__getitem__)
+    semantic_model._runtime.cache_clear()
+    try:
+        semantic_model._runtime()
+    finally:
+        semantic_model._runtime.cache_clear()
+    return load_arguments, placements
+
+
+def test_model_larger_than_free_vram_offloads_the_remainder_to_cpu_ram(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    weight_bytes = 16 * 2**30
+    free_vram_bytes = 15 * 2**30
+    _write_weight_index(tmp_path, weight_bytes)
+
+    load_arguments, placements = _load_runtime_with_free_vram(
+        monkeypatch, tmp_path, free_vram_bytes=free_vram_bytes
+    )
+
+    assert load_arguments["path"] == tmp_path
+    assert load_arguments["device_map"] == "auto"
+    max_memory = load_arguments["max_memory"]
+    assert isinstance(max_memory, dict)
+    assert 0 < max_memory[0] < free_vram_bytes
+    assert max_memory["cpu"] >= weight_bytes - max_memory[0]
+    assert "offload_folder" not in load_arguments
+    assert placements == []
+
+
+def test_model_that_fits_free_vram_with_room_to_embed_stays_wholly_on_gpu(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_weight_index(tmp_path, 16 * 2**30)
+
+    load_arguments, placements = _load_runtime_with_free_vram(
+        monkeypatch, tmp_path, free_vram_bytes=48 * 2**30
+    )
+
+    assert "device_map" not in load_arguments
+    assert "max_memory" not in load_arguments
+    assert placements == ["cuda"]
+
+
+def test_free_vram_too_small_for_any_weights_is_a_named_vram_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_weight_index(tmp_path, 16 * 2**30)
+    monkeypatch.setattr(
+        semantic_model, "_gpu_process_snapshot", lambda: ((), "not queried")
+    )
+
+    with pytest.raises(ModelUnavailable) as raised:
+        _load_runtime_with_free_vram(monkeypatch, tmp_path, free_vram_bytes=2**20)
+
+    assert raised.value.code == "vram_unavailable"
+    assert raised.value.phase == "model_load"

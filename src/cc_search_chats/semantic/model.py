@@ -1,6 +1,7 @@
 """Offline-only adapter for the pinned local Nemotron embedding model."""
 
 import csv
+import json
 import os
 import re
 import shutil
@@ -24,6 +25,7 @@ CHUNK_TARGET_TOKENS = 768
 MAX_MODEL_TOKENS = 1024
 CHUNK_OVERLAP_TOKENS = 96
 CHUNKER_ID = "nemotron-token-chunks-768-1024-96:v1"
+OFFLOAD_VRAM_RESERVE_BYTES = 2 * 2**30
 type ModelProgress = Callable[[str, str], None]
 _COMMIT_HASH = re.compile(r"[0-9a-f]{40}").fullmatch
 
@@ -184,6 +186,39 @@ def _tokenizer():
         ) from error
 
 
+def _model_weight_bytes(path: Path) -> int:
+    index = json.loads(
+        (path / "model.safetensors.index.json").read_text(encoding="utf-8")
+    )
+    return int(index["metadata"]["total_size"])
+
+
+def _gpu_weight_budget(*, free_vram_bytes: int, weight_bytes: int) -> int | None:
+    """Return the VRAM cap for resident weights, or None when every weight fits."""
+    budget = free_vram_bytes - OFFLOAD_VRAM_RESERVE_BYTES
+    return None if weight_bytes <= budget else budget
+
+
+def _offload_placement(torch, weight_bytes: int) -> dict[str, object]:
+    """Keep weights that exceed free VRAM in CPU RAM; they still execute on the GPU."""
+    free_vram_bytes, _ = torch.cuda.mem_get_info()
+    budget = _gpu_weight_budget(
+        free_vram_bytes=free_vram_bytes, weight_bytes=weight_bytes
+    )
+    if budget is None:
+        return {}
+    if budget <= 0:
+        raise _vram_unavailable(
+            torch,
+            phase="model_load",
+            error=RuntimeError(
+                f"{free_vram_bytes} free bytes leave no room for model weights "
+                f"after the {OFFLOAD_VRAM_RESERVE_BYTES}-byte embedding reserve"
+            ),
+        )
+    return {"device_map": "auto", "max_memory": {0: budget, "cpu": weight_bytes}}
+
+
 @lru_cache(maxsize=1)
 def _runtime():
     path = _model_path()
@@ -207,20 +242,23 @@ def _runtime():
 
     try:
         tokenizer = _tokenizer()
-        model = (
-            transformers.AutoModel.from_pretrained(
-                path,
-                local_files_only=True,
-                trust_remote_code=False,
-                attn_implementation="sdpa",
-                dtype=torch.bfloat16,
-            )
-            .to("cuda")
-            .eval()
+        placement = _offload_placement(torch, _model_weight_bytes(path))
+        model = transformers.AutoModel.from_pretrained(
+            path,
+            local_files_only=True,
+            trust_remote_code=False,
+            attn_implementation="sdpa",
+            dtype=torch.bfloat16,
+            **placement,
         )
+        if not placement:
+            model = model.to("cuda")
+        model = model.eval()
     except torch.cuda.OutOfMemoryError as error:
         raise _vram_unavailable(torch, phase="model_load", error=error) from error
-    except (OSError, RuntimeError, ValueError) as error:
+    except ModelUnavailable:
+        raise
+    except (KeyError, OSError, RuntimeError, ValueError) as error:
         raise ModelUnavailable(
             f"the pinned local semantic model could not be loaded: {error}",
             code="model_load_failed",

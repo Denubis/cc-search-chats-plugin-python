@@ -23,6 +23,7 @@ cc-search-chats = "cc_search_chats.bootstrap:main"
 
 [project.optional-dependencies]
 semantic = [
+    "accelerate>=1.14,<2",
     "torch>=2.9,<3",
     "transformers>=5.2,<6",
 ]
