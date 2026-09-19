@@ -20,12 +20,13 @@ The execution order is intentionally different:
 
 - clean/rebuild: common release boundary → CLI proof → Codex rule → plugins →
   packaged units → clean database/rebuild → installed acceptance;
-- preserving upgrade: common release boundary → record and back up the existing
-  deployment → quiesce timer activation → CLI proof → database migration/build
-  → rule/plugins/units → installed acceptance.
+- preserving upgrade: common release boundary → record the existing deployment
+  → quiesce timer activation → CLI proof → back up only if a migration is
+  pending → database migration/build → rule/plugins/units → installed
+  acceptance.
 
 Do not execute every section top-to-bottom during an upgrade: its pre-change
-evidence and backup must precede installation of the new CLI.
+evidence must precede installation of the new CLI.
 
 Neither route edits native chat logs. Database reset, migration, installation,
 plugin changes, timer changes, production UAT, and legacy pruning are distinct
@@ -281,9 +282,8 @@ failures or explicit evidence limits; do not repair native logs by hand.
 ## Preserving upgrade
 
 This route never drops the database. Before changing the CLI, record the current
-installed commit, database identity, schema state, selected corpus/build, timer
-state, and a recoverable database backup. Complete the common release boundary
-for the target SHA first.
+installed commit, database identity, schema state, selected corpus/build, and
+timer state. Complete the common release boundary for the target SHA first.
 
 ```fish
 set previous_tool_root (uv tool dir)/cc-search-chats
@@ -293,7 +293,6 @@ systemctl --user list-timers --all --no-pager cc-search-chats-index.timer
 cc-search-chats index --status --json
 set upgrade_evidence "$HOME/.local/state/cc-search-chats/upgrades/$release_sha"
 install -d -m 700 "$upgrade_evidence"
-pg_dump --dbname='service=cc_search_chats' --format=custom --file="$upgrade_evidence/cc-search-chats-before.dump"
 ```
 
 Disable future timer activation, then require the service to be inactive before
@@ -306,9 +305,36 @@ systemctl --user is-active cc-search-chats-index.service
 
 Install and prove the new CLI using **Install and prove the CLI**, then perform
 the database-specific selected-pair and storage checks in the
-[PostgreSQL maintenance runbook](postgresql-index-maintenance.md). Only with
-separate migration authority, apply pending migrations through the installed
-entrypoint and retain both output streams:
+[PostgreSQL maintenance runbook](postgresql-index-maintenance.md).
+
+The database is a rebuildable projection of the native logs, so a backup saves
+only rebuild time, and only a schema migration can force a rebuild: it alters
+tables in place and may strand the previous CLI. An upgrade without a migration
+needs no backup; a failed index leaves the previous selection current and
+rollback is reinstalling the recorded previous SHA. The new CLI reports a
+pending migration as exit 6 with `maintenance_required` and `pending_versions`:
+
+```fish
+cc-search-chats index --status --json
+```
+
+Only when that reports `maintenance_required`, back up before migrating. Choose
+`pg_dump` from the server's own major version: Debian's `pg_wrapper` cannot read
+a `service=` connection, selects the default cluster's client instead, and an
+older `pg_dump` refuses a newer server.
+
+```fish
+set server_major (math --scale=0 (psql 'service=cc_search_chats' -Atc 'show server_version_num') / 10000)
+set pg_dump_bin /usr/lib/postgresql/$server_major/bin/pg_dump
+test -x $pg_dump_bin; or set pg_dump_bin (command -v pg_dump)
+set client_major (string match -r '\d+' ($pg_dump_bin --version | string split ' ')[-1])[1]
+test $client_major -ge $server_major; or exit 1
+$pg_dump_bin --dbname='service=cc_search_chats' --format=custom --file="$upgrade_evidence/cc-search-chats-before.dump"; or exit 1
+```
+
+Only with separate migration authority, apply pending migrations through the
+installed entrypoint and retain both output streams. Without a pending
+migration, skip the `--migrate` line:
 
 ```fish
 cc-search-chats index --migrate --json >"$upgrade_evidence/index-migrate.stdout.json" 2>"$upgrade_evidence/index-migrate.stderr.ndjson"

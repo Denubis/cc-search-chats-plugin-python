@@ -12,3 +12,5 @@ ruling.
 | [0003](0003-native-record-policy.md) | Persist visible conversation, bounded tool metadata, and monotone exclusions | Accepted | 2026-09-03 |
 | [0004](0004-semantic-search-no-deadline-warm-window.md) | Semantic search has no deadline and reuses one short-lived warm model | Accepted | 2026-09-03 |
 | [0005](0005-candidate-first-semantic-retrieval.md) | Bound exact semantic retrieval before loading payloads | Accepted | 2026-09-03 |
+| [0006](0006-automatic-semantic-model-cpu-offload.md) | Offload semantic model weights to CPU RAM automatically when VRAM is short | Accepted | 2026-09-20 |
+| [0007](0007-back-up-only-before-a-schema-migration.md) | Back up the database only before a schema migration | Accepted | 2026-09-20 |
