@@ -329,6 +329,70 @@ class TestClaudeRecognizedShapes:
             ClaudeDiagnosticCode.EXCLUDED_METADATA
         ]
 
+    @staticmethod
+    def _attachment_with(extras: dict[str, object]) -> dict[str, object]:
+        return {
+            "type": "attachment",
+            "attachment": {"type": "queued_command", "prompt": "injected text"},
+            "cwd": "/synthetic",
+            "entrypoint": "cli",
+            "gitBranch": "main",
+            "isSidechain": False,
+            "parentUuid": None,
+            "sessionId": "session",
+            "timestamp": "2026-09-20T00:00:00Z",
+            "userType": "external",
+            "uuid": "attachment-rendered",
+            "version": "2.1.278",
+            **extras,
+        }
+
+    @pytest.mark.parametrize(
+        "extras",
+        [
+            {"rendered"},
+            {"rendered", "session_id"},
+            {"rendered", "renderedInHumanTurn", "session_id"},
+            {"rendered", "slug"},
+            {"rendered", "session_id", "slug"},
+            {"rendered", "renderedInHumanTurn", "session_id", "slug"},
+            {"agentId", "rendered"},
+            {"agentId", "rendered", "renderedInHumanTurn"},
+            {"agentId", "rendered", "slug"},
+        ],
+        ids=lambda extras: "+".join(sorted(extras)),
+    )
+    def test_rendered_attachment_shapes_are_excluded_without_messages(
+        self, extras: set[str]
+    ) -> None:
+        values: dict[str, object] = {
+            "agentId": "agent",
+            "rendered": [{"type": "text", "text": "rendered injected text"}],
+            "renderedInHumanTurn": True,
+            "session_id": "session",
+            "slug": "slug",
+        }
+        result = parse_claude_session(
+            (envelope(self._attachment_with({key: values[key] for key in extras})),),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EXCLUDED_METADATA
+        ]
+
+    def test_attachment_with_an_unaudited_key_still_fails_closed(self) -> None:
+        result = parse_claude_session(
+            (envelope(self._attachment_with({"rendered": [], "unaudited": 1})),),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert result.messages == ()
+        assert ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD in [
+            diagnostic.code for diagnostic in result.diagnostics
+        ]
+
     @pytest.mark.parametrize(
         ("record_type", "keys"),
         [

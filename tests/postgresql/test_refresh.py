@@ -755,7 +755,7 @@ def test_parser_state_version_change_forces_full_reparse(
 
 def test_native_record_policy_parser_state_versions() -> None:
     assert refresh_module._PARSER_STATE_VERSIONS == {
-        Provider.CLAUDE: 3,
+        Provider.CLAUDE: 4,
         Provider.CODEX: 5,
     }
 

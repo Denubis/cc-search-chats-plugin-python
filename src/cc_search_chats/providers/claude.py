@@ -573,6 +573,20 @@ _CLAUDE_METADATA_KEYSETS["attachment"].update(
         {"slug"},
     )
 )
+_CLAUDE_METADATA_KEYSETS["attachment"].update(
+    _ATTACHMENT_BASE_KEYS | frozenset(extras)
+    for extras in (
+        {"rendered"},
+        {"rendered", "session_id"},
+        {"rendered", "renderedInHumanTurn", "session_id"},
+        {"rendered", "slug"},
+        {"rendered", "session_id", "slug"},
+        {"rendered", "renderedInHumanTurn", "session_id", "slug"},
+        {"agentId", "rendered"},
+        {"agentId", "rendered", "renderedInHumanTurn"},
+        {"agentId", "rendered", "slug"},
+    )
+)
 _CLAUDE_METADATA_KEYSETS["agent-color"] = {
     frozenset({"type", "agentColor", "sessionId"})
 }
