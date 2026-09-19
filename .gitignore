@@ -13,3 +13,4 @@ build/
 htmlcov/
 .commit-msg.tmp
 codex-prompts/
+docs/implementation-plans/2026-02-07-cc-search-v2/
