@@ -359,6 +359,10 @@ class TestClaudeRecognizedShapes:
             {"agentId", "rendered"},
             {"agentId", "rendered", "renderedInHumanTurn"},
             {"agentId", "rendered", "slug"},
+            {"agentId", "rendered", "renderedInHumanTurn", "slug"},
+            {"agentName", "rendered", "teamName"},
+            {"agentName", "rendered", "session_id", "teamName"},
+            {"agentName", "rendered", "renderedInHumanTurn", "session_id", "teamName"},
         ],
         ids=lambda extras: "+".join(sorted(extras)),
     )
@@ -367,6 +371,8 @@ class TestClaudeRecognizedShapes:
     ) -> None:
         values: dict[str, object] = {
             "agentId": "agent",
+            "agentName": "worker",
+            "teamName": "team",
             "rendered": [{"type": "text", "text": "rendered injected text"}],
             "renderedInHumanTurn": True,
             "session_id": "session",
@@ -382,9 +388,24 @@ class TestClaudeRecognizedShapes:
             ClaudeDiagnosticCode.EXCLUDED_METADATA
         ]
 
-    def test_attachment_with_an_unaudited_key_still_fails_closed(self) -> None:
+    @pytest.mark.parametrize(
+        "extras",
+        [
+            {"rendered": []},
+            {"agentName": "worker", "rendered": [], "teamName": "team"},
+            {
+                "agentId": "agent",
+                "rendered": [],
+                "renderedInHumanTurn": True,
+                "slug": "slug",
+            },
+        ],
+    )
+    def test_attachment_with_an_unaudited_key_still_fails_closed(
+        self, extras: dict[str, object]
+    ) -> None:
         result = parse_claude_session(
-            (envelope(self._attachment_with({"rendered": [], "unaudited": 1})),),
+            (envelope(self._attachment_with({**extras, "unaudited": 1})),),
             context=ClaudeSessionContext(source_session_id="session"),
         )
 

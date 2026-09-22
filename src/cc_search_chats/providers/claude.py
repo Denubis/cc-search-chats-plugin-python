@@ -585,6 +585,10 @@ _CLAUDE_METADATA_KEYSETS["attachment"].update(
         {"agentId", "rendered"},
         {"agentId", "rendered", "renderedInHumanTurn"},
         {"agentId", "rendered", "slug"},
+        {"agentId", "rendered", "renderedInHumanTurn", "slug"},
+        {"agentName", "rendered", "teamName"},
+        {"agentName", "rendered", "session_id", "teamName"},
+        {"agentName", "rendered", "renderedInHumanTurn", "session_id", "teamName"},
     )
 )
 _CLAUDE_METADATA_KEYSETS["agent-color"] = {

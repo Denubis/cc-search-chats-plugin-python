@@ -15,6 +15,7 @@ from psycopg import sql
 
 from cc_search_chats.cli import _postgres_envelope
 from cc_search_chats.core.identity import Provider
+from cc_search_chats.providers import claude as claude_module
 from cc_search_chats.providers import codex as codex_module
 from cc_search_chats.providers.source_discovery import (
     ConfiguredSourceRoot,
@@ -755,9 +756,136 @@ def test_parser_state_version_change_forces_full_reparse(
 
 def test_native_record_policy_parser_state_versions() -> None:
     assert refresh_module._PARSER_STATE_VERSIONS == {
-        Provider.CLAUDE: 4,
+        Provider.CLAUDE: 5,
         Provider.CODEX: 5,
     }
+
+
+@pytest.mark.parametrize(
+    ("attachment_type", "extras"),
+    [
+        (
+            "hook_success",
+            {"agentName": "worker", "rendered": [], "teamName": "team"},
+        ),
+        (
+            "hook_success",
+            {
+                "agentName": "worker",
+                "rendered": [],
+                "session_id": "claude-session-primary",
+                "teamName": "team",
+            },
+        ),
+        (
+            "queued_command",
+            {
+                "agentName": "worker",
+                "rendered": [],
+                "renderedInHumanTurn": True,
+                "session_id": "claude-session-primary",
+                "teamName": "team",
+            },
+        ),
+        (
+            "queued_command",
+            {
+                "agentId": "agent",
+                "rendered": [],
+                "renderedInHumanTurn": True,
+                "slug": "slug",
+            },
+        ),
+    ],
+)
+def test_claude_attachment_parser_bump_recovers_unchanged_blocked_source(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attachment_type: str,
+    extras: dict[str, object],
+) -> None:
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    attachment = {
+        "type": "attachment",
+        "attachment": {
+            "type": attachment_type,
+            "content": "excluded attachment sentinel",
+        },
+        "cwd": "/synthetic/repository",
+        "entrypoint": "cli",
+        "gitBranch": "main",
+        "isSidechain": False,
+        "parentUuid": None,
+        "sessionId": "claude-session-primary",
+        "timestamp": "2026-09-22T00:00:00Z",
+        "userType": "external",
+        "uuid": "attachment-rendered",
+        "version": "2.1.278",
+        **extras,
+    }
+    original_bytes = (
+        (FIXTURES / "claude_primary.jsonl").read_bytes()
+        + json.dumps(attachment).encode()
+        + b"\n"
+        + _claude_message_bytes(uuid="recovered", text="recovered attachment source")
+    )
+    source.write_bytes(original_bytes)
+    original_stat = source.stat()
+    root = _source_root(Provider.CLAUDE, claude_root)
+    with monkeypatch.context() as previous_parser:
+        previous_parser.setitem(
+            refresh_module._PARSER_STATE_VERSIONS, Provider.CLAUDE, 4
+        )
+        previous_parser.setitem(
+            claude_module._CLAUDE_METADATA_KEYSETS,
+            "attachment",
+            claude_module._CLAUDE_METADATA_KEYSETS["attachment"]
+            - {frozenset(attachment)},
+        )
+        failed = inspect_native_sources(postgres_connection, source_roots=(root,))
+    assert failed.blocked_source_count == 1
+    assert next(
+        postgres_connection.execute(
+            "SELECT failure_code, parser_state_version "
+            "FROM cc_search_chats.source_failure_current"
+        )
+    ) == ("unknown_conversation_record", 4)
+
+    retried = refresh_native_sources(postgres_connection, source_roots=(root,))
+
+    assert retried.attempted_content_bytes == len(original_bytes)
+    assert source.read_bytes() == original_bytes
+    current_stat = source.stat()
+    assert (current_stat.st_ino, current_stat.st_size, current_stat.st_mtime_ns) == (
+        original_stat.st_ino,
+        original_stat.st_size,
+        original_stat.st_mtime_ns,
+    )
+    coverage = _postgres_envelope(postgres_connection, "index", refresh_result=retried)[
+        "coverage"
+    ]
+    assert isinstance(coverage, dict)
+    assert coverage["completeness"] == "complete"
+    assert coverage["blocked_files"] == 0
+    assert [
+        hit.text
+        for hit in search_messages(postgres_connection, "recovered attachment source")
+    ] == ["recovered attachment source"]
+    assert search_messages(postgres_connection, "excluded attachment sentinel") == ()
+    assert next(
+        postgres_connection.execute(
+            "SELECT parser_state_version, complete_byte_offset "
+            "FROM cc_search_chats.source_file_current"
+        )
+    ) == (5, len(original_bytes))
+    assert next(
+        postgres_connection.execute(
+            "SELECT count(*) FROM cc_search_chats.source_failure_current"
+        )
+    ) == (0,)
 
 
 def test_codex_added_lifecycle_key_indexes_complete_and_searchable(
