@@ -104,6 +104,7 @@ def _assert_index_state(payload: dict[str, object]) -> dict[str, object]:
         "semantic_build",
         "unindexed",
         "unindexed_reason",
+        "freshness",
     }
     assert index_state["made_at"] == payload["indexed_at"]
     assert index_state["age_ms"] == payload["corpus_age_ms"]

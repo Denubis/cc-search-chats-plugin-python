@@ -854,6 +854,14 @@ def test_claude_attachment_parser_bump_recovers_unchanged_blocked_source(
         )
     ) == ("unknown_conversation_record", 4)
 
+    before_coverage = _postgres_envelope(postgres_connection, "search")["coverage"]
+    assert isinstance(before_coverage, dict)
+    assert before_coverage["source_issues"] == {
+        "retry_after_parser_update": 1,
+        "retryable_failures": 0,
+        "needs_attention": 0,
+    }
+
     retried = refresh_native_sources(postgres_connection, source_roots=(root,))
 
     assert retried.attempted_content_bytes == len(original_bytes)
@@ -870,6 +878,11 @@ def test_claude_attachment_parser_bump_recovers_unchanged_blocked_source(
     assert isinstance(coverage, dict)
     assert coverage["completeness"] == "complete"
     assert coverage["blocked_files"] == 0
+    assert coverage["source_issues"] == {
+        "retry_after_parser_update": 0,
+        "retryable_failures": 0,
+        "needs_attention": 0,
+    }
     assert [
         hit.text
         for hit in search_messages(postgres_connection, "recovered attachment source")

@@ -517,21 +517,18 @@ def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
     assert literal[0] == (
         "literal search (exact full-text, no model): visible assistant"
     )
-    assert literal[1].startswith("index made ")
-    assert "; now " in literal[1]
-    assert "; age " in literal[1]
-    assert literal[2] == "missing 0 chats"
-    assert "visible assistant" in "\n".join(literal[3:])
+    assert literal[1].startswith("Using index from ")
+    assert literal[1].endswith(" ago).")
+    assert "visible assistant" in "\n".join(literal[2:])
 
     semantic = human_search("--semantic")
     assert semantic[0] == ("semantic search (hybrid model ranking): visible assistant")
-    assert semantic[1].startswith("index made ")
-    assert semantic[2] == "missing 0 chats"
-    assert semantic[3] == (
+    assert semantic[1].startswith("Using index from ")
+    assert semantic[2] == (
         "semantic: loading model (first use takes about 10 s; stays warm 30 s "
         "after each query)"
     )
-    assert "visible assistant" in "\n".join(semantic[4:])
+    assert "visible assistant" in "\n".join(semantic[3:])
 
     code, timed = _run(
         monkeypatch,
@@ -556,8 +553,8 @@ def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
 
     monkeypatch.setattr("cc_search_chats.cli._bounded_query_embedding", warm_embedding)
     warm = human_search("--semantic")
-    assert warm[3] == "semantic: warm model reused"
-    assert "visible assistant" in "\n".join(warm[4:])
+    assert warm[2] == "semantic: warm model reused"
+    assert "visible assistant" in "\n".join(warm[3:])
 
     def failed_embedding(*_args, **_kwargs):
         raise RuntimeError("fixture helper failed")
@@ -567,11 +564,11 @@ def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
     )
     degraded = human_search("--semantic")
     assert degraded[0] == ("semantic search (hybrid model ranking): visible assistant")
-    assert degraded[3].startswith(
+    assert degraded[2].startswith(
         "WARNING: semantic ranking unavailable (RuntimeError: fixture helper failed); "
         "these are literal results"
     )
-    assert "visible assistant" in "\n".join(degraded[4:])
+    assert "visible assistant" in "\n".join(degraded[3:])
 
     code, degraded_payload = _run(
         monkeypatch,
@@ -659,7 +656,7 @@ def test_human_search_headers_distinguish_modes_degradation_and_unknown_scan(
         lambda *_args, **_kwargs: (None, "scan_budget_exhausted"),
     )
     unknown = human_search("--literal")
-    assert unknown[2] == "unindexed chats: unknown (scan_budget_exhausted)"
+    assert unknown[2] == "Source freshness could not be checked."
 
 
 @pytest.mark.parametrize(
@@ -717,6 +714,7 @@ def test_unbounded_search_starts_a_fresh_staleness_scan_budget(
         "bytes": 0,
     }
     assert index_state["unindexed_reason"] is None
+    assert index_state["freshness"] == "no_source_changes"
 
 
 def test_human_index_status_prints_staleness_before_checkpoint(
@@ -752,8 +750,8 @@ def test_human_index_status_prints_staleness_before_checkpoint(
         main()
     lines = capsys.readouterr().out.splitlines()
 
-    assert lines[0].startswith("index made ")
-    assert lines[1] == "missing 0 chats"
+    assert lines[0].startswith("Using index from ")
+    assert lines[1] == "No source changes detected."
     assert lines[2].startswith("Semantic index: ")
 
 

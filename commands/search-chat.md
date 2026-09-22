@@ -45,8 +45,10 @@ Read `results`, `sessions`, `messages`, or batched `resolutions` as appropriate.
 Retain provider-qualified native identity and `ccchat:v1:` locators when
 presenting matches. Read requested `mode` separately from delivered
 `retrieval_mode`. Check `index_state` for when the selected index was made, its
-age, and bounded unindexed counts; human output states the same header before
-results. A semantic `literal_fallback` must carry `semantic_search_degraded`
+elapsed age, and `freshness`. Use its offset-aware timestamps; age is measured
+at `index_state.now`. Human output gives a neutral snapshot line before results;
+routine file counts belong in `index --status`. A semantic `literal_fallback`
+must carry `semantic_search_degraded`
 and must be described as literal results. Also check `coverage`,
 `refresh.corpus_generation`, `semantic.semantic_build`,
 `semantic.corpus_generation`, `corpus_age_ms`, `warnings`, and terminal
@@ -56,4 +58,11 @@ empty result is not proof of absence when coverage is partial, staleness is
 unknown, or filters exclude the intended corpus. Coverage is partial only for a
 partial/failed refresh or positive failed, blocked, or transient source counts;
 `coverage.pending_tail_files` and `refresh.pending_bytes` instead report
-in-flight staleness that is not searchable yet.
+in-flight writes that are not searchable yet. A resolved hit remains evidence
+for what that message says, even when other sources await refresh. Describe a
+miss as “not found in this indexed snapshot” when coverage limits matter.
+`coverage.source_issues` separates retries after parser updates, temporary read
+failures, and failures needing investigation. Retry pending does not mean
+recovered. Intentionally excluded metadata is expected, not a processing
+failure. Counts are corpus-wide source files, including appended content in
+existing files—not missing conversations or sessions in the current project.

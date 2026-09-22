@@ -115,6 +115,7 @@ from cc_search_chats.storage.postgresql.migrations import (
     MaintenanceRequired,
     require_current_schema,
 )
+from cc_search_chats.storage.postgresql.refresh import source_failure_summary
 from cc_search_chats.storage.postgresql.semantic import (
     fuse_hybrid,
     semantic_search,
@@ -504,6 +505,7 @@ def _error_envelope(
             "unrecognized_conversation_records": 0,
             "pending_tail_files": 0,
             "completeness": "unknown",
+            "source_issues": None,
         },
         "refresh": {
             "corpus_generation": None,
@@ -546,6 +548,7 @@ def _error_envelope(
             "semantic_build": None,
             "unindexed": None,
             "unindexed_reason": index_state_reason,
+            "freshness": "unknown",
         }
     return envelope
 
@@ -614,8 +617,9 @@ def _corpus_times(
     now = datetime.now().astimezone()
     if indexed_at is None:
         return now, None, None
-    made_at = indexed_at.astimezone(now.tzinfo)
-    age_ms = max(0, int((now - made_at).total_seconds() * 1000))
+    made_at = indexed_at.astimezone()
+    elapsed = now.astimezone(UTC) - made_at.astimezone(UTC)
+    age_ms = max(0, int(elapsed.total_seconds() * 1000))
     return now, made_at, age_ms
 
 
@@ -659,6 +663,13 @@ def _index_state_payload(
                 else None
             ),
             "unindexed_reason": reason,
+            "freshness": (
+                "unknown"
+                if unindexed is None
+                else "refresh_pending"
+                if unindexed.files
+                else "no_source_changes"
+            ),
         }
     }
 
@@ -911,6 +922,7 @@ def _postgres_coverage(
         "unrecognized_conversation_records": unrecognized_records,
         "pending_tail_files": sum(int(root["pending_files"]) for root in roots),
         "completeness": _coverage_completeness(metrics),
+        "source_issues": source_failure_summary(connection),
     }
 
 
@@ -1069,35 +1081,81 @@ def _index_age(age_ms: int) -> str:
     return f"{days}d {hours}h {minutes}m"
 
 
-def _print_index_state_header(envelope: Mapping[str, object]) -> None:
+def _print_source_updates(state: Mapping[str, object], *, details: bool) -> None:
+    unindexed = cast("Mapping[str, object] | None", state["unindexed"])
+    if unindexed is None:
+        reason = f" ({state['unindexed_reason']})" if details else ""
+        print(f"Source freshness could not be checked{reason}.")
+        return
+    files = unindexed["files"]
+    if not isinstance(files, int):
+        raise TypeError("index-state unindexed files must be an integer")
+    if details:
+        if files == 0:
+            print("No source changes detected.")
+            return
+        print(
+            f"{files} source files have content outside this snapshot "
+            f"({unindexed['directories']} directories)."
+        )
+        print(
+            "These include new files and updates to previously indexed files; "
+            "counts are corpus-wide."
+        )
+        print("Run `cc-search-chats index` to refresh.")
+    elif files:
+        print("Source updates are awaiting refresh.")
+
+
+def _print_source_issues(envelope: Mapping[str, object], *, details: bool) -> None:
+    coverage = cast("Mapping[str, object]", envelope["coverage"])
+    issues = cast("Mapping[str, int] | None", coverage.get("source_issues"))
+    if issues is None:
+        return
+    descriptions = (
+        (
+            "retry_after_parser_update",
+            (
+                "Parser updates will retry previously blocked sources "
+                "on the next index run."
+            ),
+            "source files await retry with the updated parser",
+        ),
+        (
+            "retryable_failures",
+            "Some sources could not be read; a later index run can retry them.",
+            "source files have temporary read failures",
+        ),
+        (
+            "needs_attention",
+            (
+                "Some sources could not be processed; "
+                "see `cc-search-chats index --status`."
+            ),
+            "source files need investigation; their format could not be processed",
+        ),
+    )
+    for key, brief, detail in descriptions:
+        if issues[key]:
+            print(f"{issues[key]} {detail}." if details else brief)
+
+
+def _print_index_state_header(
+    envelope: Mapping[str, object], *, details: bool = False
+) -> None:
     state = cast("Mapping[str, object]", envelope["index_state"])
     made_at = state["made_at"]
     age_ms = state["age_ms"]
-    now = _index_timestamp(state["now"])
     if made_at is None or age_ms is None:
-        print(f"index made unknown; now {now}; age unknown")
+        print("No index snapshot is selected.")
     elif not isinstance(age_ms, int):
         raise RuntimeError("index-state age_ms must be an integer")
     else:
         print(
-            f"index made {_index_timestamp(made_at)}; now {now}; "
-            f"age {_index_age(age_ms)}"
+            f"Using index from {_index_timestamp(made_at)} ({_index_age(age_ms)} ago)."
         )
-    unindexed = cast("Mapping[str, object] | None", state["unindexed"])
-    if unindexed is None:
-        print(f"unindexed chats: unknown ({state['unindexed_reason']})")
-    else:
-        files = unindexed["files"]
-        if not isinstance(files, int):
-            raise RuntimeError("index-state unindexed files must be an integer")
-        if files == 0:
-            print("missing 0 chats")
-            return
-        print(
-            f"missing {files} chats in {unindexed['directories']} "
-            "directories since that index; run `cc-search-chats index` to include "
-            "them"
-        )
+    _print_source_updates(state, details=details)
+    _print_source_issues(envelope, details=details)
 
 
 def _print_human_search(
@@ -1611,7 +1669,7 @@ def _postgres_index_status(context: _PostgresContext) -> int:
     if context.args.json:
         print(json.dumps(envelope, sort_keys=True))
     else:
-        _print_index_state_header(envelope)
+        _print_index_state_header(envelope, details=True)
         print(f"Semantic index: {completed}/{total} passages")
     return 0
 

@@ -72,6 +72,8 @@ _PARSER_STATE_VERSIONS = {
     Provider.CLAUDE: 5,
     Provider.CODEX: 5,
 }
+
+
 _RETAINED_REFRESH_RUNS = 100
 _WAIT_HEARTBEAT_SECONDS = 5.0
 _RUN_HEARTBEAT_SECONDS = 5.0
@@ -256,6 +258,37 @@ class _SourceRefreshError(RuntimeError):
         self.source_line = source_line
         self.source_byte_offset = source_byte_offset
         self.attempted_content_bytes = attempted_content_bytes
+
+
+def source_failure_summary(connection: psycopg.Connection) -> dict[str, int]:
+    """Classify recorded source failures against this installed parser version."""
+    row = next(
+        connection.execute(
+            """
+        SELECT count(*) FILTER (WHERE failure.parser_state_version < parser.version),
+               count(*) FILTER (
+                   WHERE failure.parser_state_version >= parser.version
+                     AND failure.failure_class = 'transient'),
+               count(*) FILTER (
+                   WHERE failure.parser_state_version >= parser.version
+                     AND failure.failure_class = 'deterministic')
+        FROM cc_search_chats.source_failure_current AS failure
+        JOIN (VALUES ('claude', %s), ('codex', %s)) AS parser(provider, version)
+          ON parser.provider = failure.provider
+        """,
+            (
+                _PARSER_STATE_VERSIONS[Provider.CLAUDE],
+                _PARSER_STATE_VERSIONS[Provider.CODEX],
+            ),
+        )
+    )
+    return dict(
+        zip(
+            ("retry_after_parser_update", "retryable_failures", "needs_attention"),
+            row,
+            strict=True,
+        )
+    )
 
 
 def _is_json_object(value: object) -> TypeIs[dict[str, object]]:

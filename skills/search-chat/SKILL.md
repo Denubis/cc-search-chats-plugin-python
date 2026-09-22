@@ -107,18 +107,37 @@ and `deadline_degraded`; semantic has `deadline_ms: null`. Read
   retained event repeats `source_corpus_generation` and contains no message
   body.
 
-Human search output places the mode line first and the index made/now/age plus
-missing-chat header before results. `index_state.unindexed: null` means the
-bounded scan did not complete; report `unindexed_reason` instead of guessing.
+Report found messages as evidence for what those messages say. Corpus-wide
+coverage limits do not invalidate a resolved hit or establish whether it has
+been superseded. For a miss, say “not found in this indexed snapshot” and qualify
+the relevant roots, filters, or newer activity before making an absence claim.
 
-Treat `coverage.completeness != "complete"`, unreadable files, unrecognized
-records, warnings, or stale semantic state as evidence limits—not as a clean
-absence result. Coverage is partial only when refresh processing is partial or
-failed, or failed, blocked, or transient source files are positive. Read
-`coverage.pending_tail_files` with `refresh.pending_bytes` as separate in-flight
-staleness evidence even when coverage is complete. An empty result is meaningful
-only after the searched roots, filters, freshness, and positive controls are
-established.
+For routine freshness reporting, use `index_state.made_at` (with its UTC offset)
+and `age_ms`, the elapsed duration calculated at `index_state.now`. If reporting
+later, recompute age from offset-aware instants. `index_state.freshness` is
+`no_source_changes`, `refresh_pending`, or `unknown`; it describes the bounded source
+metadata scan, not whether all conversations are searchable. Pending updates
+are normal between index runs. Use neutral wording such as “Searching the index
+from 03:38 +10:00; newer activity may not be included.” Reserve corpus-wide file
+counts and detailed repair diagnostics for `index --status` or an explicit
+coverage question. `unindexed.files` counts new or changed source files, including
+append-only updates; it is not a count of missing chats, sessions, or messages,
+and cannot be assigned to the current project/worktree from this response.
+
+`coverage.source_issues` separates `retry_after_parser_update` (the next index
+will retry with a newer parser), `retryable_failures` (temporary failures), and
+`needs_attention` (recorded failures not addressed by a newer parser). A pending
+retry is not proof of recovery; indexing must succeed first. Deliberately
+excluded instructions, reasoning, and tool results are expected exclusions.
+They do not require repair or make processing coverage partial.
+
+`coverage.completeness` and failure warnings describe processing limits; retain
+them when they bear on the conclusion instead of labelling every answer “stale
+and partial.” `coverage.pending_tail_files` and `refresh.pending_bytes` describe
+in-flight writes. `index_state.unindexed: null` means freshness is unknown; use
+`unindexed_reason` when explaining that limit. Older schema-v5 installations may
+omit `freshness` or `source_issues`; use their existing timestamps and diagnostics
+without treating omitted fields as zero failures.
 
 Exact resolution statuses are `resolved`, `no_match`, `multiple_matches`,
 `source_unavailable`, `stale_source`, `stale_index`, `malformed_locator`, and

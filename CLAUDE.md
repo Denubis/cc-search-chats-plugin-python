@@ -1,6 +1,6 @@
 # cc-search-chats
 
-Last verified: 2026-09-06
+Last verified: 2026-09-22
 
 ## Purpose
 
@@ -75,6 +75,12 @@ They do not use the operator's production database.
   deadline-bounded count of unindexed native files, directories, and bytes or
   a closed unknown reason. Search never refreshes implicitly; run
   `cc-search-chats index` intentionally to publish newer native records.
+- Human search shows local snapshot time with its historical UTC offset and
+  elapsed age; routine file counts belong in `index --status`. Source updates
+  are expected between index runs. Additive `index_state.freshness` reports the
+  bounded metadata scan; `coverage.source_issues` distinguishes parser-update
+  retries, temporary failures, and failures needing attention. These are
+  corpus-wide file counts, not missing sessions in the current project.
 - Ranked `--limit` is 1–200. Literal PostgreSQL reads use the five-second answer
   deadline after one render reserve. A literal deadline before retrieval
   returns the deadline error; a literal deadline after hits were retrieved

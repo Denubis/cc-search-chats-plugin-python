@@ -2,7 +2,7 @@
 
 Search and recover context from native Claude Code and Codex chat history.
 
-Current release: cc-search-chats 2.3.5
+Current release: cc-search-chats 2.3.6
 
 The CLI reads vendor JSONL session logs without modifying them, maintains a
 normalized PostgreSQL search projection, and supports PostgreSQL full-text
@@ -97,7 +97,10 @@ requires exactly one of `--literal` or `--semantic`. Literal is exact full-text
 search, loads no model, and keeps the five-second invocation-to-answer
 deadline. Semantic is model-ranked hybrid search over full-text and embedding
 candidates and has no deadline. Human output states the requested mode first,
-then the index time, current time, age, and unindexed chat count; semantic also
+then the index's local timestamp with UTC offset and elapsed age. Pending source
+updates receive a neutral notice; detailed corpus-wide file counts are shown by
+`index --status`. A changed source file may contain just an append to an already
+indexed conversation. Semantic search also
 states whether it loaded or reused the warm model. JSON names `mode`, delivered
 `retrieval_mode`, `index_state`, `corpus_generation`, `semantic_build`,
 `indexed_at`, `corpus_age_ms`, and the mode-specific deadline. Run
@@ -194,6 +197,10 @@ command writes one stdout object containing:
 - `coverage.pending_tail_files` and `refresh.pending_bytes`, which report
   in-flight JSONL tails as staleness that is not searchable yet without making
   processing coverage partial
+- `coverage.source_issues` separates recorded failures awaiting an updated
+  parser (`retry_after_parser_update`), temporary failures (`retryable_failures`),
+  and failures needing investigation (`needs_attention`). A parser update makes
+  a source eligible for retry; only a subsequent successful index clears it
 - `refresh.corpus_generation`, `semantic.semantic_build`,
   `semantic.corpus_generation`, and their state/progress fields; semantic
   search also reports `semantic.model_load_ms`, `semantic.query_embed_ms`, and
@@ -204,7 +211,10 @@ command writes one stdout object containing:
   result
 - search and `index --status` `index_state`, including one-clock `made_at`,
   `now`, `age_ms`, selected corpus/build identity, and bounded unindexed
-  file/directory/byte counts or a closed unknown reason
+  file/directory/byte counts or a closed unknown reason. `freshness` is
+  `no_source_changes`, `refresh_pending`, or `unknown` for that metadata scan; it does
+  not override processing coverage. Timestamps retain their local UTC offsets
+  across daylight-saving changes; age measures elapsed time
 - ranked-search `deadline_ms`, `elapsed_ms`, and `stale_reasons`; semantic uses
   `deadline_ms: null`, while a post-retrieval literal deadline returns `status:
   partial` with `deadline_degraded` instead of discarding hits

@@ -1,5 +1,19 @@
 # Changelog
 
+## cc-search-chats 2.3.6
+
+**Changed:**
+- Search reports snapshot time and elapsed age neutrally. Detailed counts of
+  new or changed source files appear in `index --status`, without calling them
+  missing chats. Processing diagnostics distinguish retries after parser
+  updates, temporary failures, and failures needing investigation.
+- Search instructions distinguish evidence found in a message from the limits
+  on a negative search; corpus-wide counts are not project/session counts.
+
+**Fixed:**
+- Snapshot timestamps retain their historical local UTC offset across
+  daylight-saving changes, while age measures actual elapsed time.
+
 ## cc-search-chats 2.3.5
 
 **Fixed:**
