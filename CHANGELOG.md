@@ -1,5 +1,18 @@
 # Changelog
 
+## cc-search-chats 2.3.5
+
+**Fixed:**
+- Coverage reporting groups repository paths before counting them, avoiding the
+  large distinct-count sort that could exceed the 64 MiB temporary-file limit
+  after search had already retrieved results.
+- Four observed Claude attachment shapes with team/rendered metadata (including
+  session and human-turn fields) or agent/rendered-in-human-turn/slug metadata
+  are excluded from search without blocking their source files. Other unaudited
+  shapes still fail closed.
+- The Claude parser-state version advances to retry unchanged blocked files on
+  the next index run. Claude sources reparse once; unchanged embeddings are reused.
+
 ## cc-search-chats 2.3.4
 
 **Fixed:**
