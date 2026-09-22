@@ -826,9 +826,13 @@ def _postgres_repository_count(connection: psycopg.Connection) -> int:
     return next(
         connection.execute(
             """
-            SELECT count(DISTINCT COALESCE(repository, cwd))
-            FROM cc_search_chats.message_current
-            WHERE COALESCE(repository, cwd) IS NOT NULL
+            SELECT count(*)
+            FROM (
+                SELECT COALESCE(repository, cwd)
+                FROM cc_search_chats.message_current
+                WHERE COALESCE(repository, cwd) IS NOT NULL
+                GROUP BY COALESCE(repository, cwd)
+            ) AS repositories
             """
         )
     )[0]

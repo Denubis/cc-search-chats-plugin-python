@@ -12,9 +12,15 @@ from threading import Event
 import psycopg
 import pytest
 
-from cc_search_chats.cli import _handle_postgres, _ProgressStream, build_parser
+from cc_search_chats.cli import (
+    _handle_postgres,
+    _postgres_envelope,
+    _postgres_repository_count,
+    _ProgressStream,
+    build_parser,
+)
 from cc_search_chats.semantic import SemanticChunk
-from cc_search_chats.storage.postgresql import migrate, resolve_message
+from cc_search_chats.storage.postgresql import migrate, resolve_message, search_messages
 from cc_search_chats.storage.postgresql.guardrails import queued_read
 
 pytestmark = pytest.mark.postgresql
@@ -119,6 +125,91 @@ def _seed_representative_corpus(connection: psycopg.Connection) -> tuple[str, st
     connection.execute("ANALYZE cc_search_chats.message_current")
     connection.execute("ANALYZE cc_search_chats.physical_alias_current")
     return "canonical-19999", "alias-19999"
+
+
+def test_coverage_repository_count_stays_within_read_temp_limit(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    """Repeated paths must not spill a corpus-sized sort while reporting a hit."""
+    _seed_representative_corpus(postgres_connection)
+    # Scale path width to reproduce the production sort volume with fewer rows.
+    # Keep those paths inline, as the much shorter production paths are.
+    postgres_connection.execute(
+        "ALTER TABLE cc_search_chats.message_current "
+        "ALTER COLUMN repository SET STORAGE PLAIN, "
+        "ALTER COLUMN cwd SET STORAGE PLAIN"
+    )
+    postgres_connection.execute(
+        """
+        UPDATE cc_search_chats.message_current
+        SET repository = '/repository/' || repeat('nested/', 256)
+                         || (substring(logical_message_id FROM 9)::integer % 32),
+            cwd = '/working/' || repeat('nested/', 256)
+        """
+    )
+    postgres_connection.execute("ANALYZE cc_search_chats.message_current")
+    postgres_connection.execute("SET work_mem = '4MB'")
+    postgres_connection.execute("SET max_parallel_workers_per_gather = 0")
+    notices: list[str] = []
+    postgres_connection.add_notice_handler(
+        lambda diagnostic: notices.append(diagnostic.message_primary or "")
+    )
+    postgres_connection.execute("LOAD 'auto_explain'")
+    postgres_connection.execute("SET auto_explain.log_min_duration = 0")
+    postgres_connection.execute("SET auto_explain.log_analyze = on")
+    postgres_connection.execute("SET auto_explain.log_buffers = on")
+    postgres_connection.execute("SET auto_explain.log_format = 'json'")
+    postgres_connection.execute("SET client_min_messages = log")
+
+    for _ in range(3):
+        with queued_read(postgres_connection):
+            assert (
+                next(postgres_connection.execute("SHOW temp_file_limit"))[0] == "64MB"
+            )
+            hits = search_messages(postgres_connection, "representative text", limit=1)
+            assert len(hits) == 1
+            assert hits[0].text == "representative text " * 8
+            envelope = _postgres_envelope(postgres_connection, "search")
+            coverage = envelope["coverage"]
+            assert isinstance(coverage, dict)
+            assert coverage["repository_count"] == 32
+
+    count_plans = [
+        json.JSONDecoder().raw_decode(notice[notice.index("{") :])[0]["Plan"]
+        for notice in notices
+        if "COALESCE(repository, cwd)" in notice
+    ]
+    assert len(count_plans) == 3
+    for plan in count_plans:
+        nodes = tuple(_plan_nodes(plan))
+        assert plan["Actual Rows"] == 1
+        assert any(node.get("Actual Rows") == 20000 for node in nodes)
+        assert plan["Temp Written Blocks"] == 0
+
+
+def test_repository_count_preserves_null_fallback_and_distinct_paths(
+    postgres_connection: psycopg.Connection,
+) -> None:
+    _seed_representative_corpus(postgres_connection)
+    assert _postgres_repository_count(postgres_connection) == 0
+    postgres_connection.execute(
+        """
+        UPDATE cc_search_chats.message_current
+        SET repository = CASE logical_message_id
+                WHEN 'message-1' THEN '/shared'
+                WHEN 'message-2' THEN '/shared'
+                WHEN 'message-3' THEN ''
+                ELSE NULL END,
+            cwd = CASE logical_message_id
+                WHEN 'message-1' THEN '/ignored'
+                WHEN 'message-2' THEN '/also-ignored'
+                WHEN 'message-3' THEN '/empty-repository-wins'
+                WHEN 'message-4' THEN '/shared'
+                WHEN 'message-5' THEN '/fallback'
+                ELSE NULL END
+        """
+    )
+    assert _postgres_repository_count(postgres_connection) == 3
 
 
 @pytest.mark.parametrize(
