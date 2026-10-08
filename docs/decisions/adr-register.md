@@ -14,3 +14,4 @@ ruling.
 | [0005](0005-candidate-first-semantic-retrieval.md) | Bound exact semantic retrieval before loading payloads | Accepted | 2026-09-03 |
 | [0006](0006-automatic-semantic-model-cpu-offload.md) | Offload semantic model weights to CPU RAM automatically when VRAM is short | Accepted | 2026-09-20 |
 | [0007](0007-back-up-only-before-a-schema-migration.md) | Back up the database only before a schema migration | Accepted | 2026-09-20 |
+| [0008](0008-index-recent-primary-antigravity-sessions.md) | Index recent primary Antigravity sessions under a new design | Accepted | 2026-10-08 |
