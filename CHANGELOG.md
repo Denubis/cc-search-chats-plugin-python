@@ -1,5 +1,20 @@
 # Changelog
 
+## cc-search-chats 2.3.7
+
+**Fixed:**
+- Claude Code attachment rows that now carry `renderedRole` (with the observed
+  combinations of `renderedInHumanTurn`, `renderedBesideToolResult`,
+  `session_id`, `slug`, `sessionKind`, and team metadata) are excluded from
+  search without blocking their source files. These rows sit at the top of
+  every session written since early October 2026, so the affected files were
+  entirely unindexed. Also recognised as excluded metadata: `queue-operation`
+  rows with `commandUuid` and `deliveryId`, `continued-in` session-fork
+  pointers, and Workflow journal `launched` and labelled `started` rows. Other
+  unaudited shapes still fail closed.
+- The Claude parser-state version advances to retry unchanged blocked files on
+  the next index run. Claude sources reparse once; unchanged embeddings are reused.
+
 ## cc-search-chats 2.3.6
 
 **Changed:**

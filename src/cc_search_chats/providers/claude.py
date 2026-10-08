@@ -479,7 +479,33 @@ _CLAUDE_METADATA_KEYSETS = {
     "queue-operation": {
         frozenset({"type", "content", "operation", "sessionId", "timestamp"}),
         frozenset({"type", "content", "operation", "reason", "sessionId", "timestamp"}),
+        frozenset(
+            {
+                "type",
+                "commandUuid",
+                "content",
+                "operation",
+                "reason",
+                "sessionId",
+                "timestamp",
+            }
+        ),
+        frozenset(
+            {
+                "type",
+                "commandUuid",
+                "content",
+                "deliveryId",
+                "operation",
+                "reason",
+                "sessionId",
+                "timestamp",
+            }
+        ),
         frozenset({"type", "operation", "sessionId", "timestamp"}),
+    },
+    "continued-in": {
+        frozenset({"type", "continuedInSessionId", "sessionId", "timestamp"})
     },
     "cost-state": {
         frozenset(
@@ -499,7 +525,11 @@ _CLAUDE_METADATA_KEYSETS = {
             }
         )
     },
-    "started": {frozenset({"type", "agentId", "key"})},
+    "launched": {frozenset({"type"})},
+    "started": {
+        frozenset({"type", "agentId", "key"}),
+        frozenset({"type", "agentId", "key", "label", "phase"}),
+    },
     "ai-title": {frozenset({"type", "aiTitle", "sessionId"})},
     "atis-latch": {frozenset({"type", "atis", "sessionId"})},
     "agent-name": {frozenset({"type", "agentName", "sessionId"})},
@@ -589,6 +619,34 @@ _CLAUDE_METADATA_KEYSETS["attachment"].update(
         {"agentName", "rendered", "teamName"},
         {"agentName", "rendered", "session_id", "teamName"},
         {"agentName", "rendered", "renderedInHumanTurn", "session_id", "teamName"},
+        {"rendered", "renderedRole"},
+        {"rendered", "renderedRole", "session_id"},
+        {"rendered", "renderedRole", "slug"},
+        {"rendered", "renderedRole", "sessionKind"},
+        {"rendered", "renderedRole", "sessionKind", "session_id"},
+        {"agentName", "rendered", "renderedRole", "teamName"},
+        {"agentName", "rendered", "renderedRole", "session_id", "teamName"},
+        {"rendered", "renderedRole", "session_id", "slug"},
+        {"rendered", "renderedInHumanTurn", "renderedRole", "session_id"},
+        {"rendered", "renderedInHumanTurn", "renderedRole", "session_id", "slug"},
+        {"rendered", "renderedBesideToolResult", "renderedRole", "session_id"},
+        {"rendered", "renderedBesideToolResult", "renderedRole", "session_id", "slug"},
+        {
+            "agentName",
+            "rendered",
+            "renderedInHumanTurn",
+            "renderedRole",
+            "session_id",
+            "teamName",
+        },
+        {
+            "agentName",
+            "rendered",
+            "renderedBesideToolResult",
+            "renderedRole",
+            "session_id",
+            "teamName",
+        },
     )
 )
 _CLAUDE_METADATA_KEYSETS["agent-color"] = {

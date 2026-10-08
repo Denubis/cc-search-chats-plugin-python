@@ -756,7 +756,7 @@ def test_parser_state_version_change_forces_full_reparse(
 
 def test_native_record_policy_parser_state_versions() -> None:
     assert refresh_module._PARSER_STATE_VERSIONS == {
-        Provider.CLAUDE: 5,
+        Provider.CLAUDE: 6,
         Provider.CODEX: 5,
     }
 
@@ -893,7 +893,7 @@ def test_claude_attachment_parser_bump_recovers_unchanged_blocked_source(
             "SELECT parser_state_version, complete_byte_offset "
             "FROM cc_search_chats.source_file_current"
         )
-    ) == (5, len(original_bytes))
+    ) == (refresh_module._PARSER_STATE_VERSIONS[Provider.CLAUDE], len(original_bytes))
     assert next(
         postgres_connection.execute(
             "SELECT count(*) FROM cc_search_chats.source_failure_current"
@@ -1177,7 +1177,7 @@ def test_codex_metadata_parser_bump_recovers_unchanged_blocked_source(
             FROM cc_search_chats.source_file_current
             """
         )
-    ) == (5, len(original_bytes))
+    ) == (refresh_module._PARSER_STATE_VERSIONS[Provider.CODEX], len(original_bytes))
 
 
 def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(

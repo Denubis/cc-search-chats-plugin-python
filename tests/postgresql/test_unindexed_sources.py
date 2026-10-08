@@ -13,7 +13,10 @@ from cc_search_chats.providers.source_discovery import (
     source_root_id,
 )
 from cc_search_chats.storage.postgresql import migrate, unindexed_sources
-from cc_search_chats.storage.postgresql.refresh import source_failure_summary
+from cc_search_chats.storage.postgresql.refresh import (
+    _PARSER_STATE_VERSIONS,
+    source_failure_summary,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -213,6 +216,7 @@ def test_source_failures_distinguish_parser_retry_from_current_failures(
         VALUES (repeat('a', 64), 'claude', '/synthetic', 0)
         """
     )
+    current = _PARSER_STATE_VERSIONS[Provider.CLAUDE]
     postgres_connection.execute(
         """
         INSERT INTO cc_search_chats.source_failure_current (
@@ -224,12 +228,14 @@ def test_source_failures_distinguish_parser_retry_from_current_failures(
         SELECT repeat('a', 64), name, 'claude', 1, 1, 10, 1, version, 'fixture',
                'fixture failure', class, 10, 1,
                CASE WHEN class = 'transient' THEN now() ELSE NULL END
-        FROM (VALUES ('old.jsonl', 4, 'deterministic'),
-                     ('old-transient.jsonl', 4, 'transient'),
-                     ('current.jsonl', 5, 'deterministic'),
-                     ('future.jsonl', 6, 'deterministic'),
-                     ('transient.jsonl', 5, 'transient')) AS failures(name, version, class)
-        """
+        FROM (VALUES ('old.jsonl', %(old)s, 'deterministic'),
+                     ('old-transient.jsonl', %(old)s, 'transient'),
+                     ('current.jsonl', %(current)s, 'deterministic'),
+                     ('future.jsonl', %(future)s, 'deterministic'),
+                     ('transient.jsonl', %(current)s, 'transient')
+             ) AS failures(name, version, class)
+        """,
+        {"old": current - 1, "current": current, "future": current + 1},
     )
     assert source_failure_summary(postgres_connection) == {
         "retry_after_parser_update": 2,
