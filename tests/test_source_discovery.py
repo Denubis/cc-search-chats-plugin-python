@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 
 from cc_search_chats.core.identity import Provider
+from cc_search_chats.providers.registry import configured_source_roots
 from cc_search_chats.providers.source_discovery import (
     BoundedReadResult,
     BoundedReadStopReason,
     DiscoveryResult,
     SourceDiagnosticCode,
-    configured_source_roots,
     discover_claude_sources,
     discover_codex_sources,
     read_bounded_jsonl,

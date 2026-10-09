@@ -56,6 +56,17 @@ class LocatorKeyKind(StrEnum):
     ORDINAL = "ordinal"
 
 
+_LOCATOR_KEY_KINDS: dict[Provider, frozenset[LocatorKeyKind]] = {
+    Provider.CLAUDE: frozenset({LocatorKeyKind.UUID}),
+    Provider.CODEX: frozenset({LocatorKeyKind.ID, LocatorKeyKind.ORDINAL}),
+}
+
+
+def permitted_locator_key_kinds(provider: Provider) -> frozenset[LocatorKeyKind]:
+    """Return the physical key kinds the version-1 locator grammar admits."""
+    return _LOCATOR_KEY_KINDS[provider]
+
+
 class ResolutionStatus(StrEnum):
     """Terminal exact-resolution outcomes."""
 
@@ -132,14 +143,12 @@ class NativeLocator:
         """Enforce the provider-specific version-1 locator grammar."""
         _validate_opaque_identifier(self.source_session_id, "source_session_id")
 
-        if self.provider is Provider.CLAUDE:
-            if self.key_kind is not LocatorKeyKind.UUID:
-                raise ValueError("Claude locators require a uuid key")
-        elif self.provider is Provider.CODEX:
-            if self.key_kind not in (LocatorKeyKind.ID, LocatorKeyKind.ORDINAL):
-                raise ValueError("Codex locators require an id or ordinal key")
-        else:
+        permitted = _LOCATOR_KEY_KINDS.get(self.provider)
+        if permitted is None:
             raise ValueError(f"unsupported provider: {self.provider!r}")
+        if self.key_kind not in permitted:
+            kinds = " or ".join(kind.value for kind in sorted(permitted))
+            raise ValueError(f"{self.provider.value} locators require {kinds} key")
 
         if self.key_kind in (LocatorKeyKind.UUID, LocatorKeyKind.ID):
             if not isinstance(self.key, str):

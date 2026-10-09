@@ -6,12 +6,8 @@ from typing import TYPE_CHECKING
 
 import psycopg  # noqa: TC002  # keep public annotations runtime-resolvable
 
-from cc_search_chats.core.identity import Provider
-from cc_search_chats.providers.source_discovery import (
-    SourceDiagnosticCode,
-    discover_claude_sources,
-    discover_codex_sources,
-)
+from cc_search_chats.providers.registry import provider_adapter
+from cc_search_chats.providers.source_discovery import SourceDiagnosticCode
 
 if TYPE_CHECKING:
     from os import stat_result
@@ -85,10 +81,8 @@ def _discover_root(
 ) -> tuple[tuple[DiscoveredSource, ...] | None, str | None]:
     if monotonic() >= deadline_monotonic:
         return None, "scan_budget_exhausted"
-    discovery = (
-        discover_claude_sources(root.path, inspect_content=False)
-        if root.provider is Provider.CLAUDE
-        else discover_codex_sources(root.path, inspect_content=False)
+    discovery = provider_adapter(root.provider).discover(
+        root.path, inspect_content=False
     )
     if monotonic() >= deadline_monotonic:
         return None, "scan_budget_exhausted"

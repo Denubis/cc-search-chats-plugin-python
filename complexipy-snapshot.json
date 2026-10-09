@@ -80,10 +80,6 @@
     "file_name": "source_discovery.py",
     "functions": [
       {
-        "name": "configured_source_roots",
-        "complexity": 23
-      },
-      {
         "name": "read_bounded_jsonl",
         "complexity": 66
       }
@@ -141,37 +137,15 @@
     "functions": [
       {
         "name": "_discover_sources",
-        "complexity": 19
+        "complexity": 17
       },
       {
         "name": "_parse_and_stage_source",
-        "complexity": 23
-      },
-      {
-        "name": "_skipped_record_diagnostics",
-        "complexity": 24
+        "complexity": 22
       },
       {
         "name": "refresh_native_sources",
         "complexity": 39
-      }
-    ]
-  },
-  {
-    "path": "src/cc_search_chats/storage/postgresql/resolution.py",
-    "file_name": "resolution.py",
-    "functions": [
-      {
-        "name": "_scan_claude_source",
-        "complexity": 17
-      },
-      {
-        "name": "_scan_codex_source",
-        "complexity": 19
-      },
-      {
-        "name": "_scan_unindexed_locator",
-        "complexity": 22
       }
     ]
   },

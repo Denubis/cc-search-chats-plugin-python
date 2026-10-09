@@ -5,43 +5,23 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeIs
 
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from cc_search_chats.core.canonicalization import (
-    CodexRecordFamily,
-    PhysicalMessageCandidate,
-)
 from cc_search_chats.core.identity import (
-    ContentClass,
-    LocatorKeyKind,
-    MessageIdentity,
-    NativeLocator,
     NativeMessage,
-    PhysicalAlias,
     Provider,
-    SessionKind,
-    SubmittedBy,
     format_locator,
 )
-from cc_search_chats.providers.claude import (
-    ClaudeDiagnostic,
-    ClaudeDiagnosticCode,
-    ClaudeParseResult,
-    ClaudeParserState,
-    ClaudeSessionContext,
-    parse_claude_session,
-)
-from cc_search_chats.providers.codex import (
-    CodexDiagnostic,
-    CodexDiagnosticCode,
-    CodexParseResult,
-    CodexParserState,
-    CodexSessionContext,
-    parse_codex_session,
+from cc_search_chats.providers.registry import (
+    ParseDiagnostic,
+    ParseResult,
+    ProviderAdapter,
+    provider_adapter,
+    provider_adapters,
+    required_integer,
 )
 from cc_search_chats.providers.source_discovery import (
     BoundedReadStopReason,
@@ -50,8 +30,6 @@ from cc_search_chats.providers.source_discovery import (
     RecordEnvelope,
     SourceDiagnostic,
     SourceDiagnosticCode,
-    discover_claude_sources,
-    discover_codex_sources,
     inspect_non_native_artifact,
     read_bounded_jsonl,
     source_root_id,
@@ -68,12 +46,6 @@ from cc_search_chats.storage.postgresql.semantic import (
     prepare_candidate_semantics,
 )
 
-_PARSER_STATE_VERSIONS = {
-    Provider.CLAUDE: 6,
-    Provider.CODEX: 5,
-}
-
-
 _RETAINED_REFRESH_RUNS = 100
 _WAIT_HEARTBEAT_SECONDS = 5.0
 _RUN_HEARTBEAT_SECONDS = 5.0
@@ -85,36 +57,10 @@ _TRAVERSAL_FAILURES = {
     SourceDiagnosticCode.UNREADABLE_ROOT,
     SourceDiagnosticCode.UNREADABLE_PATH,
 }
-_UNSUPPORTED_CLAUDE_DIAGNOSTICS = {
-    ClaudeDiagnosticCode.MISSING_MESSAGE,
-    ClaudeDiagnosticCode.NON_OBJECT_MESSAGE,
-    ClaudeDiagnosticCode.UNKNOWN_ROLE,
-    ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
-    ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD,
-    ClaudeDiagnosticCode.MISSING_MESSAGE_UUID,
+_SKIPPABLE_SOURCE_DIAGNOSTICS = {
+    SourceDiagnosticCode.OVERSIZED_RECORD,
+    SourceDiagnosticCode.INVALID_ENCODING,
 }
-_UNSUPPORTED_CODEX_DIAGNOSTICS = {
-    CodexDiagnosticCode.UNSUPPORTED_SOURCE_SHAPE,
-    CodexDiagnosticCode.UNKNOWN_ROLE,
-    CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
-    CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM,
-    CodexDiagnosticCode.UNKNOWN_EVENT,
-    CodexDiagnosticCode.UNKNOWN_OUTER_TYPE,
-    CodexDiagnosticCode.INVALID_PAYLOAD,
-    CodexDiagnosticCode.UNSUPPORTED_SESSION_IDENTITY,
-}
-_SKIPPABLE_CLAUDE_DIAGNOSTICS = {
-    ClaudeDiagnosticCode.MALFORMED_JSON,
-    ClaudeDiagnosticCode.INVALID_ENCODING,
-    ClaudeDiagnosticCode.INVALID_UNICODE,
-}
-_SKIPPABLE_CODEX_DIAGNOSTICS = {
-    CodexDiagnosticCode.MALFORMED_JSON,
-    CodexDiagnosticCode.INVALID_ENCODING,
-    CodexDiagnosticCode.INVALID_UNICODE,
-}
-_REPAIRED_CLAUDE_DIAGNOSTICS = {ClaudeDiagnosticCode.REPAIRED_UNICODE}
-_REPAIRED_CODEX_DIAGNOSTICS = {CodexDiagnosticCode.REPAIRED_UNICODE}
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,8 +160,12 @@ class _SourcePlan:
     start_byte_offset: int
     next_record_ordinal: int
     next_source_line: int
-    prior_state: ClaudeParserState | CodexParserState | None
+    prior_state: object
     prior_skipped_record_count: int
+
+    @property
+    def adapter(self) -> ProviderAdapter:
+        return provider_adapter(self.observed.root.provider)
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,12 +223,12 @@ def source_failure_summary(connection: psycopg.Connection) -> dict[str, int]:
                    WHERE failure.parser_state_version >= parser.version
                      AND failure.failure_class = 'deterministic')
         FROM cc_search_chats.source_failure_current AS failure
-        JOIN (VALUES ('claude', %s), ('codex', %s)) AS parser(provider, version)
+        JOIN unnest(%s::text[], %s::integer[]) AS parser(provider, version)
           ON parser.provider = failure.provider
         """,
             (
-                _PARSER_STATE_VERSIONS[Provider.CLAUDE],
-                _PARSER_STATE_VERSIONS[Provider.CODEX],
+                [adapter.provider.value for adapter in provider_adapters()],
+                [adapter.parser_state_version for adapter in provider_adapters()],
             ),
         )
     )
@@ -288,192 +238,6 @@ def source_failure_summary(connection: psycopg.Connection) -> dict[str, int]:
             row,
             strict=True,
         )
-    )
-
-
-def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
-    return isinstance(value, dict) and all(isinstance(key, str) for key in value)
-
-
-def _required_text(value: Mapping[str, object], key: str) -> str:
-    result = value.get(key)
-    if not isinstance(result, str):
-        raise ValueError(  # noqa: TRY004  # persisted-state ValueError contract
-            f"{key} must be a string"
-        )
-    return result
-
-
-def _optional_text(value: Mapping[str, object], key: str) -> str | None:
-    result = value.get(key)
-    if result is not None and not isinstance(result, str):
-        raise ValueError(f"{key} must be a string or null")
-    return result
-
-
-def _required_integer(value: Mapping[str, object], key: str) -> int:
-    result = value.get(key)
-    if isinstance(result, bool) or not isinstance(result, int):
-        raise ValueError(  # noqa: TRY004  # persisted-state ValueError contract
-            f"{key} must be an integer"
-        )
-    return result
-
-
-def _serialize_codex_candidate(
-    candidate: PhysicalMessageCandidate,
-) -> dict[str, object]:
-    message = candidate.message
-    if len(message.identity.physical_aliases) != 1:
-        raise ValueError("persisted Codex carry must have exactly one physical alias")
-    alias = message.identity.physical_aliases[0]
-    locator = alias.locator
-    return {
-        "record_family": candidate.record_family.value,
-        "logical_message_id": message.identity.logical_message_id,
-        "source_session_id": locator.source_session_id,
-        "key_kind": locator.key_kind.value,
-        "key": locator.key,
-        "record_digest": locator.record_digest,
-        "source_file_relative": alias.source_file_relative.as_posix(),
-        "record_ordinal": alias.record_ordinal,
-        "source_line": alias.source_line,
-        "source_byte_offset": alias.source_byte_offset,
-        "raw_byte_length": alias.raw_byte_length,
-        "source_digest": alias.source_digest,
-        "timestamp": message.timestamp,
-        "role": message.role,
-        "session_kind": message.session_kind.value,
-        "conversation_epoch": message.conversation_epoch,
-        "content_class": message.content_class.value,
-        "text": message.text,
-        "repository": message.repository,
-        "cwd": message.cwd,
-        "submitted_by": message.submitted_by.value,
-        "submission_evidence": list(message.submission_evidence),
-        "submission_match_cardinality": message.submission_match_cardinality,
-    }
-
-
-def _deserialize_codex_candidate(value: object) -> PhysicalMessageCandidate:
-    if not _is_json_object(value):
-        raise ValueError("Codex trailing candidate must be an object")
-    key_kind = LocatorKeyKind(_required_text(value, "key_kind"))
-    raw_key = value.get("key")
-    if key_kind is LocatorKeyKind.ORDINAL:
-        if isinstance(raw_key, bool) or not isinstance(raw_key, int):
-            raise ValueError("ordinal Codex carry key must be an integer")
-        key: str | int = raw_key
-    else:
-        if not isinstance(raw_key, str):
-            raise ValueError("ID Codex carry key must be a string")
-        key = raw_key
-    raw_evidence = value.get("submission_evidence")
-    if not isinstance(raw_evidence, list) or any(
-        not isinstance(item, str) for item in raw_evidence
-    ):
-        raise ValueError("submission_evidence must be a string array")
-    locator = NativeLocator(
-        provider=Provider.CODEX,
-        source_session_id=_required_text(value, "source_session_id"),
-        key_kind=key_kind,
-        key=key,
-        record_digest=_optional_text(value, "record_digest"),
-    )
-    alias = PhysicalAlias(
-        locator=locator,
-        source_file_relative=Path(_required_text(value, "source_file_relative")),
-        record_ordinal=_required_integer(value, "record_ordinal"),
-        source_line=_required_integer(value, "source_line"),
-        source_byte_offset=_required_integer(value, "source_byte_offset"),
-        raw_byte_length=_required_integer(value, "raw_byte_length"),
-        source_digest=_required_text(value, "source_digest"),
-    )
-    message = NativeMessage(
-        identity=MessageIdentity(
-            logical_message_id=_required_text(value, "logical_message_id"),
-            canonical_locator=locator,
-            physical_aliases=(alias,),
-        ),
-        timestamp=_required_text(value, "timestamp"),
-        role=_required_text(value, "role"),
-        session_kind=SessionKind(_required_text(value, "session_kind")),
-        conversation_epoch=_required_integer(value, "conversation_epoch"),
-        content_class=ContentClass(_required_text(value, "content_class")),
-        text=_required_text(value, "text"),
-        repository=_optional_text(value, "repository"),
-        cwd=_optional_text(value, "cwd"),
-        submitted_by=SubmittedBy(_required_text(value, "submitted_by")),
-        submission_evidence=tuple(
-            item for item in raw_evidence if isinstance(item, str)
-        ),
-        submission_match_cardinality=_required_integer(
-            value, "submission_match_cardinality"
-        ),
-    )
-    return PhysicalMessageCandidate(
-        message=message,
-        record_family=CodexRecordFamily(_required_text(value, "record_family")),
-    )
-
-
-def _serialize_parser_state(
-    provider: Provider, state: ClaudeParserState | CodexParserState
-) -> dict[str, object]:
-    if provider is Provider.CLAUDE:
-        if not isinstance(state, ClaudeParserState):
-            raise TypeError("Claude source produced non-Claude parser state")
-        return {
-            "next_conversation_epoch": state.next_conversation_epoch,
-            "seen_compaction_uuids": list(state.seen_compaction_uuids),
-        }
-    if not isinstance(state, CodexParserState):
-        raise TypeError("Codex source produced non-Codex parser state")
-    return {
-        "next_conversation_epoch": state.next_conversation_epoch,
-        "session_kind": (
-            state.session_kind.value if state.session_kind is not None else None
-        ),
-        "seen_compaction_digests": list(state.seen_compaction_digests),
-        "trailing_candidate": (
-            _serialize_codex_candidate(state.trailing_candidate)
-            if state.trailing_candidate is not None
-            else None
-        ),
-        "source_session_id": state.source_session_id,
-    }
-
-
-def _string_tuple(value: Mapping[str, object], key: str) -> tuple[str, ...]:
-    raw = value.get(key)
-    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
-        raise ValueError(f"{key} must be a string array")
-    return tuple(item for item in raw if isinstance(item, str))
-
-
-def _deserialize_parser_state(
-    provider: Provider, value: object
-) -> ClaudeParserState | CodexParserState:
-    if not _is_json_object(value):
-        raise ValueError("parser state must be an object")
-    if provider is Provider.CLAUDE:
-        return ClaudeParserState(
-            next_conversation_epoch=_required_integer(value, "next_conversation_epoch"),
-            seen_compaction_uuids=_string_tuple(value, "seen_compaction_uuids"),
-        )
-    raw_kind = value.get("session_kind")
-    if raw_kind is not None and not isinstance(raw_kind, str):
-        raise ValueError("session_kind must be a string or null")
-    return CodexParserState(
-        next_conversation_epoch=_required_integer(value, "next_conversation_epoch"),
-        session_kind=SessionKind(raw_kind) if raw_kind is not None else None,
-        seen_compaction_digests=_string_tuple(value, "seen_compaction_digests"),
-        trailing_candidate=(
-            _deserialize_codex_candidate(value["trailing_candidate"])
-            if value.get("trailing_candidate") is not None
-            else None
-        ),
-        source_session_id=_optional_text(value, "source_session_id"),
     )
 
 
@@ -738,10 +502,8 @@ def _discover_sources(
     discovered_keys: set[tuple[str, Path]] = set()
     failures: list[dict[str, object]] = []
     for root in roots:
-        discovery = (
-            discover_claude_sources(root.path, inspect_content=False)
-            if root.provider is Provider.CLAUDE
-            else discover_codex_sources(root.path, inspect_content=False)
+        discovery = provider_adapter(root.provider).discover(
+            root.path, inspect_content=False
         )
         if any(
             diagnostic.code in _ROOT_FAILURES for diagnostic in discovery.diagnostics
@@ -808,7 +570,8 @@ def _discover_sources(
 def _plan_source(
     observed: _ObservedSource, checkpoint: _Checkpoint | None
 ) -> _SourcePlan | None:
-    version = _PARSER_STATE_VERSIONS[observed.root.provider]
+    adapter = provider_adapter(observed.root.provider)
+    version = adapter.parser_state_version
     if checkpoint is None:
         return _SourcePlan(observed, "replace", 0, 0, 1, None, 0)
     same_identity = (
@@ -829,9 +592,7 @@ def _plan_source(
         and observed.size > checkpoint.observed_size
     ):
         try:
-            prior_state = _deserialize_parser_state(
-                observed.root.provider, checkpoint.parser_state
-            )
+            prior_state = adapter.deserialize_state(checkpoint.parser_state)
         except ValueError:
             pass
         else:
@@ -856,7 +617,7 @@ def _failed_observation_matches(
         observed.file_inode,
         observed.size,
         observed.mtime_ns,
-        _PARSER_STATE_VERSIONS[observed.root.provider],
+        provider_adapter(observed.root.provider).parser_state_version,
     ) == (
         failure.file_device,
         failure.file_inode,
@@ -1067,57 +828,31 @@ def _parse_batch(
     plan: _SourcePlan,
     envelopes: tuple[RecordEnvelope, ...],
     diagnostics: tuple[SourceDiagnostic, ...],
-    state: ClaudeParserState | CodexParserState | None,
-) -> ClaudeParseResult | CodexParseResult:
-    provider = plan.observed.root.provider
-    if provider is Provider.CLAUDE:
-        if state is not None and not isinstance(state, ClaudeParserState):
-            raise _SourceRefreshError("invalid Claude continuation state")
-        parsed = parse_claude_session(
+    state: object,
+) -> ParseResult:
+    adapter = plan.adapter
+    try:
+        parsed = adapter.parse(
             envelopes,
-            context=ClaudeSessionContext(
-                source_session_id=plan.observed.source.source_file_relative.stem
+            source_session_id=adapter.source_session_id(
+                plan.observed.source.source_file_relative
             ),
+            source_diagnostics=diagnostics,
             prior_state=state,
         )
-        unsupported = next(
-            (
-                diagnostic
-                for diagnostic in parsed.diagnostics
-                if diagnostic.code in _UNSUPPORTED_CLAUDE_DIAGNOSTICS
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise _SourceRefreshError(
-                "unsupported Claude record "
-                f"{unsupported.code.value} at ordinal {unsupported.record_ordinal}",
-                code=unsupported.code.value,
-                failure_class="deterministic",
-                record_ordinal=unsupported.record_ordinal,
-                source_line=unsupported.source_line,
-                source_byte_offset=unsupported.source_byte_offset,
-            )
-        return parsed
-    if state is not None and not isinstance(state, CodexParserState):
-        raise _SourceRefreshError("invalid Codex continuation state")
-    parsed = parse_codex_session(
-        envelopes,
-        context=CodexSessionContext(),
-        source_diagnostics=diagnostics,
-        prior_state=state,
-    )
+    except TypeError as error:
+        raise _SourceRefreshError(str(error)) from error
     unsupported = next(
         (
             diagnostic
             for diagnostic in parsed.diagnostics
-            if diagnostic.code in _UNSUPPORTED_CODEX_DIAGNOSTICS
+            if diagnostic.code in adapter.unsupported_codes
         ),
         None,
     )
     if unsupported is not None:
         raise _SourceRefreshError(
-            "unsupported Codex record "
+            f"unsupported {adapter.provider.value} record "
             f"{unsupported.code.value} at ordinal {unsupported.record_ordinal}",
             code=unsupported.code.value,
             failure_class="deterministic",
@@ -1130,40 +865,23 @@ def _parse_batch(
 
 def _skipped_record_diagnostics(
     plan: _SourcePlan,
-    parsed: ClaudeParseResult | CodexParseResult,
+    parsed: ParseResult,
     source_diagnostics: tuple[SourceDiagnostic, ...],
 ) -> tuple[dict[str, object], ...]:
     """Describe each intentionally omitted physical record exactly once."""
     provider = plan.observed.root.provider
-    candidates: list[tuple[str, str, int | None, int | None, int | None]] = []
-    if provider is Provider.CLAUDE:
-        if not isinstance(parsed, ClaudeParseResult):
-            raise _SourceRefreshError("Claude source produced a non-Claude result")
-        candidates.extend(
-            (
-                diagnostic.code.value,
-                diagnostic.detail,
-                diagnostic.record_ordinal,
-                diagnostic.source_line,
-                diagnostic.source_byte_offset,
-            )
-            for diagnostic in parsed.diagnostics
-            if diagnostic.code in _SKIPPABLE_CLAUDE_DIAGNOSTICS
+    skippable = plan.adapter.skippable_codes
+    candidates: list[tuple[str, str, int | None, int | None, int | None]] = [
+        (
+            diagnostic.code.value,
+            diagnostic.detail,
+            diagnostic.record_ordinal,
+            diagnostic.source_line,
+            diagnostic.source_byte_offset,
         )
-    else:
-        if not isinstance(parsed, CodexParseResult):
-            raise _SourceRefreshError("Codex source produced a non-Codex result")
-        candidates.extend(
-            (
-                diagnostic.code.value,
-                diagnostic.detail,
-                diagnostic.record_ordinal,
-                diagnostic.source_line,
-                diagnostic.source_byte_offset,
-            )
-            for diagnostic in parsed.diagnostics
-            if diagnostic.code in _SKIPPABLE_CODEX_DIAGNOSTICS
-        )
+        for diagnostic in parsed.diagnostics
+        if diagnostic.code in skippable
+    ]
     candidates.extend(
         (
             diagnostic.code.value,
@@ -1173,11 +891,7 @@ def _skipped_record_diagnostics(
             diagnostic.source_byte_offset,
         )
         for diagnostic in source_diagnostics
-        if diagnostic.code
-        in {
-            SourceDiagnosticCode.OVERSIZED_RECORD,
-            SourceDiagnosticCode.INVALID_ENCODING,
-        }
+        if diagnostic.code in _SKIPPABLE_SOURCE_DIAGNOSTICS
     )
 
     by_ordinal: dict[int, dict[str, object]] = {}
@@ -1224,7 +938,7 @@ def _messages_without_skipped_records(
 
 
 def _repaired_record_diagnostic(
-    plan: _SourcePlan, diagnostic: ClaudeDiagnostic | CodexDiagnostic
+    plan: _SourcePlan, diagnostic: ParseDiagnostic
 ) -> tuple[int, dict[str, object]]:
     """Convert one parser repair outcome to its run-scoped summary."""
     if (
@@ -1248,26 +962,13 @@ def _repaired_record_diagnostic(
 
 def _repaired_record_diagnostics(
     plan: _SourcePlan,
-    parsed: ClaudeParseResult | CodexParseResult,
+    parsed: ParseResult,
 ) -> tuple[dict[str, object], ...]:
     """Summarize repaired physical records without treating them as warnings."""
-    provider = plan.observed.root.provider
-    if provider is Provider.CLAUDE:
-        if not isinstance(parsed, ClaudeParseResult):
-            raise _SourceRefreshError("Claude source produced a non-Claude result")
-        diagnostics = (
-            diagnostic
-            for diagnostic in parsed.diagnostics
-            if diagnostic.code in _REPAIRED_CLAUDE_DIAGNOSTICS
-        )
-    else:
-        if not isinstance(parsed, CodexParseResult):
-            raise _SourceRefreshError("Codex source produced a non-Codex result")
-        diagnostics = (
-            diagnostic
-            for diagnostic in parsed.diagnostics
-            if diagnostic.code in _REPAIRED_CODEX_DIAGNOSTICS
-        )
+    repaired = plan.adapter.repaired_codes
+    diagnostics = (
+        diagnostic for diagnostic in parsed.diagnostics if diagnostic.code in repaired
+    )
     by_ordinal: dict[int, dict[str, object]] = {}
     for diagnostic in diagnostics:
         ordinal, value = _repaired_record_diagnostic(plan, diagnostic)
@@ -1329,7 +1030,7 @@ def _stage_source_checkpoint(
             complete_byte_offset,
             next_record_ordinal,
             next_source_line,
-            _PARSER_STATE_VERSIONS[observed.root.provider],
+            plan.adapter.parser_state_version,
             Jsonb(parser_state),
             source_status,
             pending_bytes,
@@ -1392,22 +1093,21 @@ def _parse_and_stage_source(
     connection: psycopg.Connection, plan: _SourcePlan
 ) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
     observed = plan.observed
-    artifact = _index_artifact(observed.source.path)
+    adapter = plan.adapter
+    artifact = (
+        _index_artifact(observed.source.path) if adapter.inspect_artifacts else None
+    )
     if artifact is not None:
         return _stage_index_artifact(connection, plan, artifact)
 
     offset = plan.start_byte_offset
     ordinal = plan.next_record_ordinal
     source_line = plan.next_source_line
-    state: ClaudeParserState | CodexParserState | None = plan.prior_state
+    state: object = plan.prior_state
     skipped_diagnostics: list[dict[str, object]] = []
     repaired_diagnostics: list[dict[str, object]] = []
     if observed.size == offset and state is None:
-        state = (
-            ClaudeParserState()
-            if observed.root.provider is Provider.CLAUDE
-            else CodexParserState()
-        )
+        state = adapter.initial_state()
     while offset < observed.size:
         batch = read_bounded_jsonl(
             observed.source.path,
@@ -1455,8 +1155,7 @@ def _parse_and_stage_source(
         skipped_diagnostics.extend(batch_skips)
         repaired_diagnostics.extend(_repaired_record_diagnostics(plan, parsed))
         skipped_ordinals = frozenset(
-            _required_integer(diagnostic, "record_ordinal")
-            for diagnostic in batch_skips
+            required_integer(diagnostic, "record_ordinal") for diagnostic in batch_skips
         )
         _stage_messages(
             connection,
@@ -1497,7 +1196,7 @@ def _parse_and_stage_source(
         complete_byte_offset=offset,
         next_record_ordinal=ordinal,
         next_source_line=source_line,
-        parser_state=_serialize_parser_state(observed.root.provider, state),
+        parser_state=adapter.serialize_state(state),
         source_status="indexed",
         final_size=final.st_size,
         skipped_record_count=(
@@ -1611,7 +1310,7 @@ def _record_failed_observation(
             observed.file_inode,
             observed.size,
             observed.mtime_ns,
-            _PARSER_STATE_VERSIONS[observed.root.provider],
+            plan.adapter.parser_state_version,
             error.record_ordinal,
             error.source_line,
             error.source_byte_offset,

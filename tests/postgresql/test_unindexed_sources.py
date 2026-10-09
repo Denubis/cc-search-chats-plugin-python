@@ -8,15 +8,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cc_search_chats.core.identity import Provider
+from cc_search_chats.providers.registry import provider_adapter
 from cc_search_chats.providers.source_discovery import (
     ConfiguredSourceRoot,
     source_root_id,
 )
 from cc_search_chats.storage.postgresql import migrate, unindexed_sources
-from cc_search_chats.storage.postgresql.refresh import (
-    _PARSER_STATE_VERSIONS,
-    source_failure_summary,
-)
+from cc_search_chats.storage.postgresql.refresh import source_failure_summary
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -216,7 +214,7 @@ def test_source_failures_distinguish_parser_retry_from_current_failures(
         VALUES (repeat('a', 64), 'claude', '/synthetic', 0)
         """
     )
-    current = _PARSER_STATE_VERSIONS[Provider.CLAUDE]
+    current = provider_adapter(Provider.CLAUDE).parser_state_version
     postgres_connection.execute(
         """
         INSERT INTO cc_search_chats.source_failure_current (

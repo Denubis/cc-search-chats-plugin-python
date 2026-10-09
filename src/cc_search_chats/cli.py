@@ -43,7 +43,7 @@ from cc_search_chats.output import (
     json_search_results,
     json_session_list,
 )
-from cc_search_chats.providers.source_discovery import configured_source_roots
+from cc_search_chats.providers.registry import configured_source_roots
 from cc_search_chats.queueing import client_admission
 from cc_search_chats.semantic import (
     ModelUnavailable,

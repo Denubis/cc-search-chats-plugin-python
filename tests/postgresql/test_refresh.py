@@ -1,5 +1,6 @@
 """Fixture-root PostgreSQL refresh behavior."""
 
+import dataclasses
 import json
 import os
 import shutil
@@ -17,6 +18,8 @@ from cc_search_chats.cli import _postgres_envelope
 from cc_search_chats.core.identity import Provider
 from cc_search_chats.providers import claude as claude_module
 from cc_search_chats.providers import codex as codex_module
+from cc_search_chats.providers import registry
+from cc_search_chats.providers.registry import provider_adapter
 from cc_search_chats.providers.source_discovery import (
     ConfiguredSourceRoot,
     SourceDiagnostic,
@@ -41,6 +44,22 @@ from cc_search_chats.storage.postgresql import (
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
 _INDEX_QUEUE_LOCK = "cc_search_chats.index_queue"
+
+
+def _parser_state_version(provider: Provider) -> int:
+    return provider_adapter(provider).parser_state_version
+
+
+def _set_parser_state_version(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, version: int
+) -> None:
+    """Simulate an installed parser whose state version differs from the record policy."""
+    adapter = registry.provider_adapter(provider)
+    monkeypatch.setitem(
+        registry._ADAPTERS,
+        provider,
+        dataclasses.replace(adapter, parser_state_version=version),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -731,31 +750,29 @@ def test_parser_state_version_change_forces_full_reparse(
         return original_reader(path, **kwargs)
 
     monkeypatch.setattr(refresh_module, "read_bounded_jsonl", recording_reader)
-    monkeypatch.setitem(
-        refresh_module._PARSER_STATE_VERSIONS,
-        Provider.CLAUDE,
-        refresh_module._PARSER_STATE_VERSIONS[Provider.CLAUDE] + 1,
+    _set_parser_state_version(
+        monkeypatch, Provider.CLAUDE, _parser_state_version(Provider.CLAUDE) + 1
     )
 
     refresh_native_sources(postgres_connection, source_roots=roots)
 
     assert starts
     assert starts[0] == 0
-    assert (
-        next(
-            postgres_connection.execute(
-                """
+    assert next(
+        postgres_connection.execute(
+            """
             SELECT parser_state_version
             FROM cc_search_chats.source_file_current
             """
-            )
-        )[0]
-        == refresh_module._PARSER_STATE_VERSIONS[Provider.CLAUDE]
-    )
+        )
+    )[0] == _parser_state_version(Provider.CLAUDE)
 
 
 def test_native_record_policy_parser_state_versions() -> None:
-    assert refresh_module._PARSER_STATE_VERSIONS == {
+    assert {
+        adapter.provider: adapter.parser_state_version
+        for adapter in registry.provider_adapters()
+    } == {
         Provider.CLAUDE: 6,
         Provider.CODEX: 5,
     }
@@ -836,9 +853,7 @@ def test_claude_attachment_parser_bump_recovers_unchanged_blocked_source(
     original_stat = source.stat()
     root = _source_root(Provider.CLAUDE, claude_root)
     with monkeypatch.context() as previous_parser:
-        previous_parser.setitem(
-            refresh_module._PARSER_STATE_VERSIONS, Provider.CLAUDE, 4
-        )
+        _set_parser_state_version(previous_parser, Provider.CLAUDE, 4)
         previous_parser.setitem(
             claude_module._CLAUDE_METADATA_KEYSETS,
             "attachment",
@@ -893,7 +908,7 @@ def test_claude_attachment_parser_bump_recovers_unchanged_blocked_source(
             "SELECT parser_state_version, complete_byte_offset "
             "FROM cc_search_chats.source_file_current"
         )
-    ) == (refresh_module._PARSER_STATE_VERSIONS[Provider.CLAUDE], len(original_bytes))
+    ) == (_parser_state_version(Provider.CLAUDE), len(original_bytes))
     assert next(
         postgres_connection.execute(
             "SELECT count(*) FROM cc_search_chats.source_failure_current"
@@ -951,7 +966,7 @@ def test_codex_parser_state_bump_retries_unchanged_deterministic_failure(
     source = day / "rollout-retry.jsonl"
     shutil.copy(FIXTURES / "codex_modern_primary_145.jsonl", source)
     root = _source_root(Provider.CODEX, codex_root)
-    installed_parser_version = refresh_module._PARSER_STATE_VERSIONS[Provider.CODEX]
+    installed_parser_version = _parser_state_version(Provider.CODEX)
     new_matcher = codex_module._matches_excluded_keyset
 
     def old_exact_matcher(
@@ -959,7 +974,7 @@ def test_codex_parser_state_bump_retries_unchanged_deterministic_failure(
     ) -> bool:
         return frozenset(payload) in required_keysets
 
-    monkeypatch.setitem(refresh_module._PARSER_STATE_VERSIONS, Provider.CODEX, 3)
+    _set_parser_state_version(monkeypatch, Provider.CODEX, 3)
     monkeypatch.setattr(codex_module, "_matches_excluded_keyset", old_exact_matcher)
     before = source.stat()
 
@@ -980,11 +995,7 @@ def test_codex_parser_state_bump_retries_unchanged_deterministic_failure(
     ) == ("deterministic", "unknown_event", 3)
 
     monkeypatch.setattr(codex_module, "_matches_excluded_keyset", new_matcher)
-    monkeypatch.setitem(
-        refresh_module._PARSER_STATE_VERSIONS,
-        Provider.CODEX,
-        installed_parser_version,
-    )
+    _set_parser_state_version(monkeypatch, Provider.CODEX, installed_parser_version)
     retried = refresh_native_sources(
         postgres_connection,
         source_roots=(root,),
@@ -1124,9 +1135,7 @@ def test_codex_metadata_parser_bump_recovers_unchanged_blocked_source(
         ),
     )
     with monkeypatch.context() as previous_parser:
-        previous_parser.setitem(
-            refresh_module._PARSER_STATE_VERSIONS, Provider.CODEX, 4
-        )
+        _set_parser_state_version(previous_parser, Provider.CODEX, 4)
         blocked = inspect_native_sources(postgres_connection, source_roots=(root,))
     assert blocked.blocked_source_count == 1
     assert blocked.attempted_content_bytes == 0
@@ -1177,7 +1186,7 @@ def test_codex_metadata_parser_bump_recovers_unchanged_blocked_source(
             FROM cc_search_chats.source_file_current
             """
         )
-    ) == (refresh_module._PARSER_STATE_VERSIONS[Provider.CODEX], len(original_bytes))
+    ) == (_parser_state_version(Provider.CODEX), len(original_bytes))
 
 
 def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(
@@ -1468,7 +1477,7 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
         source.stat().st_ino,
         source.stat().st_size,
         source.stat().st_mtime_ns,
-        refresh_module._PARSER_STATE_VERSIONS[Provider.CLAUDE],
+        _parser_state_version(Provider.CLAUDE),
     )
     assert failure[7:] == (checkpoint[2], len(future_bytes), 1)
     failed_envelope = _postgres_envelope(postgres_connection, "search")
@@ -1663,7 +1672,7 @@ def test_first_parse_skips_unstorable_record_and_publishes_neighbors(
             stat.st_ino,
             stat.st_size,
             stat.st_mtime_ns,
-            refresh_module._PARSER_STATE_VERSIONS[Provider.CLAUDE],
+            _parser_state_version(Provider.CLAUDE),
             len(before),
             reason,
         ),
