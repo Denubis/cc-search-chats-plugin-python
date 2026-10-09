@@ -4,9 +4,9 @@ Last verified: 2026-09-22
 
 ## Purpose
 
-`cc-search-chats` recovers context from native Claude Code and Codex JSONL
-sessions. PostgreSQL is a rebuildable search projection; the native logs remain
-the content authority and are always read-only.
+`cc-search-chats` recovers context from native Claude Code, Codex and primary
+Antigravity CLI JSONL sessions. PostgreSQL is a rebuildable search projection;
+the native logs remain the content authority and are always read-only.
 
 ## Tech Stack
 
@@ -54,10 +54,12 @@ They do not use the operator's production database.
   `--semantic` is model-ranked hybrid search that fuses bounded full-text and
   embedding candidates with exact reciprocal-rank-fusion arithmetic. Both modes
   return visible primary-session prose; `--agents` includes agent and unknown
-  sessions; `--literal --tools` includes persisted tool-name and tool-input rows;
-  `--exhaustive` requires literal mode and returns deterministic complete
-  occurrences. No supported mode exposes reasoning, system/developer
-  instructions, injected context, or unrecognised record shapes.
+  sessions (it adds nothing for Antigravity, whose indexed sessions are all
+  primary); `--literal --tools` includes persisted tool-name and tool-input
+  rows; `--exhaustive` requires literal mode and returns deterministic complete
+  occurrences. `--provider` accepts `claude`, `codex` and `antigravity`. No
+  supported mode exposes reasoning, system/developer instructions, injected
+  context, or unrecognised record shapes.
 - Every search states its requested mode before results. JSON separates
   requested `mode` from delivered `retrieval_mode`. Query embedding is a
   same-user ad hoc helper, started by the first semantic search and released
@@ -81,7 +83,10 @@ They do not use the operator's production database.
   so such sessions are found only without `--project`.
 - Human search shows local snapshot time with its historical UTC offset and
   elapsed age; routine file counts belong in `index --status`. Source updates
-  are expected between index runs. Additive `index_state.freshness` reports the
+  are expected between index runs. Intentionally excluded sources (non-native
+  artefacts, and Antigravity sessions outside scope) are checkpointed at full
+  size and appear only in `coverage.excluded_files`, never as unindexed,
+  pending, or needing attention. Additive `index_state.freshness` reports the
   bounded metadata scan; `coverage.source_issues` distinguishes parser-update
   retries, temporary failures, and failures needing attention. These are
   corpus-wide file counts, not missing sessions in the current project.

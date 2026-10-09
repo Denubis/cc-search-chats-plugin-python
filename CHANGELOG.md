@@ -1,5 +1,28 @@
 # Changelog
 
+## cc-search-chats 2.4.0
+
+**Added:**
+- Primary Antigravity CLI sessions are a third native provider. `index`
+  discovers `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript_full.jsonl`
+  (or `CC_SEARCH_ANTIGRAVITY_ROOTS`) by metadata only, admits a session whose
+  first record is a human request created on or after 2026-10-01T00:00:00Z,
+  and indexes its user requests, assistant prose, and tool-call names and
+  arguments as `antigravity` primary messages with exact
+  `ccchat:v1:antigravity:<uuid>:ordinal:<n>:sha256:<digest>` locators.
+  Thinking, tool results, injected context and checkpoints stay excluded;
+  `--provider antigravity` filters to it; `cwd` (and so `--project`) is
+  derived from the session's first `run_command`.
+- Migration 11 replaces the three live `provider` CHECK constraints to admit
+  `antigravity`. Apply it with `index --migrate` after the ADR 0007 backup.
+
+**Changed:**
+- Excluded sources (non-native artefacts, and Antigravity sessions outside
+  scope) are checkpointed at full size and stay excluded while unchanged, so
+  they no longer count as unindexed or pending between index runs.
+- Provider-specific dispatch runs through one provider registry; Claude and
+  Codex behaviour is unchanged.
+
 ## cc-search-chats 2.3.7
 
 **Fixed:**

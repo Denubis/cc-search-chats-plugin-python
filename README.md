@@ -1,8 +1,9 @@
 # cc-search-chats
 
-Search and recover context from native Claude Code and Codex chat history.
+Search and recover context from native Claude Code, Codex and primary
+Antigravity CLI chat history.
 
-Current release: cc-search-chats 2.3.7
+Current release: cc-search-chats 2.4.0
 
 The CLI reads vendor JSONL session logs without modifying them, maintains a
 normalized PostgreSQL search projection, and supports PostgreSQL full-text
@@ -114,8 +115,10 @@ PostgreSQL runbooks rather than authorizing an inline repair.
 
 PostgreSQL searches all configured roots by default. Filters narrow that corpus:
 
-- `--provider claude|codex`
-- `--project PATH` for exact recorded repository/cwd values
+- `--provider claude|codex|antigravity`
+- `--project PATH` for exact recorded repository/cwd values; for Antigravity
+  the value is derived from the session's first `run_command` `Cwd` and is
+  absent when the session ran none
 - `--role ROLE`, `--epoch N`, and `--days N`
 - `--agents` for agent and unknown sessions
 - `--literal --tools` for persisted tool names and inputs
@@ -127,8 +130,16 @@ complete occurrence coverage; it pages through PostgreSQL and ignores the
 ranked limit. `--tools` and `--exhaustive` require `--literal`.
 
 No supported search mode indexes or returns reasoning/thinking, system or
-developer instructions, injected context, or unrecognized content shapes.
-`--everything` is retired and exits with migration guidance.
+developer instructions, injected context, tool results, or unrecognized
+content shapes. `--everything` is retired and exits with migration guidance.
+
+Antigravity coverage is deliberately narrow: only primary sessions whose first
+record is a human request created on or after 2026-10-01T00:00:00Z are
+indexed, from `transcript_full.jsonl` alone. Subagent sessions, Gemini CLI
+chats, earlier sessions, and every sidecar file stay out and are never
+reported as pending. Indexed rows are the user request text, assistant prose,
+and (with `--literal --tools`) tool-call names and arguments; `--agents` adds
+nothing for this provider.
 
 ## Source Roots
 
@@ -138,6 +149,7 @@ Defaults:
 |---|---|---|
 | Claude | `~/.claude/projects` | `~/.claude-ponytail/projects` |
 | Codex | `~/.codex/sessions` | `~/.codex-ponytail/sessions` |
+| Antigravity | `~/.gemini/antigravity-cli/brain` (when present) | none |
 
 Plural variables replace a provider's default collection using the platform
 path separator:
@@ -145,13 +157,18 @@ path separator:
 ```fish
 set -x CC_SEARCH_CLAUDE_ROOTS "$HOME/.claude/projects:$HOME/.claude-ponytail/projects"
 set -x CC_SEARCH_CODEX_ROOTS "$HOME/.codex/sessions:$HOME/.codex-ponytail/sessions"
+set -x CC_SEARCH_ANTIGRAVITY_ROOTS "$HOME/.gemini/antigravity-cli/brain"
 ```
 
 The singular `CC_SEARCH_CLAUDE_ROOT` and `CC_SEARCH_CODEX_ROOT` remain one-root
-migration compatibility. Explicit roots fail loudly when unavailable; optional
-Ponytail defaults are included only when their session directory exists.
+migration compatibility; Antigravity has no singular variable. Explicit roots
+fail loudly when unavailable; optional Ponytail and Antigravity defaults are
+included only when their session directory exists.
 
-Discovery traverses only those session directories. Equal native identities
+Discovery traverses only those session directories. Antigravity discovery
+lists the root's immediate UUID-named session directories that hold
+`.system_generated/logs/transcript_full.jsonl`, by metadata alone; it never
+opens the OAuth token, settings, history, or any session sidecar. Equal native identities
 share one canonical message and retain each genuine physical occurrence as an
 alias; conflicting content for one identity aborts publication.
 
@@ -167,7 +184,10 @@ Unchanged refreshes read metadata but no JSONL content bytes and create no
 generation. Same-device/inode growth reads only after the last complete-record
 watermark. Partial tails remain pending; truncation, replacement, same-size
 modification, and parser-version changes reparse the affected source from byte
-zero. Native logs are never written or locked.
+zero. A source excluded on inspection (a non-native artefact, or an
+Antigravity session outside scope) is checkpointed at full size and stays
+excluded while its identity holds and it has not shrunk, so it is never
+re-read or reported as unindexed. Native logs are never written or locked.
 
 One PostgreSQL advisory owner serializes corpus work. Long phases
 publish owner, heartbeat, completed/total units, and named state. Committed

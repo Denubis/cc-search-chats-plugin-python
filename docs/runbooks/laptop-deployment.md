@@ -334,7 +334,9 @@ $pg_dump_bin --dbname='service=cc_search_chats' --format=custom --file="$upgrade
 
 Only with separate migration authority, apply pending migrations through the
 installed entrypoint and retain both output streams. Without a pending
-migration, skip the `--migrate` line:
+migration, skip the `--migrate` line. The 2.4.0 upgrade applies migration 11,
+which replaces the three `provider` CHECK constraints so `antigravity` rows are
+admitted; the backup above is required before it.
 
 ```fish
 cc-search-chats index --migrate --json >"$upgrade_evidence/index-migrate.stdout.json" 2>"$upgrade_evidence/index-migrate.stderr.ndjson"
@@ -346,6 +348,15 @@ Indexing prepares and publishes one coherent replacement. A candidate failure
 must leave the previously selected coherent corpus/build current; preserve the
 failure output and prove the previous selection still answers a known positive
 literal query. Do not reset the database as upgrade recovery.
+
+Operational check for the first 2.4.0 index: the post-index status lists a
+third root, `~/.gemini/antigravity-cli/brain`, when that directory exists. As of
+2026-10-09 the expected report for it is 228 discovered files, 7 indexed, 221
+excluded, zero pending, and zero blocked or transient failures; the
+`coverage.source_issues` counts stay zero and `index_state.unindexed.files`
+stays zero on an immediate second `index --status`. Different counts are not a
+failure in themselves (the store grows), but excluded sessions appearing as
+unindexed, pending, or needing attention are.
 
 After the new database state passes its status checks, apply **Install the Codex
 host route**, the preserving-upgrade commands under **Install the plugins**, and

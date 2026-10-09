@@ -52,8 +52,10 @@ records; they never own full copies of messages, physical aliases, or embeddings
   chats from one completed corpus. Literal candidates are always obtained first.
   Query embedding and semantic retrieval may enrich them only when that work
   finishes within the request deadline; otherwise the same request succeeds
-  with literal results and explicit query-side semantic degradation. Agy and
-  the transport archive are out of scope as searchable corpora.
+  with literal results and explicit query-side semantic degradation.
+  Antigravity subagent sessions, Gemini CLI chats and rendered transport
+  archives never enter the searchable corpus; primary Antigravity sessions are
+  governed by the 2026-10-09 design (`2026-10-09-antigravity-primary-sessions.md`).
 - Default results include only visible user/assistant prose from primary sessions. `--agents` includes Claude subagent and Codex child-agent conversations. `--tools` adds lexical-only tool names, inputs, and results. Reasoning and developer/system instructions remain excluded.
 - Embedding and retrieval run locally. Once the model is installed, searches work offline and transmit no chat content.
 - An overnight bulk job maintains the baseline. Search requests never run migrations or a baseline rebuild: when the newest coherent corpus is at least five minutes old, they may admit or join one full background update, wait only within a provisional five-second end-to-end deadline, and report the exact completed corpus, age, coverage, and background state used for the answer.
@@ -93,9 +95,10 @@ than adding another refresh lane or retaining permanent full corpus copies.
   within the request deadline; otherwise it returns the FTS candidates with
   `literal_fallback` coverage. `--literal` performs FTS-only retrieval without
   loading the embedding model.
-- **Failure:** Agy sessions and rendered transport archives never enter the
-  searchable corpus, even when their files are reachable from a configured
-  source root.
+- **Failure:** Antigravity subagent sessions, Gemini CLI chats and rendered
+  transport archives never enter the searchable corpus, even when their files
+  are reachable from a configured source root; primary Antigravity sessions
+  are governed by the 2026-10-09 design.
 
 ### cross-vendor-semantic-search.AC2: Content and session boundaries
 

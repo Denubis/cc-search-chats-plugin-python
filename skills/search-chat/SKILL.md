@@ -1,6 +1,6 @@
 ---
 name: search-chat
-description: "Search and recover context from Claude Code and Codex chat history. Use for previous conversations, lost context, cross-session references, earlier discussions, or recovering work after compression or a crash."
+description: "Search and recover context from Claude Code, Codex and primary Antigravity CLI chat history. Use for previous conversations, lost context, cross-session references, earlier discussions, or recovering work after compression or a crash."
 allowed-tools: ["Bash(cc-search-chats:*)"]
 ---
 
@@ -34,6 +34,7 @@ cc-search-chats search "query" --semantic --json
 # Exact words, filters, or semantic runtime unavailable
 cc-search-chats search "query" --literal --json
 cc-search-chats search "query" --literal --provider codex --days 7 --json
+cc-search-chats search "query" --literal --provider antigravity --json
 
 # Include agent and unknown sessions
 cc-search-chats search "query" --semantic --agents --json
@@ -44,7 +45,7 @@ cc-search-chats search "query" --literal --tools --json
 # Complete deterministic prose/tool occurrences rather than ranked top results
 cc-search-chats search "query" --literal --tools --exhaustive --json
 
-# Recent sessions across configured standard and Ponytail Claude/Codex roots
+# Recent sessions across configured standard and Ponytail Claude/Codex roots and the Antigravity root
 cc-search-chats list --days 7 --json
 
 # Recover one session; qualify collisions with --provider
@@ -76,6 +77,15 @@ and inputs; tool results are not persisted. `--exhaustive` also requires literal
 mode and is the only complete occurrence mode. Ranked results are bounded top
 results. No flag exposes reasoning/thinking, system/developer instructions,
 injected context, or unrecognized record shapes.
+
+`--provider` accepts `claude`, `codex`, and `antigravity`. Antigravity rows
+come only from primary sessions started on or after 2026-10-01 (UTC) under
+`~/.gemini/antigravity-cli/brain` or `CC_SEARCH_ANTIGRAVITY_ROOTS`: the human
+request text, assistant prose, and tool-call names/arguments. Subagent
+sessions, Gemini CLI chats, earlier sessions, thinking, and tool results are
+not indexed, and `--agents` adds nothing for this provider. Its `cwd` is
+derived from the first `run_command` in the session, so `--project` matches
+only sessions that ran a command there.
 
 ## Interpret schema v5
 

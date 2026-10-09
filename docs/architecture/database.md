@@ -1,10 +1,11 @@
 # Database architecture
 
-Last verified: 2026-09-03
+Last verified: 2026-10-09
 
 ## Authority and ownership
 
-Native Claude Code and Codex JSONL session files are the content authority.
+Native Claude Code, Codex and Antigravity CLI JSONL session files are the
+content authority.
 `cc_search_chats` is a rebuildable PostgreSQL projection for discovery
 checkpoints, canonical visible content, exact source coordinates, full-text
 search, reusable semantic vectors, and bounded run diagnostics. The application

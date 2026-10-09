@@ -223,3 +223,87 @@ Evidence (2026-10-09):
 - `pytest -q tests/test_provider_antigravity.py` → 32 passed.
 - `pytest -q -m postgresql tests/postgresql/test_antigravity_refresh.py` →
   7 passed (includes the Outcome 3 stale-loop test rerun under the new route).
+- Checkpoint `01c961a` (feat: derive the Antigravity working directory); hooks passed.
+
+## Outcome 5: Consumers tell the truth and the release is assembled (done except the status flip)
+
+Changed surfaces:
+- `README.md` (providers, release 2.4.0, `--provider claude|codex|antigravity`,
+  derived `--project`, Antigravity scope paragraph, Source Roots row and
+  `CC_SEARCH_ANTIGRAVITY_ROOTS`, metadata-only discovery, quiet exclusions);
+  `skills/search-chat/SKILL.md` and `commands/search-chat.md` (description,
+  example, provider/scope/`--agents`/`--project` statements; the required
+  "Ponytail" wording retained); `CLAUDE.md` (Purpose, CLI Contract provider
+  values, `--agents` adds nothing for Antigravity, quiet exclusions);
+  `docs/architecture/database.md` (authority sentence, verified date);
+  `docs/runbooks/laptop-deployment.md` (migration 11 after the backup; the
+  first-index operational check: 228 discovered, 7 indexed, 221 excluded,
+  none blocked as of 2026-10-09).
+- `docs/design-plans/2026-08-10-cross-vendor-semantic-search.md` lines 55–56
+  and 96–98 amended so the 2026-10-09 design owns primary Antigravity sessions.
+- Release: `2.4.0` in `pyproject.toml`, `.claude-plugin/plugin.json`,
+  `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`,
+  `tests/test_plugin_packaging.py`, `uv.lock` (`uv lock` → "Updated
+  cc-search-chats v2.3.7 -> v2.4.0"); `CHANGELOG.md` `## cc-search-chats 2.4.0`
+  with `**Added:**` and `**Changed:**`. Root `plugin.json` and
+  `.agents/plugins/marketplace.json` carry no version string (checked).
+
+Command executions (2026-10-09):
+- `uv run --frozen cc-search-chats {search,list,extract} --help` →
+  `--provider {claude,codex,antigravity}`; `context`, `resolve`, `events`,
+  `index --help` have no provider flag (unchanged).
+- `uv run --frozen cc-search-chats search "orchard ledger" --literal --provider
+  antigravity --json` against the operator database (read-only) → `status:
+  maintenance_required`, `pending_versions: [11]`, no schema change: the
+  documented pre-migration behaviour.
+- The documented `search --literal --provider antigravity --json`, `resolve
+  <locator> --json` and `events --from/--until --json` commands execute
+  end-to-end in `tests/postgresql/test_cli_journey.py` against the fixture
+  root.
+
+Documentation inspection (in-session; no reviewer model was named):
+- Checked in README, SKILL, command, CLAUDE.md, laptop runbook, database.md
+  and CHANGELOG: every `--provider` token is a CLI choice; every
+  `CC_SEARCH_*_ROOTS` variable is a registry variable and no singular
+  Antigravity variable is named; the only Antigravity root path named is
+  `~/.gemini/antigravity-cli/brain`; scope-start wording; `--agents` adds
+  nothing; thinking/tool results/injected context excluded; derived
+  `--project`.
+- Positive control: `--provider claude|codex|gemini` planted in README was
+  reported (`('README.md', 'provider token', 'gemini')`) and then removed; the
+  rerun reported only two false positives from the phrase "`--provider`
+  accepts" and none after excluding that phrase.
+- Finding and fix: the packaging test requires the word "Ponytail" in the
+  skill and command documents; the first rewrite dropped it, restored.
+
+Design status: all five authority locators still return `stale_index`
+through the installed CLI (`cc-search-chats 2.3.6` at `~/.local/bin`):
+`078509b3…`, `780c7360…`, `4bb6a285…`, `e1f036eb…`, `73a5b70e…` → `stale_index`,
+exit 0 from the JSON wrapper. Status left Draft; question raised to the human.
+
+Evidence (2026-10-09, at 2.4.0):
+- non-PostgreSQL 940 passed; PostgreSQL 156 passed; `complexipy` passed with
+  no snapshot change; `ruff check`, `ruff format --check`, `ty check`,
+  `vulture`, `pre-commit validate-config` all exit 0;
+  `tests/test_plugin_packaging.py` 16 passed.
+- Checkpoint `9d4c608` (chore: release cc-search-chats 2.4.0); hooks passed.
+
+## Independent sanity check over the real store (read-only, 2026-10-09)
+
+In-memory admission over all 228 first records and a full parse of the
+admitted sessions through the branch's parser (no database, no text printed):
+`sources 228`, `outcomes {excluded: 221, admitted: 7}`,
+`codes {antigravity_before_scope_start: 220, antigravity_not_human_initiated: 1}`,
+`blocking {}`, `repaired {}`, `messages 263`, `with_cwd 7`. This matches the
+runbook's expected first-index report (7 admitted, 221 excluded, none blocked)
+and shows every admitted session carries a derived working directory.
+
+## Execution state
+
+- Five private checkpoints on `antigravity-primary-sessions`
+  (`1931202`, `bdc29ae`, `55a533a`, `01c961a`, `9d4c608`) from `main` at
+  `27b637b`; tree clean; nothing pushed, installed, migrated, or indexed in
+  production.
+- Finished-work UAT (plan.md) needs the separately authorised ADR 0007
+  backup, `index --migrate` and one `index` run on an installed 2.4.0; not
+  run by execution. Normalisation follows accepted UAT.

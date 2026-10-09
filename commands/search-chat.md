@@ -1,5 +1,5 @@
 ---
-description: "Search or recover previous Claude Code and Codex conversations"
+description: "Search or recover previous Claude Code, Codex and Antigravity conversations"
 allowed-tools: ["Bash(cc-search-chats:*)"]
 ---
 
@@ -35,8 +35,10 @@ model and takes about a second. It opens the currently selected coherent corpus
 without admitting, launching, joining, or waiting for index work. Run `index`
 intentionally when a newer corpus is required. A miss merits alternate terms,
 `--literal`, and filter review before explicit maintenance. Both modes contain
-visible primary prose from configured standard and Ponytail roots;
-`--agents` adds agent/unknown sessions;
+visible primary prose from configured standard and Ponytail Claude/Codex roots
+and the Antigravity root (primary sessions from 2026-10-01 onwards only,
+`--provider antigravity`); `--agents` adds agent/unknown sessions and nothing for
+Antigravity;
 `--literal --tools` adds persisted tool names and inputs. Tool results,
 reasoning, instructions, injected context, and unrecognized shapes are
 unavailable.
