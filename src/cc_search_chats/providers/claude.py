@@ -620,6 +620,8 @@ _CLAUDE_METADATA_KEYSETS["attachment"].update(
         {"agentName", "rendered", "session_id", "teamName"},
         {"agentName", "rendered", "renderedInHumanTurn", "session_id", "teamName"},
         {"rendered", "renderedRole"},
+        {"agentId", "rendered", "renderedRole"},
+        {"agentId", "rendered", "renderedBesideToolResult", "renderedRole"},
         {"rendered", "renderedRole", "session_id"},
         {"rendered", "renderedRole", "slug"},
         {"rendered", "renderedRole", "sessionKind"},
@@ -679,8 +681,11 @@ _CLAUDE_METADATA_KEYSETS["bridge-session"].add(
 _CLAUDE_METADATA_KEYSETS["frame-link"] = {
     frozenset({"type", "frameUrl", "path", "sessionId", "timestamp", "title"})
 }
-_CLAUDE_METADATA_KEYSETS["last-prompt"].add(
-    frozenset({"type", "lastPrompt", "leafUuid", "sessionId"})
+_CLAUDE_METADATA_KEYSETS["last-prompt"].update(
+    (
+        frozenset({"type", "lastPrompt", "leafUuid", "sessionId"}),
+        frozenset({"type", "explicit", "leafUuid", "sessionId"}),
+    )
 )
 _CLAUDE_METADATA_KEYSETS["relocated"] = {
     frozenset({"type", "relocatedCwd", "sessionId"})

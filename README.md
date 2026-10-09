@@ -3,7 +3,7 @@
 Search and recover context from native Claude Code, Codex and primary
 Antigravity CLI chat history.
 
-Current release: cc-search-chats 2.4.0
+Current release: cc-search-chats 2.4.1
 
 The CLI reads vendor JSONL session logs without modifying them, maintains a
 normalized PostgreSQL search projection, and supports PostgreSQL full-text

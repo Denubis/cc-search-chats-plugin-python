@@ -1,5 +1,17 @@
 # Changelog
 
+## cc-search-chats 2.4.1
+
+**Fixed:**
+- Claude Code 2.1.295 writes two new metadata shapes: `last-prompt` rows that
+  carry `explicit` instead of `lastPrompt`, and attachment rows that carry
+  `agentId` with `renderedRole` (with or without `renderedBesideToolResult`).
+  Both are now excluded metadata rather than unknown records, so files written
+  by that version no longer fail closed. Other unaudited shapes still fail
+  closed.
+- The Claude parser-state version advances to retry unchanged blocked files on
+  the next index run. Claude sources reparse once; unchanged embeddings are reused.
+
 ## cc-search-chats 2.4.0
 
 **Added:**

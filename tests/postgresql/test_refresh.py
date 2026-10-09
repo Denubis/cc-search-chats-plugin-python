@@ -773,7 +773,7 @@ def test_native_record_policy_parser_state_versions() -> None:
         adapter.provider: adapter.parser_state_version
         for adapter in registry.provider_adapters()
     } == {
-        Provider.CLAUDE: 6,
+        Provider.CLAUDE: 7,
         Provider.CODEX: 5,
         Provider.ANTIGRAVITY: 1,
     }
