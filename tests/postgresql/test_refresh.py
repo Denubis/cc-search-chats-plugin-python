@@ -775,6 +775,7 @@ def test_native_record_policy_parser_state_versions() -> None:
     } == {
         Provider.CLAUDE: 6,
         Provider.CODEX: 5,
+        Provider.ANTIGRAVITY: 1,
     }
 
 

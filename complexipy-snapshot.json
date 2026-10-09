@@ -140,10 +140,6 @@
         "complexity": 17
       },
       {
-        "name": "_parse_and_stage_source",
-        "complexity": 22
-      },
-      {
         "name": "refresh_native_sources",
         "complexity": 39
       }

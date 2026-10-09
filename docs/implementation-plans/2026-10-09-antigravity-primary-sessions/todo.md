@@ -3,47 +3,6 @@
 Working root: `/home/brian/people/Brian/cc-search-chats-plugin-python`.
 Completed items move to `worklog.md`; do not tick them here.
 
-## Outcome 2: schema and identity
-- [ ] Failing tests: migration 11 (renamed constraints, three-table insert,
-      `gemini` rejected), journey version pins and `maintenance_required`
-      at version 10, identity enum and antigravity locator grammar.
-- [ ] Add `Provider.ANTIGRAVITY`, identity key-kind table entry, registry
-      "unregistered raises" assertion.
-- [ ] Add `provider_antigravity_schema.sql` and ledger entry 11.
-- [ ] Derive CLI `--provider` choices from `Provider`.
-- [ ] Update `docs/architecture/database.md` provider vocabulary.
-- [ ] Full gate set; checkpoint commit.
-
-## Outcome 3: discovery, admission, parser, quiet exclusions, resolution
-- [ ] Build synthetic fixtures under `tests/fixtures/providers/antigravity/`
-      (no real session text).
-- [ ] Failing unit tests: `tests/test_provider_antigravity.py` (admission,
-      boundary timestamps, projections, exclusions, blocking codes,
-      truncation, two-batch equivalence).
-- [ ] Failing discovery tests in `tests/test_source_discovery.py` (UUID
-      session only; decoys silent; default root and variable; existing
-      `non_native_agy` test unchanged).
-- [ ] Failing PostgreSQL tests `tests/postgresql/test_antigravity_refresh.py`
-      for AC1–AC5 including the three-run stale-loop test, and journey
-      additions (`--provider antigravity`, `events` retention).
-- [ ] Implement `providers/antigravity.py` (every function ≤ 15).
-- [ ] Implement `discover_antigravity_sources` and the default root /
-      `CC_SEARCH_ANTIGRAVITY_ROOTS`.
-- [ ] Register the Antigravity adapter (`inspect_artifacts=False`,
-      admission, codes, state serialisation, `scan_unindexed` with admission).
-- [ ] Refresh changes: admission in `_parse_and_stage_source`; full-size
-      excluded checkpoint in `_stage_index_artifact`; sticky exclusion in
-      `_plan_source`.
-- [ ] Staleness: `_Checkpoint.source_status`, excluded rows report no
-      unindexed bytes.
-- [ ] Autouse `CC_SEARCH_ANTIGRAVITY_ROOTS` fixture in `tests/conftest.py`;
-      prove it with the real store present.
-- [ ] Docs owned here: `database.md` checkpoint semantics; `CLAUDE.md`
-      Source Roots.
-- [ ] Read-only operational probe against the real store (228 sources, zero
-      diagnostics); record output.
-- [ ] Full gate set; checkpoint commit.
-
 ## Outcome 4: derived working directory
 - [ ] Failing unit tests (cwd on all rows, none without `run_command`,
       multi-batch, `cwd_established`).

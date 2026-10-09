@@ -15,6 +15,10 @@ from cc_search_chats.core.identity import (
     Provider,
     format_locator,
 )
+from cc_search_chats.providers.antigravity import (
+    AdmissionDecision,
+    AdmissionOutcome,
+)
 from cc_search_chats.providers.registry import (
     ParseDiagnostic,
     ParseResult,
@@ -24,6 +28,7 @@ from cc_search_chats.providers.registry import (
     required_integer,
 )
 from cc_search_chats.providers.source_discovery import (
+    BoundedReadResult,
     BoundedReadStopReason,
     ConfiguredSourceRoot,
     DiscoveredSource,
@@ -586,6 +591,13 @@ def _plan_source(
     if same_metadata and checkpoint.parser_state_version == version:
         return None
     if (
+        checkpoint.source_status == "excluded"
+        and checkpoint.parser_state_version == version
+        and same_identity
+        and observed.size >= checkpoint.observed_size
+    ):
+        return None
+    if (
         checkpoint.source_status == "indexed"
         and checkpoint.parser_state_version == version
         and same_identity
@@ -1075,7 +1087,7 @@ def _stage_index_artifact(
     advanced, pending = _stage_source_checkpoint(
         connection,
         plan,
-        complete_byte_offset=0,
+        complete_byte_offset=plan.observed.size,
         next_record_ordinal=0,
         next_source_line=1,
         parser_state={
@@ -1089,92 +1101,153 @@ def _stage_index_artifact(
     return advanced, pending, 0, ()
 
 
-def _parse_and_stage_source(
-    connection: psycopg.Connection, plan: _SourcePlan
-) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
-    observed = plan.observed
-    adapter = plan.adapter
-    artifact = (
-        _index_artifact(observed.source.path) if adapter.inspect_artifacts else None
-    )
-    if artifact is not None:
-        return _stage_index_artifact(connection, plan, artifact)
+@dataclass(frozen=True, slots=True)
+class _ParsedSource:
+    complete_byte_offset: int
+    next_record_ordinal: int
+    next_source_line: int
+    state: object
+    skipped: tuple[dict[str, object], ...]
+    repaired: tuple[dict[str, object], ...]
+    attempted_bytes: int
 
+
+@dataclass(frozen=True, slots=True)
+class _ExcludedSource:
+    decision: AdmissionDecision
+    attempted_bytes: int
+
+
+def _read_source_batch(
+    plan: _SourcePlan, *, offset: int, ordinal: int, source_line: int
+) -> BoundedReadResult:
+    observed = plan.observed
+    batch = read_bounded_jsonl(
+        observed.source.path,
+        source_file_relative=observed.source.source_file_relative,
+        target_size=observed.size,
+        start_byte_offset=offset,
+        next_record_ordinal=ordinal,
+        next_source_line=source_line,
+    )
+    if batch.stop_reason not in {
+        BoundedReadStopReason.TARGET_REACHED,
+        BoundedReadStopReason.BATCH_LIMIT_REACHED,
+        BoundedReadStopReason.PARTIAL_TAIL,
+    }:
+        raise _SourceRefreshError(
+            f"native source stopped at {batch.stop_reason.value}",
+            code=batch.stop_reason.value,
+            failure_class=(
+                "deterministic"
+                if batch.stop_reason is BoundedReadStopReason.OVERSIZED_RECORD
+                else "transient"
+            ),
+            attempted_content_bytes=max(
+                0, batch.next_source_byte_offset - plan.start_byte_offset
+            ),
+        )
+    return batch
+
+
+def _admission_decision(
+    plan: _SourcePlan, batch: BoundedReadResult
+) -> AdmissionDecision | None:
+    """Decide an excluded source, raise a blocked one, or return None to parse."""
+    admission = plan.adapter.admission
+    if (
+        admission is None
+        or plan.start_byte_offset != 0
+        or not batch.envelopes
+        or batch.envelopes[0].record_ordinal != 0
+    ):
+        return None
+    decision = admission(batch.envelopes[0].raw_bytes)
+    if decision.outcome is AdmissionOutcome.BLOCKED:
+        raise _SourceRefreshError(
+            decision.detail,
+            code=decision.code.value if decision.code is not None else "blocked",
+            failure_class="deterministic",
+            record_ordinal=0,
+            source_line=1,
+            source_byte_offset=0,
+            attempted_content_bytes=batch.next_source_byte_offset,
+        )
+    return decision if decision.outcome is AdmissionOutcome.EXCLUDED else None
+
+
+def _stage_parsed_batch(
+    connection: psycopg.Connection,
+    plan: _SourcePlan,
+    batch: BoundedReadResult,
+    state: object,
+) -> tuple[object, tuple[dict[str, object], ...], tuple[dict[str, object], ...]]:
+    try:
+        parsed = _parse_batch(plan, batch.envelopes, batch.diagnostics, state)
+    except _SourceRefreshError as error:
+        error.attempted_content_bytes = max(
+            error.attempted_content_bytes,
+            batch.next_source_byte_offset - plan.start_byte_offset,
+        )
+        raise
+    skips = _skipped_record_diagnostics(plan, parsed, batch.diagnostics)
+    repairs = _repaired_record_diagnostics(plan, parsed)
+    skipped_ordinals = frozenset(
+        required_integer(diagnostic, "record_ordinal") for diagnostic in skips
+    )
+    _stage_messages(
+        connection,
+        plan,
+        _messages_without_skipped_records(parsed.messages, skipped_ordinals),
+    )
+    return parsed.next_state, skips, repairs
+
+
+def _parse_source_batches(
+    connection: psycopg.Connection, plan: _SourcePlan
+) -> _ParsedSource | _ExcludedSource:
+    observed = plan.observed
     offset = plan.start_byte_offset
     ordinal = plan.next_record_ordinal
     source_line = plan.next_source_line
     state: object = plan.prior_state
-    skipped_diagnostics: list[dict[str, object]] = []
-    repaired_diagnostics: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    repaired: list[dict[str, object]] = []
     if observed.size == offset and state is None:
-        state = adapter.initial_state()
+        state = plan.adapter.initial_state()
     while offset < observed.size:
-        batch = read_bounded_jsonl(
-            observed.source.path,
-            source_file_relative=observed.source.source_file_relative,
-            target_size=observed.size,
-            start_byte_offset=offset,
-            next_record_ordinal=ordinal,
-            next_source_line=source_line,
+        batch = _read_source_batch(
+            plan, offset=offset, ordinal=ordinal, source_line=source_line
         )
-        if batch.stop_reason not in {
-            BoundedReadStopReason.TARGET_REACHED,
-            BoundedReadStopReason.BATCH_LIMIT_REACHED,
-            BoundedReadStopReason.PARTIAL_TAIL,
-        }:
-            raise _SourceRefreshError(
-                f"native source stopped at {batch.stop_reason.value}",
-                code=batch.stop_reason.value,
-                failure_class=(
-                    "deterministic"
-                    if batch.stop_reason is BoundedReadStopReason.OVERSIZED_RECORD
-                    else "transient"
-                ),
-                attempted_content_bytes=max(
-                    0, batch.next_source_byte_offset - plan.start_byte_offset
-                ),
-            )
-        try:
-            parsed = _parse_batch(
-                plan,
-                batch.envelopes,
-                batch.diagnostics,
-                state,
-            )
-        except _SourceRefreshError as error:
-            error.attempted_content_bytes = max(
-                error.attempted_content_bytes,
-                batch.next_source_byte_offset - plan.start_byte_offset,
-            )
-            raise
-        batch_skips = _skipped_record_diagnostics(
-            plan,
-            parsed,
-            batch.diagnostics,
-        )
-        skipped_diagnostics.extend(batch_skips)
-        repaired_diagnostics.extend(_repaired_record_diagnostics(plan, parsed))
-        skipped_ordinals = frozenset(
-            required_integer(diagnostic, "record_ordinal") for diagnostic in batch_skips
-        )
-        _stage_messages(
-            connection,
-            plan,
-            _messages_without_skipped_records(parsed.messages, skipped_ordinals),
-        )
-        state = parsed.next_state
+        excluded = _admission_decision(plan, batch) if offset == 0 else None
+        if excluded is not None:
+            return _ExcludedSource(excluded, batch.next_source_byte_offset)
+        state, skips, repairs = _stage_parsed_batch(connection, plan, batch, state)
+        skipped.extend(skips)
+        repaired.extend(repairs)
         next_offset = batch.next_source_byte_offset
         ordinal = batch.next_record_ordinal
         source_line = batch.next_source_line
-        if batch.stop_reason is BoundedReadStopReason.BATCH_LIMIT_REACHED:
-            if next_offset <= offset:
-                raise _SourceRefreshError("native source batch made no progress")
-            offset = next_offset
-            continue
+        limited = batch.stop_reason is BoundedReadStopReason.BATCH_LIMIT_REACHED
+        if limited and next_offset <= offset:
+            raise _SourceRefreshError("native source batch made no progress")
         offset = next_offset
-        break
+        if not limited:
+            break
     if state is None:
         raise _SourceRefreshError("provider parser did not produce continuation state")
+    return _ParsedSource(
+        complete_byte_offset=offset,
+        next_record_ordinal=ordinal,
+        next_source_line=source_line,
+        state=state,
+        skipped=tuple(skipped),
+        repaired=tuple(repaired),
+        attempted_bytes=max(0, offset - plan.start_byte_offset),
+    )
+
+
+def _verified_final_size(observed: _ObservedSource) -> int:
     try:
         final = observed.source.path.stat()
     except OSError as error:
@@ -1190,24 +1263,61 @@ def _parse_and_stage_source(
         raise _SourceRefreshError("native source was truncated during refresh")
     if final.st_size == observed.size and final.st_mtime_ns != observed.mtime_ns:
         raise _SourceRefreshError("native source changed during its bounded read")
+    return final.st_size
+
+
+def _stage_excluded_source(
+    connection: psycopg.Connection, plan: _SourcePlan, excluded: _ExcludedSource
+) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
+    """Checkpoint an excluded source at full size so it never reads as pending."""
+    code = excluded.decision.code
     advanced, pending = _stage_source_checkpoint(
         connection,
         plan,
-        complete_byte_offset=offset,
-        next_record_ordinal=ordinal,
-        next_source_line=source_line,
-        parser_state=adapter.serialize_state(state),
+        complete_byte_offset=plan.observed.size,
+        next_record_ordinal=0,
+        next_source_line=1,
+        parser_state={
+            "excluded_code": code.value if code is not None else "excluded",
+            "detail": excluded.decision.detail,
+        },
+        source_status="excluded",
+        final_size=plan.observed.size,
+        skipped_record_count=0,
+    )
+    return advanced, pending, excluded.attempted_bytes, ()
+
+
+def _parse_and_stage_source(
+    connection: psycopg.Connection, plan: _SourcePlan
+) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
+    observed = plan.observed
+    adapter = plan.adapter
+    artifact = (
+        _index_artifact(observed.source.path) if adapter.inspect_artifacts else None
+    )
+    if artifact is not None:
+        return _stage_index_artifact(connection, plan, artifact)
+    parsed = _parse_source_batches(connection, plan)
+    if isinstance(parsed, _ExcludedSource):
+        return _stage_excluded_source(connection, plan, parsed)
+    final_size = _verified_final_size(observed)
+    advanced, pending = _stage_source_checkpoint(
+        connection,
+        plan,
+        complete_byte_offset=parsed.complete_byte_offset,
+        next_record_ordinal=parsed.next_record_ordinal,
+        next_source_line=parsed.next_source_line,
+        parser_state=adapter.serialize_state(parsed.state),
         source_status="indexed",
-        final_size=final.st_size,
-        skipped_record_count=(
-            plan.prior_skipped_record_count + len(skipped_diagnostics)
-        ),
+        final_size=final_size,
+        skipped_record_count=(plan.prior_skipped_record_count + len(parsed.skipped)),
     )
     return (
         advanced,
         pending,
-        max(0, offset - plan.start_byte_offset),
-        (*skipped_diagnostics, *repaired_diagnostics),
+        parsed.attempted_bytes,
+        (*parsed.skipped, *parsed.repaired),
     )
 
 

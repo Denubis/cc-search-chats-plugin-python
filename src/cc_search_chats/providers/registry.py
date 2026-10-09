@@ -29,6 +29,15 @@ from cc_search_chats.core.identity import (
     format_locator,
     permitted_locator_key_kinds,
 )
+from cc_search_chats.providers.antigravity import (
+    AdmissionDecision,
+    AdmissionOutcome,
+    AntigravityDiagnosticCode,
+    AntigravityParserState,
+    AntigravitySessionContext,
+    admit_antigravity_session,
+    parse_antigravity_session,
+)
 from cc_search_chats.providers.claude import (
     ClaudeDiagnosticCode,
     ClaudeParserState,
@@ -47,6 +56,7 @@ from cc_search_chats.providers.source_discovery import (
     DiscoveryResult,
     RecordEnvelope,
     SourceDiagnostic,
+    discover_antigravity_sources,
     discover_claude_sources,
     discover_codex_sources,
     read_bounded_jsonl,
@@ -312,6 +322,45 @@ def _deserialize_codex_state(value: object) -> CodexParserState:
     )
 
 
+def _serialize_antigravity_state(state: object) -> dict[str, object]:
+    if not isinstance(state, AntigravityParserState):
+        raise TypeError("Antigravity source produced non-Antigravity parser state")
+    return {
+        "next_conversation_epoch": state.next_conversation_epoch,
+        "cwd": state.cwd,
+    }
+
+
+def _deserialize_antigravity_state(value: object) -> AntigravityParserState:
+    if not is_json_object(value):
+        raise ValueError("parser state must be an object")
+    return AntigravityParserState(
+        next_conversation_epoch=required_integer(value, "next_conversation_epoch"),
+        cwd=optional_text(value, "cwd"),
+    )
+
+
+def _parse_antigravity(
+    envelopes: tuple[RecordEnvelope, ...],
+    *,
+    source_session_id: str | None,
+    source_diagnostics: tuple[SourceDiagnostic, ...],
+    prior_state: object,
+) -> ParseResult:
+    if source_session_id is None:
+        raise ValueError(
+            "Antigravity sources derive their session ID from the directory"
+        )
+    if prior_state is not None and not isinstance(prior_state, AntigravityParserState):
+        raise TypeError("invalid Antigravity continuation state")
+    return parse_antigravity_session(
+        envelopes,
+        context=AntigravitySessionContext(source_session_id=source_session_id),
+        source_diagnostics=source_diagnostics,
+        prior_state=prior_state,
+    )
+
+
 def _parse_claude(
     envelopes: tuple[RecordEnvelope, ...],
     *,
@@ -363,6 +412,21 @@ def _codex_default_roots(home: Path) -> tuple[Path, ...]:
         home / ".codex" / "sessions",
         *((ponytail,) if ponytail.is_dir() else ()),
     )
+
+
+def _antigravity_default_roots(home: Path) -> tuple[Path, ...]:
+    brain = home / ".gemini" / "antigravity-cli" / "brain"
+    return (brain,) if brain.is_dir() else ()
+
+
+def _antigravity_source_session_id(source_file_relative: Path) -> str:
+    return source_file_relative.parts[0]
+
+
+def _antigravity_scan_candidate(
+    source_file_relative: Path, locator: NativeLocator
+) -> bool:
+    return source_file_relative.parts[0] == locator.source_session_id
 
 
 def _ordinal_record_matches(locator: NativeLocator, envelope: RecordEnvelope) -> bool:
@@ -451,9 +515,18 @@ class ProviderAdapter:
     skippable_codes: frozenset[StrEnum]
     repaired_codes: frozenset[StrEnum]
     inspect_artifacts: bool
+    admission: Callable[[bytes], AdmissionDecision] | None
     raw_record_matches: Callable[[NativeLocator, RecordEnvelope], bool]
     scan_candidate: Callable[[Path, NativeLocator], bool]
     parsed_session_id: Callable[[ParseResult], str | None]
+
+    def admits(self, envelopes: tuple[RecordEnvelope, ...]) -> bool:
+        """Return whether a parse starting at ordinal 0 may proceed."""
+        if self.admission is None or not envelopes or envelopes[0].record_ordinal != 0:
+            return True
+        return (
+            self.admission(envelopes[0].raw_bytes).outcome is AdmissionOutcome.ADMITTED
+        )
 
     def _unsupported_at_target(
         self,
@@ -502,6 +575,8 @@ class ProviderAdapter:
                 next_record_ordinal=ordinal,
                 next_source_line=source_line,
             )
+            if offset == 0 and not self.admits(batch.envelopes):
+                return ScanEvidence()
             parsed = self.parse(
                 batch.envelopes,
                 source_session_id=session_id,
@@ -571,6 +646,7 @@ _CLAUDE = ProviderAdapter(
     ),
     repaired_codes=frozenset({ClaudeDiagnosticCode.REPAIRED_UNICODE}),
     inspect_artifacts=True,
+    admission=None,
     raw_record_matches=_claude_record_matches,
     scan_candidate=_claude_scan_candidate,
     parsed_session_id=_claude_parsed_session_id,
@@ -624,14 +700,69 @@ _CODEX = ProviderAdapter(
     ),
     repaired_codes=frozenset({CodexDiagnosticCode.REPAIRED_UNICODE}),
     inspect_artifacts=True,
+    admission=None,
     raw_record_matches=_codex_record_matches,
     scan_candidate=_codex_scan_candidate,
     parsed_session_id=_codex_parsed_session_id,
 )
 
+_ANTIGRAVITY = ProviderAdapter(
+    provider=Provider.ANTIGRAVITY,
+    plural_variable="CC_SEARCH_ANTIGRAVITY_ROOTS",
+    singular_variable=None,
+    default_roots=_antigravity_default_roots,
+    discover=discover_antigravity_sources,
+    locator_key_kinds=permitted_locator_key_kinds(Provider.ANTIGRAVITY),
+    parser_state_version=1,
+    initial_state=AntigravityParserState,
+    serialize_state=_serialize_antigravity_state,
+    deserialize_state=_deserialize_antigravity_state,
+    source_session_id=_antigravity_source_session_id,
+    parse=_parse_antigravity,
+    unsupported_codes=frozenset(
+        {
+            AntigravityDiagnosticCode.UNKNOWN_RECORD_PAIR,
+            AntigravityDiagnosticCode.MISSING_REQUIRED_KEY,
+            AntigravityDiagnosticCode.INVALID_FIELD_TYPE,
+            AntigravityDiagnosticCode.MISSING_USER_REQUEST,
+            AntigravityDiagnosticCode.INVALID_CREATED_AT,
+        }
+    ),
+    scan_unsupported_codes=frozenset(
+        {
+            AntigravityDiagnosticCode.MALFORMED_JSON,
+            AntigravityDiagnosticCode.INVALID_UNICODE,
+            AntigravityDiagnosticCode.UNKNOWN_RECORD_PAIR,
+            AntigravityDiagnosticCode.MISSING_REQUIRED_KEY,
+            AntigravityDiagnosticCode.INVALID_FIELD_TYPE,
+            AntigravityDiagnosticCode.MISSING_USER_REQUEST,
+            AntigravityDiagnosticCode.INVALID_CREATED_AT,
+        }
+    ),
+    skippable_codes=frozenset(
+        {
+            AntigravityDiagnosticCode.MALFORMED_JSON,
+            AntigravityDiagnosticCode.INVALID_ENCODING,
+            AntigravityDiagnosticCode.INVALID_UNICODE,
+        }
+    ),
+    repaired_codes=frozenset(
+        {
+            AntigravityDiagnosticCode.REPAIRED_UNICODE,
+            AntigravityDiagnosticCode.TRUNCATED_PROSE,
+        }
+    ),
+    inspect_artifacts=False,
+    admission=admit_antigravity_session,
+    raw_record_matches=_ordinal_record_matches,
+    scan_candidate=_antigravity_scan_candidate,
+    parsed_session_id=_claude_parsed_session_id,
+)
+
 _ADAPTERS: dict[Provider, ProviderAdapter] = {
     Provider.CLAUDE: _CLAUDE,
     Provider.CODEX: _CODEX,
+    Provider.ANTIGRAVITY: _ANTIGRAVITY,
 }
 
 

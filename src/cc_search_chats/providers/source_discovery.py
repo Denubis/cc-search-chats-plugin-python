@@ -10,6 +10,8 @@ Codex schema classification remains the responsibility of their pure adapters.
 import hashlib
 import json
 import os
+import re
+import stat
 from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
@@ -22,6 +24,10 @@ DEFAULT_MAX_RECORDS_PER_BATCH = 1_024
 DEFAULT_MAX_BATCH_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_SINGLE_RECORD_BYTES = 16 * 1024 * 1024
 _OVERSIZED_STREAM_CHUNK_BYTES = 64 * 1024
+_CANONICAL_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+).fullmatch
+_ANTIGRAVITY_TRANSCRIPT = Path(".system_generated") / "logs" / "transcript_full.jsonl"
 
 
 class SourceDiagnosticCode(StrEnum):
@@ -725,6 +731,59 @@ def discover_codex_sources(
     """Discover Codex ``YYYY/MM/DD/rollout-*.jsonl`` candidates."""
     return _discover_provider_sources(
         Provider.CODEX, resolved_root, inspect_content=inspect_content
+    )
+
+
+def _antigravity_transcript(entry: os.DirEntry[str]) -> Path | None:
+    """Return the session's full transcript when the entry is a real session."""
+    if _CANONICAL_UUID(entry.name) is None:
+        return None
+    try:
+        if not entry.is_dir(follow_symlinks=False):
+            return None
+        transcript = Path(entry.path) / _ANTIGRAVITY_TRANSCRIPT
+        if not stat.S_ISREG(transcript.lstat().st_mode):
+            return None
+    except OSError:
+        return None
+    return transcript
+
+
+def discover_antigravity_sources(
+    resolved_root: Path, *, inspect_content: bool = True
+) -> DiscoveryResult:
+    """Discover ``<uuid>/.system_generated/logs/transcript_full.jsonl`` by metadata.
+
+    Only immediate UUID-named directories are considered, symlinked session
+    directories are not followed, no file is opened, and other children are
+    ignored silently.
+    """
+    del inspect_content
+    failure = _root_failure(Provider.ANTIGRAVITY, resolved_root)
+    if failure is not None:
+        return failure
+    entries, traversal_failure = _walk_directory_entries(resolved_root, resolved_root)
+    if traversal_failure is not None:
+        return DiscoveryResult(
+            provider=Provider.ANTIGRAVITY,
+            resolved_root=resolved_root,
+            sources=(),
+            diagnostics=(traversal_failure,),
+        )
+    sources = tuple(
+        DiscoveredSource(
+            provider=Provider.ANTIGRAVITY,
+            path=transcript,
+            source_file_relative=transcript.relative_to(resolved_root),
+        )
+        for entry in entries
+        if (transcript := _antigravity_transcript(entry)) is not None
+    )
+    return DiscoveryResult(
+        provider=Provider.ANTIGRAVITY,
+        resolved_root=resolved_root,
+        sources=sources,
+        diagnostics=(),
     )
 
 

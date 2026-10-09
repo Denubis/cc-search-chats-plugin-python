@@ -115,18 +115,28 @@ They do not use the operator's production database.
 
 ## Source Roots and Isolation
 
-Default roots include standard and isolated Ponytail session corpora:
+Default roots include standard and isolated Ponytail session corpora plus the
+Antigravity CLI session store:
 
 - `~/.claude/projects`
 - `~/.codex/sessions`
 - `~/.claude-ponytail/projects` when present
 - `~/.codex-ponytail/sessions` when present
+- `~/.gemini/antigravity-cli/brain` when present
 
-`CC_SEARCH_CLAUDE_ROOTS` and `CC_SEARCH_CODEX_ROOTS` replace the corresponding
-collections using the platform path separator. Singular variables remain
-one-root migration compatibility. Discovery traverses session roots only; it
-does not read isolated configuration, credentials, plugins, skills, caches,
-locks, or runtime state.
+`CC_SEARCH_CLAUDE_ROOTS`, `CC_SEARCH_CODEX_ROOTS` and
+`CC_SEARCH_ANTIGRAVITY_ROOTS` replace the corresponding collections using the
+platform path separator. Singular Claude and Codex variables remain one-root
+migration compatibility; Antigravity has no singular variable. Discovery
+traverses session roots only; it does not read isolated configuration,
+credentials, plugins, skills, caches, locks, or runtime state. Antigravity
+discovery lists only immediate UUID-named directories holding
+`.system_generated/logs/transcript_full.jsonl`, by metadata alone, and ignores
+every other child silently; `index` admits a session only when its first
+record is a human request created on or after `2026-10-01T00:00:00Z`, and
+checkpoints every other session as excluded without reporting it as unindexed
+or pending. The test suites point `CC_SEARCH_ANTIGRAVITY_ROOTS` at an empty
+directory so they never read the real store.
 
 ## Architecture
 

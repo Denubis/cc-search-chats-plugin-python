@@ -1,6 +1,9 @@
 """Pytest fixtures providing sample JSONL record strings and database helpers."""
 
 import json
+import os
+import shutil
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,7 +14,6 @@ from cc_search_chats.storage.index import close_db, index_session, open_db
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Iterator
-    from pathlib import Path
 
 
 @pytest.fixture
@@ -335,3 +337,64 @@ def indexed_db(
     )
     index_session(db_conn, meta)
     return db_conn
+
+
+# ============================================================
+# Antigravity fixture roots and test isolation from the real store
+# ============================================================
+
+ANTIGRAVITY_FIXTURES = Path(__file__).parent / "fixtures" / "providers" / "antigravity"
+ANTIGRAVITY_SESSION_IDS = {
+    "october_human": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "pre_october": "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e",
+    "boundary_admitted": "2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f",
+    "system_first": "3d4e5f6a-7b8c-4d9e-8f0a-2b3c4d5e6f7a",
+    "unknown_first": "4e5f6a7b-8c9d-4eaf-9a1b-3c4d5e6f7a8b",
+    "unregistered_pair": "5f6a7b8c-9dae-4fb0-8b2c-4d5e6f7a8b9c",
+}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_antigravity_root(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[Path]:
+    """Point every test at an empty Antigravity root, never the real store."""
+    root = tmp_path_factory.mktemp("antigravity-empty-root")
+    previous = os.environ.get("CC_SEARCH_ANTIGRAVITY_ROOTS")
+    os.environ["CC_SEARCH_ANTIGRAVITY_ROOTS"] = str(root)
+    try:
+        yield root
+    finally:
+        if previous is None:
+            os.environ.pop("CC_SEARCH_ANTIGRAVITY_ROOTS", None)
+        else:
+            os.environ["CC_SEARCH_ANTIGRAVITY_ROOTS"] = previous
+
+
+def build_antigravity_root(
+    destination: Path, *session_names: str, root_decoys: bool = True
+) -> Path:
+    """Copy named synthetic sessions under their fixed UUIDs into ``destination``."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in session_names:
+        shutil.copytree(
+            ANTIGRAVITY_FIXTURES / "sessions" / name,
+            destination / ANTIGRAVITY_SESSION_IDS[name],
+        )
+    if root_decoys:
+        shutil.copytree(
+            ANTIGRAVITY_FIXTURES / "root_decoys", destination, dirs_exist_ok=True
+        )
+        (destination / "antigravity-oauth-token").chmod(0)
+    return destination
+
+
+def antigravity_transcript(root: Path, session_name: str) -> Path:
+    """Return the full transcript path of one copied session."""
+    return (
+        root
+        / ANTIGRAVITY_SESSION_IDS[session_name]
+        / ".system_generated"
+        / "logs"
+        / "transcript_full.jsonl"
+    )

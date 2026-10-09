@@ -3,9 +3,15 @@
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
+from tests.conftest import (
+    ANTIGRAVITY_SESSION_IDS,
+    antigravity_transcript,
+    build_antigravity_root,
+)
 
 from cc_search_chats.core.identity import Provider
 from cc_search_chats.providers.registry import configured_source_roots
@@ -14,6 +20,7 @@ from cc_search_chats.providers.source_discovery import (
     BoundedReadStopReason,
     DiscoveryResult,
     SourceDiagnosticCode,
+    discover_antigravity_sources,
     discover_claude_sources,
     discover_codex_sources,
     read_bounded_jsonl,
@@ -720,3 +727,122 @@ class TestConfiguredSourceRoots:
             (Provider.CLAUDE, claude),
             (Provider.CODEX, codex),
         )
+
+
+class TestAntigravityDiscovery:
+    def test_lists_only_uuid_sessions_with_a_full_transcript_and_stays_silent(
+        self, tmp_path: Path
+    ) -> None:
+        root = build_antigravity_root(
+            tmp_path / "brain", "october_human", "pre_october"
+        )
+        empty_session = root / "6a7b8c9d-0e1f-4a2b-8c3d-5e6f7a8b9c0d"
+        (empty_session / ".system_generated" / "logs").mkdir(parents=True)
+        (root / "7b8c9d0e-1f2a-4b3c-9d4e-6f7a8b9c0d1e").symlink_to(
+            root / ANTIGRAVITY_SESSION_IDS["october_human"],
+            target_is_directory=True,
+        )
+        (root / "8C9D0E1F-2A3B-4C4D-8E5F-7A8B9C0D1E2F").mkdir()
+        shutil.copytree(
+            root / ANTIGRAVITY_SESSION_IDS["october_human"] / ".system_generated",
+            root / "8C9D0E1F-2A3B-4C4D-8E5F-7A8B9C0D1E2F" / ".system_generated",
+        )
+
+        result = discover_antigravity_sources(root.resolve(), inspect_content=True)
+
+        assert result.provider is Provider.ANTIGRAVITY
+        assert result.diagnostics == ()
+        assert [source.path for source in result.sources] == [
+            antigravity_transcript(root, "october_human"),
+            antigravity_transcript(root, "pre_october"),
+        ]
+        assert [source.source_file_relative for source in result.sources] == [
+            Path(ANTIGRAVITY_SESSION_IDS["october_human"])
+            / ".system_generated"
+            / "logs"
+            / "transcript_full.jsonl",
+            Path(ANTIGRAVITY_SESSION_IDS["pre_october"])
+            / ".system_generated"
+            / "logs"
+            / "transcript_full.jsonl",
+        ]
+
+    def test_unreadable_session_directory_is_ignored_silently(
+        self, tmp_path: Path
+    ) -> None:
+        root = build_antigravity_root(tmp_path / "brain", "october_human")
+        locked = root / ANTIGRAVITY_SESSION_IDS["october_human"]
+        locked.chmod(0)
+        try:
+            result = discover_antigravity_sources(root.resolve())
+        finally:
+            locked.chmod(0o755)
+
+        assert result.sources == ()
+        assert result.diagnostics == ()
+
+    @pytest.mark.parametrize(
+        ("root_kind", "expected"),
+        [
+            ("missing", SourceDiagnosticCode.MISSING_ROOT),
+            ("file", SourceDiagnosticCode.UNREADABLE_ROOT),
+        ],
+    )
+    def test_unavailable_roots_are_reported(
+        self, tmp_path: Path, root_kind: str, expected: SourceDiagnosticCode
+    ) -> None:
+        root = tmp_path / root_kind
+        if root_kind == "file":
+            root.write_text("not a directory")
+
+        result = discover_antigravity_sources(root.resolve())
+
+        assert result.sources == ()
+        assert diagnostic_codes(result) == {expected}
+
+
+class TestAntigravityConfiguredRoots:
+    def test_default_root_is_configured_only_when_present(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        (home / ".claude" / "projects").mkdir(parents=True)
+        (home / ".codex" / "sessions").mkdir(parents=True)
+        absent = configured_source_roots(environ={}, home=home)
+        assert [root.provider for root in absent] == [Provider.CLAUDE, Provider.CODEX]
+
+        brain = home / ".gemini" / "antigravity-cli" / "brain"
+        brain.mkdir(parents=True)
+        (home / ".gemini" / "antigravity-oauth-token").write_text("secret")
+        present = configured_source_roots(environ={}, home=home)
+        assert [(root.provider, root.path) for root in present][-1] == (
+            Provider.ANTIGRAVITY,
+            brain.resolve(),
+        )
+        assert [root.provider for root in present] == [
+            Provider.CLAUDE,
+            Provider.CODEX,
+            Provider.ANTIGRAVITY,
+        ]
+
+    def test_plural_variable_replaces_the_present_default(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        (home / ".gemini" / "antigravity-cli" / "brain").mkdir(parents=True)
+        isolated = (tmp_path / "isolated-brain").resolve()
+        isolated.mkdir()
+
+        roots = configured_source_roots(
+            environ={"CC_SEARCH_ANTIGRAVITY_ROOTS": str(isolated)}, home=home
+        )
+
+        antigravity = [r for r in roots if r.provider is Provider.ANTIGRAVITY]
+        assert [root.path for root in antigravity] == [isolated]
+
+    def test_singular_antigravity_variable_is_not_recognised(
+        self, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        roots = configured_source_roots(
+            environ={"CC_SEARCH_ANTIGRAVITY_ROOT": str(tmp_path / "poison")},
+            home=home,
+        )
+        assert all(root.provider is not Provider.ANTIGRAVITY for root in roots)

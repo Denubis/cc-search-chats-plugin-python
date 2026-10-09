@@ -1,0 +1,2 @@
+{"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":"2026-10-01T00:00:00Z","status":"DONE","step_index":0,"content":"<USER_REQUEST>boundary admitted mulberry</USER_REQUEST>"}
+{"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-10-01T00:00:03Z","status":"DONE","step_index":1,"content":"Mulberry noted."}

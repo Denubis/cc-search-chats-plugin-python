@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from cc_search_chats.core.identity import Provider, permitted_locator_key_kinds
+from cc_search_chats.providers import registry
 from cc_search_chats.providers.registry import (
     ProviderAdapter,
     configured_source_roots,
@@ -12,8 +13,12 @@ from cc_search_chats.providers.registry import (
     provider_adapters,
 )
 
-RECORD_POLICY_PARSER_STATE_VERSIONS = {Provider.CLAUDE: 6, Provider.CODEX: 5}
-REGISTERED = [Provider.CLAUDE, Provider.CODEX]
+RECORD_POLICY_PARSER_STATE_VERSIONS = {
+    Provider.CLAUDE: 6,
+    Provider.CODEX: 5,
+    Provider.ANTIGRAVITY: 1,
+}
+REGISTERED = list(Provider)
 
 
 def test_every_provider_has_exactly_one_registered_adapter() -> None:
@@ -24,8 +29,12 @@ def test_every_provider_has_exactly_one_registered_adapter() -> None:
         assert provider_adapter(adapter.provider) is adapter
 
 
-def test_unregistered_provider_lookup_raises() -> None:
-    assert Provider.ANTIGRAVITY not in REGISTERED
+def test_unregistered_provider_lookup_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delitem(registry._ADAPTERS, Provider.ANTIGRAVITY)
+    assert [adapter.provider for adapter in provider_adapters()] == [
+        Provider.CLAUDE,
+        Provider.CODEX,
+    ]
     with pytest.raises(KeyError):
         provider_adapter(Provider.ANTIGRAVITY)
 

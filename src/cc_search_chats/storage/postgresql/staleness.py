@@ -40,6 +40,7 @@ class _Checkpoint:
     observed_size: int
     observed_mtime_ns: int
     complete_byte_offset: int
+    source_status: str
 
 
 def _load_checkpoints(
@@ -53,6 +54,7 @@ def _load_checkpoints(
             observed_size=observed_size,
             observed_mtime_ns=observed_mtime_ns,
             complete_byte_offset=complete_byte_offset,
+            source_status=source_status,
         )
         for (
             source_root,
@@ -62,11 +64,12 @@ def _load_checkpoints(
             observed_size,
             observed_mtime_ns,
             complete_byte_offset,
+            source_status,
         ) in connection.execute(
             """
             SELECT source_root_id, source_file_relative, file_device,
                    file_inode, observed_size, observed_mtime_ns,
-                   complete_byte_offset
+                   complete_byte_offset, source_status
             FROM cc_search_chats.source_file_current
             WHERE source_root_id = ANY(%s::text[])
             """,
@@ -105,6 +108,11 @@ def _unindexed_bytes(stat: stat_result, checkpoint: _Checkpoint | None) -> int |
         checkpoint.file_inode,
     ):
         return stat.st_size
+    if (
+        checkpoint.source_status == "excluded"
+        and stat.st_size >= checkpoint.observed_size
+    ):
+        return None
     unchanged = (
         stat.st_size == checkpoint.observed_size
         and stat.st_mtime_ns == checkpoint.observed_mtime_ns

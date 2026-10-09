@@ -112,6 +112,19 @@ JSONL bytes. Same-device/inode growth starts at the last complete-record byte
 and parser-state watermark. Truncation, replacement, same-size modification, or
 parser-state version change reparses that source from byte zero.
 
+An excluded source (a positively identified non-native artefact under a Claude
+or Codex root, or an Antigravity session whose first complete record places it
+outside scope) is checkpointed `excluded` with `complete_byte_offset` equal to
+its observed size, zero pending bytes, no messages, and the reason in
+`parser_state.excluded_code`. Exclusion is sticky: while device, inode and
+parser-state version are unchanged and the file has not shrunk, later growth
+plans no read, creates no generation, and the freshness scan treats the file
+as fully represented. Replacement, truncation, or a parser-state version
+advance re-admits it. Antigravity admission is decided from the first complete
+record of a from-zero parse; a blocked first record is a deterministic source
+failure, and a file with no complete first record is an ordinary undecided
+checkpoint with pending bytes.
+
 Changed records/checkpoints stage in connection-local temporary relations.
 Normal indexing prepares candidate canonical rows, aliases, semantic chunks,
 and reusable vectors while the previous corpus remains selected. One short

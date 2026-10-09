@@ -10,6 +10,7 @@ from typing import cast
 import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
+from tests.conftest import ANTIGRAVITY_SESSION_IDS, build_antigravity_root
 
 from cc_search_chats.cli import main
 from cc_search_chats.semantic import SemanticChunk
@@ -284,6 +285,10 @@ def test_postgresql_cli_journey_with_events(
         monkeypatch.setenv(variable, str(connection[key]))
     monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
     monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
+    antigravity_root = build_antigravity_root(
+        tmp_path / "brain", "boundary_admitted", "pre_october"
+    )
+    monkeypatch.setenv("CC_SEARCH_ANTIGRAVITY_ROOTS", str(antigravity_root))
     initial_vector = [0.0] * 1024
     initial_vector[0] = 1.0
 
@@ -346,15 +351,27 @@ def test_postgresql_cli_journey_with_events(
     assert isinstance(indexed_payload["corpus_age_ms"], int)
     assert indexed_payload["corpus_age_ms"] >= 0
     coverage = indexed_payload["coverage"]
-    assert coverage["configured_root_count"] == 2
-    assert coverage["resolved_root_count"] == 2
-    assert coverage["discovered_files"] == 4
-    assert coverage["read_files"] == 4
-    assert coverage["indexed_files"] == 4
+    assert coverage["configured_root_count"] == 3
+    assert coverage["resolved_root_count"] == 3
+    assert [root["provider"] for root in coverage["roots"]] == [
+        "claude",
+        "codex",
+        "antigravity",
+    ]
+    assert [root["resolved_path"] for root in coverage["roots"]] == [
+        str(claude_root.resolve()),
+        str(codex_root.resolve()),
+        str(antigravity_root.resolve()),
+    ]
+    assert coverage["discovered_files"] == 6
+    assert coverage["read_files"] == 6
+    assert coverage["indexed_files"] == 5
     assert coverage["skipped_files"] == 0
     assert coverage["skipped_records"] == 0
     assert coverage["repaired_records"] == 0
-    assert coverage["excluded_files"] == 0
+    assert coverage["excluded_files"] == 1
+    assert coverage["pending_tail_files"] == 0
+    assert indexed_payload["refresh"]["pending_bytes"] == 0
     assert coverage["unreadable_files"] == 0
     assert coverage["unknown_sessions"] == 1
     assert coverage["unrecognized_conversation_records"] == 0
@@ -386,7 +403,9 @@ def test_postgresql_cli_journey_with_events(
     assert (
         unchanged_payload["corpus_generation"] == indexed_payload["corpus_generation"]
     )
-    assert unchanged_coverage["metadata_checked_files"] == 4
+    assert unchanged_coverage["metadata_checked_files"] == 6
+    assert unchanged_coverage["excluded_files"] == 1
+    assert unchanged_coverage["pending_tail_files"] == 0
     assert unchanged_coverage["content_read_files"] == 0
     assert unchanged_coverage["content_read_bytes"] == 0
     assert unchanged_coverage["read_files"] == 0
@@ -446,7 +465,7 @@ def test_postgresql_cli_journey_with_events(
     assert code == 0
     assert "WARNING: skipped claude record" in human_index.err
     assert "(malformed_json)" in human_index.err
-    assert "Indexed 12 messages from 4 sources into corpus " in human_index.err
+    assert "Indexed 14 messages from 6 sources into corpus " in human_index.err
 
     code, quiet_status = _run(
         monkeypatch,
@@ -764,6 +783,53 @@ def test_postgresql_cli_journey_with_events(
     assert code == 0
     assert result["provider"] == "codex"
     locator = result["locator"]
+
+    code, antigravity_search = _run(
+        monkeypatch,
+        capsys,
+        "search",
+        "boundary admitted mulberry",
+        "--provider",
+        "antigravity",
+        "--literal",
+        "--json",
+    )
+    assert code == 0
+    antigravity_payload = json.loads(antigravity_search.out)
+    _assert_v5_envelope(antigravity_payload, "search")
+    assert antigravity_payload["mode"] == "literal"
+    assert antigravity_payload["retrieval_mode"] == "literal"
+    assert [hit["provider"] for hit in antigravity_payload["results"]] == [
+        "antigravity"
+    ]
+    assert {hit["session_id"] for hit in antigravity_payload["results"]} == {
+        ANTIGRAVITY_SESSION_IDS["boundary_admitted"]
+    }
+    assert "pre-october-decoy-bullace" not in antigravity_search.out
+    antigravity_locator = antigravity_payload["results"][0]["locator"]
+    assert antigravity_locator.startswith("ccchat:v1:antigravity:")
+    code, antigravity_resolved = _run(
+        monkeypatch, capsys, "resolve", antigravity_locator, "--json"
+    )
+    assert code == 0
+    assert json.loads(antigravity_resolved.out)["status"] == "resolved"
+    code, antigravity_events = _run(
+        monkeypatch,
+        capsys,
+        "events",
+        "--from",
+        "2026-10-01T00:00:00Z",
+        "--until",
+        "2026-10-02T00:00:00Z",
+        "--json",
+    )
+    assert code == 0
+    antigravity_events_payload = json.loads(antigravity_events.out)
+    assert antigravity_events_payload["population"]["retained"] == 1
+    assert [
+        (event["provider"], event["retention_status"], event["submitted_by"])
+        for event in antigravity_events_payload["events"]
+    ] == [("antigravity", "retained", "human")]
 
     missing_locator = f"{locator[:-1]}{'0' if locator[-1] != '0' else '1'}"
     monkeypatch.setattr(
