@@ -75,6 +75,10 @@ They do not use the operator's production database.
   deadline-bounded count of unindexed native files, directories, and bytes or
   a closed unknown reason. Search never refreshes implicitly; run
   `cc-search-chats index` intentionally to publish newer native records.
+- `--project PATH` matches the recorded repository, else `cwd`, exactly. For
+  Claude and Codex that value is native; for Antigravity it is derived from
+  the first `run_command` `Cwd` in the session and is NULL when none exists,
+  so such sessions are found only without `--project`.
 - Human search shows local snapshot time with its historical UTC offset and
   elapsed age; routine file counts belong in `index --status`. Source updates
   are expected between index runs. Additive `index_state.freshness` reports the

@@ -33,6 +33,7 @@ from cc_search_chats.providers.antigravity import (
     AdmissionDecision,
     AdmissionOutcome,
     AntigravityDiagnosticCode,
+    AntigravityParseResult,
     AntigravityParserState,
     AntigravitySessionContext,
     admit_antigravity_session,
@@ -419,6 +420,23 @@ def _antigravity_default_roots(home: Path) -> tuple[Path, ...]:
     return (brain,) if brain.is_dir() else ()
 
 
+def _antigravity_state_cwd(state: object) -> str | None:
+    return state.cwd if isinstance(state, AntigravityParserState) else None
+
+
+def _antigravity_cwd_established(parsed: ParseResult) -> bool:
+    return isinstance(parsed, AntigravityParseResult) and parsed.cwd_established
+
+
+def _no_state_cwd(state: object) -> None:
+    del state
+
+
+def _never_establishes_cwd(parsed: ParseResult) -> bool:
+    del parsed
+    return False
+
+
 def _antigravity_source_session_id(source_file_relative: Path) -> str:
     return source_file_relative.parts[0]
 
@@ -519,6 +537,8 @@ class ProviderAdapter:
     raw_record_matches: Callable[[NativeLocator, RecordEnvelope], bool]
     scan_candidate: Callable[[Path, NativeLocator], bool]
     parsed_session_id: Callable[[ParseResult], str | None]
+    state_cwd: Callable[[object], str | None]
+    cwd_established: Callable[[ParseResult], bool]
 
     def admits(self, envelopes: tuple[RecordEnvelope, ...]) -> bool:
         """Return whether a parse starting at ordinal 0 may proceed."""
@@ -650,6 +670,8 @@ _CLAUDE = ProviderAdapter(
     raw_record_matches=_claude_record_matches,
     scan_candidate=_claude_scan_candidate,
     parsed_session_id=_claude_parsed_session_id,
+    state_cwd=_no_state_cwd,
+    cwd_established=_never_establishes_cwd,
 )
 
 _CODEX = ProviderAdapter(
@@ -704,6 +726,8 @@ _CODEX = ProviderAdapter(
     raw_record_matches=_codex_record_matches,
     scan_candidate=_codex_scan_candidate,
     parsed_session_id=_codex_parsed_session_id,
+    state_cwd=_no_state_cwd,
+    cwd_established=_never_establishes_cwd,
 )
 
 _ANTIGRAVITY = ProviderAdapter(
@@ -757,6 +781,8 @@ _ANTIGRAVITY = ProviderAdapter(
     raw_record_matches=_ordinal_record_matches,
     scan_candidate=_antigravity_scan_candidate,
     parsed_session_id=_claude_parsed_session_id,
+    state_cwd=_antigravity_state_cwd,
+    cwd_established=_antigravity_cwd_established,
 )
 
 _ADAPTERS: dict[Provider, ProviderAdapter] = {

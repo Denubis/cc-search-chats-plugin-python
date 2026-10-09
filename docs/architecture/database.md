@@ -125,6 +125,14 @@ record of a from-zero parse; a blocked first record is a deterministic source
 failure, and a file with no complete first record is an ordinary undecided
 checkpoint with pending bytes.
 
+`cwd` is native for Claude and Codex rows. For Antigravity it is derived: the
+`Cwd` argument of the first `run_command` call in the checkpointed prefix,
+carried in parser state and stamped on every row of the session, else NULL.
+Within one run a value established by a later batch is written back to that
+source's earlier staged rows; when an appended tail first establishes it, that
+one source is reparsed from byte zero in the same run so published rows agree.
+Identities and embedding digests do not depend on `cwd`.
+
 Changed records/checkpoints stage in connection-local temporary relations.
 Normal indexing prepares candidate canonical rows, aliases, semantic chunks,
 and reusable vectors while the previous corpus remains selected. One short

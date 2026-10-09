@@ -3,20 +3,6 @@
 Working root: `/home/brian/people/Brian/cc-search-chats-plugin-python`.
 Completed items move to `worklog.md`; do not tick them here.
 
-## Outcome 4: derived working directory
-- [ ] Failing unit tests (cwd on all rows, none without `run_command`,
-      multi-batch, `cwd_established`).
-- [ ] Failing PostgreSQL AC6 tests (tail establishes cwd → same-run reparse,
-      unchanged locators and `embedding_value` count; NULL case; small-batch
-      case).
-- [ ] Parser: record first `run_command` `Cwd`; stamp all messages; expose
-      `cwd_established`.
-- [ ] Refresh: staged-row `cwd` update after the source's last batch;
-      append → replace reparse once when established.
-- [ ] Rerun the Outcome 3 stale-loop test.
-- [ ] Docs: `database.md` derived `cwd`; `CLAUDE.md` `--project` wording.
-- [ ] Full gate set; checkpoint commit.
-
 ## Outcome 5: consumer truth and release
 - [ ] Update `README.md`, `skills/search-chat/SKILL.md`,
       `commands/search-chat.md`, `CLAUDE.md` CLI Contract,

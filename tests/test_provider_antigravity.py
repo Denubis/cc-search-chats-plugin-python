@@ -222,7 +222,9 @@ class TestProjection:
             ("user", "2026-10-03T09:21:00Z", 1),
             ("assistant", "2026-10-03T09:21:09Z", 1),
         ]
-        assert parsed.next_state == AntigravityParserState(next_conversation_epoch=1)
+        assert parsed.next_state == AntigravityParserState(
+            next_conversation_epoch=1, cwd="/synthetic/orchard"
+        )
 
     def test_tool_rows_share_the_prose_row_identity(self) -> None:
         parsed = parse_antigravity_session(
@@ -382,3 +384,74 @@ class TestProjection:
         )
         assert first.messages + second.messages == one.messages
         assert second.next_state == one.next_state
+
+
+class TestDerivedWorkingDirectory:
+    def test_first_run_command_cwd_stamps_every_row(self) -> None:
+        parsed = parse_antigravity_session(
+            fixture_envelopes("october_human"), context=CONTEXT
+        )
+        assert {message.cwd for message in parsed.messages} == {"/synthetic/orchard"}
+        assert parsed.next_state.cwd == "/synthetic/orchard"
+        assert parsed.cwd_established is True
+
+    def test_session_without_run_command_keeps_null(self) -> None:
+        parsed = parse_antigravity_session(
+            fixture_envelopes("boundary_admitted"), context=CONTEXT
+        )
+        assert {message.cwd for message in parsed.messages} == {None}
+        assert parsed.next_state.cwd is None
+        assert parsed.cwd_established is False
+
+    def test_later_run_commands_do_not_override_the_first(self) -> None:
+        parsed = parse_antigravity_session(
+            envelopes(
+                user_input("one"),
+                record(
+                    "MODEL",
+                    "PLANNER_RESPONSE",
+                    "2026-10-03T09:15:04Z",
+                    tool_calls=[{"name": "run_command", "args": {"Cwd": "/first"}}],
+                ),
+                record(
+                    "MODEL",
+                    "PLANNER_RESPONSE",
+                    "2026-10-03T09:15:05Z",
+                    content="again",
+                    tool_calls=[{"name": "run_command", "args": {"Cwd": "/second"}}],
+                ),
+            ),
+            context=CONTEXT,
+        )
+        assert {message.cwd for message in parsed.messages} == {"/first"}
+
+    def test_run_command_without_a_string_cwd_leaves_null(self) -> None:
+        parsed = parse_antigravity_session(
+            envelopes(
+                user_input("one"),
+                record(
+                    "MODEL",
+                    "PLANNER_RESPONSE",
+                    "2026-10-03T09:15:04Z",
+                    content="x",
+                    tool_calls=[{"name": "run_command", "args": {"Cwd": 7}}],
+                ),
+            ),
+            context=CONTEXT,
+        )
+        assert {message.cwd for message in parsed.messages} == {None}
+
+    def test_split_after_the_run_command_carries_the_value_forward(self) -> None:
+        whole = fixture_envelopes("october_human")
+        first = parse_antigravity_session(whole[:2], context=CONTEXT)
+        second = parse_antigravity_session(
+            whole[2:], context=CONTEXT, prior_state=first.next_state
+        )
+        assert first.cwd_established is True
+        assert second.cwd_established is False
+        assert {m.cwd for m in first.messages + second.messages} == {
+            "/synthetic/orchard"
+        }
+        assert second.next_state == first.next_state or (
+            second.next_state.cwd == first.next_state.cwd
+        )

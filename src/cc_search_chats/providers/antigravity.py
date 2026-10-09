@@ -133,6 +133,7 @@ class AntigravityParseResult:
     messages: tuple[NativeMessage, ...]
     diagnostics: tuple[AntigravityDiagnostic, ...]
     next_state: AntigravityParserState
+    cwd_established: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +406,17 @@ class _Projection:
     diagnostics: tuple[AntigravityDiagnostic, ...]
     role: str | None = None
     epoch_boundary: bool = False
+    run_command_cwd: str | None = None
+
+
+def _first_run_command_cwd(calls: tuple[tuple[str, object], ...]) -> str | None:
+    """Return the ``Cwd`` argument of the first ``run_command`` call, if a string."""
+    for name, args in calls:
+        if name != "run_command":
+            continue
+        cwd = args.get("Cwd") if _is_json_object(args) else None
+        return cwd if isinstance(cwd, str) and cwd else None
+    return None
 
 
 def _project_user_input(
@@ -445,7 +457,10 @@ def _project_planner_response(
             )
         )
     return _Projection(
-        rows=tuple(rows), diagnostics=tuple(diagnostics), role="assistant"
+        rows=tuple(rows),
+        diagnostics=tuple(diagnostics),
+        role="assistant",
+        run_command_cwd=_first_run_command_cwd(calls),
     )
 
 
@@ -534,9 +549,10 @@ def parse_antigravity_session(
         raise TypeError("prior_state must be AntigravityParserState or None")
     state = prior_state if prior_state is not None else AntigravityParserState()
     records, decode_diagnostics = _decode_records(tuple(envelopes))
-    messages: list[NativeMessage] = []
+    projected: list[tuple[_DecodedRecord, _Projection, int]] = []
     diagnostics = list(decode_diagnostics)
     epoch = state.next_conversation_epoch
+    cwd = state.cwd
     for record in records:
         try:
             projection = _project_record(record)
@@ -549,13 +565,19 @@ def parse_antigravity_session(
         if projection.epoch_boundary:
             epoch += 1
             continue
-        messages.extend(
-            _native_messages(
-                record, projection, context=context, epoch=epoch, cwd=state.cwd
-            )
+        if cwd is None and projection.run_command_cwd is not None:
+            cwd = projection.run_command_cwd
+        projected.append((record, projection, epoch))
+    messages = tuple(
+        message
+        for record, projection, record_epoch in projected
+        for message in _native_messages(
+            record, projection, context=context, epoch=record_epoch, cwd=cwd
         )
+    )
     return AntigravityParseResult(
-        messages=tuple(messages),
+        messages=messages,
         diagnostics=tuple(diagnostics),
-        next_state=AntigravityParserState(next_conversation_epoch=epoch, cwd=state.cwd),
+        next_state=AntigravityParserState(next_conversation_epoch=epoch, cwd=cwd),
+        cwd_established=state.cwd is None and cwd is not None,
     )

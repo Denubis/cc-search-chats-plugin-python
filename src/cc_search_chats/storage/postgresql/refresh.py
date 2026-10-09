@@ -1110,6 +1110,7 @@ class _ParsedSource:
     skipped: tuple[dict[str, object], ...]
     repaired: tuple[dict[str, object], ...]
     attempted_bytes: int
+    cwd_established: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1181,7 +1182,7 @@ def _stage_parsed_batch(
     plan: _SourcePlan,
     batch: BoundedReadResult,
     state: object,
-) -> tuple[object, tuple[dict[str, object], ...], tuple[dict[str, object], ...]]:
+) -> tuple[ParseResult, tuple[dict[str, object], ...], tuple[dict[str, object], ...]]:
     try:
         parsed = _parse_batch(plan, batch.envelopes, batch.diagnostics, state)
     except _SourceRefreshError as error:
@@ -1200,7 +1201,27 @@ def _stage_parsed_batch(
         plan,
         _messages_without_skipped_records(parsed.messages, skipped_ordinals),
     )
-    return parsed.next_state, skips, repairs
+    return parsed, skips, repairs
+
+
+def _stamp_staged_cwd(
+    connection: psycopg.Connection, plan: _SourcePlan, cwd: str
+) -> None:
+    """Carry a working directory established late in a run back to earlier rows."""
+    connection.execute(
+        """
+        UPDATE pg_temp.refresh_stage_message
+        SET cwd = %s
+        WHERE source_root_id = %s AND source_file_relative = %s
+          AND cwd IS DISTINCT FROM %s
+        """,
+        (
+            cwd,
+            plan.observed.root.source_root_id,
+            plan.observed.source.source_file_relative.as_posix(),
+            cwd,
+        ),
+    )
 
 
 def _parse_source_batches(
@@ -1213,6 +1234,7 @@ def _parse_source_batches(
     state: object = plan.prior_state
     skipped: list[dict[str, object]] = []
     repaired: list[dict[str, object]] = []
+    cwd_established = False
     if observed.size == offset and state is None:
         state = plan.adapter.initial_state()
     while offset < observed.size:
@@ -1222,7 +1244,9 @@ def _parse_source_batches(
         excluded = _admission_decision(plan, batch) if offset == 0 else None
         if excluded is not None:
             return _ExcludedSource(excluded, batch.next_source_byte_offset)
-        state, skips, repairs = _stage_parsed_batch(connection, plan, batch, state)
+        parsed, skips, repairs = _stage_parsed_batch(connection, plan, batch, state)
+        state = parsed.next_state
+        cwd_established = cwd_established or plan.adapter.cwd_established(parsed)
         skipped.extend(skips)
         repaired.extend(repairs)
         next_offset = batch.next_source_byte_offset
@@ -1236,6 +1260,9 @@ def _parse_source_batches(
             break
     if state is None:
         raise _SourceRefreshError("provider parser did not produce continuation state")
+    cwd = plan.adapter.state_cwd(state)
+    if cwd is not None:
+        _stamp_staged_cwd(connection, plan, cwd)
     return _ParsedSource(
         complete_byte_offset=offset,
         next_record_ordinal=ordinal,
@@ -1244,6 +1271,7 @@ def _parse_source_batches(
         skipped=tuple(skipped),
         repaired=tuple(repaired),
         attempted_bytes=max(0, offset - plan.start_byte_offset),
+        cwd_established=cwd_established,
     )
 
 
@@ -1301,6 +1329,13 @@ def _parse_and_stage_source(
     parsed = _parse_source_batches(connection, plan)
     if isinstance(parsed, _ExcludedSource):
         return _stage_excluded_source(connection, plan, parsed)
+    if plan.disposition == "append" and parsed.cwd_established:
+        # Earlier published rows cannot be rewritten by an append, so the one
+        # tail that first establishes cwd reparses the source from byte zero.
+        _clear_staged_source(connection, plan)
+        return _parse_and_stage_source(
+            connection, _SourcePlan(observed, "replace", 0, 0, 1, None, 0)
+        )
     final_size = _verified_final_size(observed)
     advanced, pending = _stage_source_checkpoint(
         connection,

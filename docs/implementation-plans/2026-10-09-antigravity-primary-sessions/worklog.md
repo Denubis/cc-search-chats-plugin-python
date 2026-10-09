@@ -191,3 +191,35 @@ Evidence (2026-10-09):
 - Read-only probe against `~/.gemini/antigravity-cli/brain`:
   `discover_antigravity_sources` → `228 []` (228 sources, zero diagnostics);
   `find … -name transcript_full.jsonl | wc -l` → 228.
+- Checkpoint `55a533a` (feat: index primary Antigravity sessions); hooks passed.
+
+## Outcome 4: Sessions carry a derived working directory (done)
+
+Changed surfaces:
+- `providers/antigravity.py`: `_first_run_command_cwd`; `_Projection` carries
+  `run_command_cwd`; the parser records the first string `Cwd` into
+  `next_state.cwd`, stamps every message of the result with the final value,
+  and exposes `cwd_established` (True only on the batch that first set it).
+- `providers/registry.py`: adapters gain `state_cwd` and `cwd_established`
+  callables (None/False for Claude and Codex).
+- `storage/postgresql/refresh.py`: `_stamp_staged_cwd` rewrites earlier
+  staged rows of the source after its last batch; `_ParsedSource` carries
+  `cwd_established`; an `append` plan whose parse establishes cwd clears its
+  staged suffix and reparses once as a from-zero `replace` plan (the replace
+  disposition cannot re-trigger the route).
+- Docs: `docs/architecture/database.md` derived-`cwd` paragraph; `CLAUDE.md`
+  CLI contract `--project` wording.
+- Tests: `tests/test_provider_antigravity.py::TestDerivedWorkingDirectory`
+  (stamps every row, NULL without `run_command`, first call wins, non-string
+  `Cwd` ignored, split after the call carries forward, `cwd_established`);
+  `tests/postgresql/test_antigravity_refresh.py` AC6 (tail establishes cwd →
+  reads start `[watermark, 0]`, `--project` matches every prose row, earlier
+  locators and their `embedding_input_digest` unchanged, exactly one new
+  embedding for the new prose row, excluded and other sessions' checkpoints
+  untouched; one-record batches stamp ordinal 0). AC1 now asserts the
+  derived value on the October fixture.
+
+Evidence (2026-10-09):
+- `pytest -q tests/test_provider_antigravity.py` → 32 passed.
+- `pytest -q -m postgresql tests/postgresql/test_antigravity_refresh.py` →
+  7 passed (includes the Outcome 3 stale-loop test rerun under the new route).

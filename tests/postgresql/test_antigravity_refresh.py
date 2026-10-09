@@ -141,22 +141,23 @@ def test_ac1_admission_indexes_only_october_human_sessions(
 
     result = _index(postgres_connection, root)
 
-    rows = tuple(
+    rows = set(
         postgres_connection.execute(
             """
             SELECT DISTINCT provider, session_kind, source_session_id, cwd
             FROM cc_search_chats.message_current
-            ORDER BY source_session_id
             """
         )
     )
-    assert rows == (
-        ("antigravity", "primary", ANTIGRAVITY_SESSION_IDS["october_human"], None),
+    assert rows == {
+        (
+            "antigravity",
+            "primary",
+            ANTIGRAVITY_SESSION_IDS["october_human"],
+            "/synthetic/orchard",
+        ),
         ("antigravity", "primary", ANTIGRAVITY_SESSION_IDS["boundary_admitted"], None),
-    ) or rows == (
-        ("antigravity", "primary", ANTIGRAVITY_SESSION_IDS["boundary_admitted"], None),
-        ("antigravity", "primary", ANTIGRAVITY_SESSION_IDS["october_human"], None),
-    )
+    }
     checkpoints = _checkpoints(postgres_connection)
     for name, code in (
         ("pre_october", "antigravity_before_scope_start"),
@@ -398,3 +399,145 @@ def test_ac5_root_and_session_decoys_are_silent_and_unsearchable(
         "token-decoy-holly",
     ):
         assert not _found_anywhere(postgres_connection, decoy), decoy
+
+
+def _planner_with_cwd(cwd: str, created_at: str) -> bytes:
+    return (
+        json.dumps(
+            {
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "created_at": created_at,
+                "status": "DONE",
+                "step_index": 9,
+                "content": "running the tail command",
+                "tool_calls": [{"name": "run_command", "args": {"Cwd": cwd}}],
+            },
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+
+
+def _embedding_value_count(connection: psycopg.Connection) -> int:
+    return next(
+        connection.execute("SELECT count(*) FROM cc_search_chats.embedding_value")
+    )[0]
+
+
+def _embedding_digests(connection: psycopg.Connection) -> dict[str, str]:
+    return dict(
+        connection.execute(
+            """
+            SELECT canonical_locator, embedding_input_digest
+            FROM cc_search_chats.message_current
+            """
+        )
+    )
+
+
+def test_ac6_tail_establishing_cwd_reparses_once_without_changing_identity(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root(
+        build_antigravity_root(
+            tmp_path / "brain", "boundary_admitted", "october_human", "pre_october"
+        )
+    )
+    _index(postgres_connection, root)
+    session = ANTIGRAVITY_SESSION_IDS["boundary_admitted"]
+    before = {
+        hit.canonical_locator: hit.cwd
+        for hit in search_messages(postgres_connection, "mulberry")
+    }
+    assert set(before.values()) == {None}
+    assert (
+        search_messages(postgres_connection, "mulberry", project="/synthetic/tail")
+        == ()
+    )
+    embeddings_before = _embedding_value_count(postgres_connection)
+    digests_before = _embedding_digests(postgres_connection)
+    baseline_checkpoints = _checkpoints(postgres_connection)
+
+    starts: list[int] = []
+    original_reader = refresh_module.read_bounded_jsonl
+
+    def recording_reader(path: Path, **kwargs):
+        starts.append(kwargs.get("start_byte_offset", 0))
+        return original_reader(path, **kwargs)
+
+    monkeypatch.setattr(refresh_module, "read_bounded_jsonl", recording_reader)
+    transcript = antigravity_transcript(root.path, "boundary_admitted")
+    watermark = transcript.stat().st_size
+    with transcript.open("ab") as stream:
+        stream.write(_planner_with_cwd("/synthetic/tail", "2026-10-01T00:05:00Z"))
+    result = _index(postgres_connection, root)
+
+    assert starts[:2] == [watermark, 0]
+    assert result.read_source_count == 1
+    assert result.attempted_content_bytes == transcript.stat().st_size
+    after = {
+        hit.canonical_locator: hit.cwd
+        for hit in search_messages(postgres_connection, "mulberry")
+    }
+    assert set(after) == set(before)
+    assert set(after.values()) == {"/synthetic/tail"}
+    tail_rows = search_messages(
+        postgres_connection, "running the tail command", project="/synthetic/tail"
+    )
+    assert [hit.source_session_id for hit in tail_rows] == [session]
+    digests_after = _embedding_digests(postgres_connection)
+    assert {k: digests_after[k] for k in digests_before} == digests_before
+    assert len(digests_after) == len(digests_before) + 1
+    assert _embedding_value_count(postgres_connection) == embeddings_before + 1
+    checkpoints = _checkpoints(postgres_connection)
+    assert (
+        checkpoints[ANTIGRAVITY_SESSION_IDS["pre_october"]]
+        == baseline_checkpoints[ANTIGRAVITY_SESSION_IDS["pre_october"]]
+    )
+    assert (
+        checkpoints[ANTIGRAVITY_SESSION_IDS["october_human"]]
+        == baseline_checkpoints[ANTIGRAVITY_SESSION_IDS["october_human"]]
+    )
+    assert cast("dict[str, object]", checkpoints[session]["parser_state"])["cwd"] == (
+        "/synthetic/tail"
+    )
+
+    orchard = search_messages(postgres_connection, "orchard ledger")
+    assert {hit.cwd for hit in orchard} == {"/synthetic/orchard"}
+    assert search_messages(
+        postgres_connection, "orchard ledger", project="/synthetic/orchard"
+    )
+
+
+def test_ac6_small_batches_stamp_the_first_row(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root(build_antigravity_root(tmp_path / "brain", "october_human"))
+    original_reader = refresh_module.read_bounded_jsonl
+
+    def one_record_reader(path: Path, **kwargs):
+        kwargs["max_records_per_batch"] = 1
+        return original_reader(path, **kwargs)
+
+    monkeypatch.setattr(refresh_module, "read_bounded_jsonl", one_record_reader)
+    _index(postgres_connection, root)
+
+    rows = tuple(
+        postgres_connection.execute(
+            """
+            SELECT alias.record_ordinal, message.cwd
+            FROM cc_search_chats.message_current AS message
+            JOIN cc_search_chats.physical_alias_current AS alias
+              USING (provider, source_session_id, logical_message_id, content_class)
+            WHERE message.content_class = 'prose'
+            ORDER BY alias.record_ordinal
+            """
+        )
+    )
+    assert next(ordinal for ordinal, _cwd in rows) == 0
+    assert {cwd for _ordinal, cwd in rows} == {"/synthetic/orchard"}
