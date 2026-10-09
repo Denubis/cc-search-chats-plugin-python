@@ -29,7 +29,7 @@ from cc_search_chats.core.discovery import (
     list_session_files,
     rank_sessions,
 )
-from cc_search_chats.core.identity import ResolutionStatus
+from cc_search_chats.core.identity import Provider, ResolutionStatus
 from cc_search_chats.output import (
     event_export_payload,
     format_context,
@@ -145,6 +145,9 @@ _SEMANTIC_MODE_HELP = (
     "model-ranked search: hybrid fusion of full-text and embedding candidates by "
     "reciprocal rank; no deadline, and first use takes about 10 s"
 )
+
+
+_PROVIDER_CHOICES = tuple(value.value for value in Provider)
 
 
 class SearchDeadlineExceeded(TimeoutError):
@@ -2686,7 +2689,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--days", type=int, default=None, help="limit search to last N days"
     )
     search_parser.add_argument(
-        "--provider", choices=("claude", "codex"), help="limit by provider"
+        "--provider", choices=_PROVIDER_CHOICES, help="limit by provider"
     )
     search_parser.add_argument("--role", help="limit by conversational role")
     search_parser.add_argument(
@@ -2726,7 +2729,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--project", type=str, default=None, help="project path"
     )
     extract_parser.add_argument(
-        "--provider", choices=("claude", "codex"), help="limit by provider"
+        "--provider", choices=_PROVIDER_CHOICES, help="limit by provider"
     )
     extract_parser.add_argument(
         "--verbose",
@@ -2756,7 +2759,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--days", type=int, default=None, help="limit to last N days"
     )
     list_parser.add_argument(
-        "--provider", choices=("claude", "codex"), help="limit by provider"
+        "--provider", choices=_PROVIDER_CHOICES, help="limit by provider"
     )
     list_parser.set_defaults(func=_handle_list)
 

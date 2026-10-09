@@ -76,8 +76,9 @@ runs are already single-flight.
 cc-search-chats index --migrate --json
 ```
 
-The migration result must report `applied_schema_version == 10`. Re-running it is
-idempotent. Routine search/index commands must have reported
+The migration result must report `applied_schema_version == 11`. Re-running it is
+idempotent. Migration 11 fails loudly (and rolls back) if a target table carries
+no single-column `provider` CHECK to replace. Routine search/index commands must have reported
 `maintenance_required` without schema mutation before this explicit step.
 
 Capture stdout/stderr separately. Stdout must parse as one schema-v5 object.

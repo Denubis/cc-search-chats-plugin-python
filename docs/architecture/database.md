@@ -35,9 +35,14 @@ ledger.
 | 8 | `skipped_record_coverage_schema.sql` | durable count of skippable records per source checkpoint |
 | 9 | `drop_auto_refresh_state_schema.sql` | retirement of the automatic-refresh state table |
 | 10 | `coherent_selection_guard_schema.sql` | symmetric update guards for the selected corpus-generation/semantic-build pair |
+| 11 | `provider_antigravity_schema.sql` | replaces the single-column `provider` CHECK on `message_current`, `source_root_current` and `source_failure_current` (whatever its name) with `<table>_provider_check` admitting `claude`, `codex` and `antigravity`; legacy and quarantined relations untouched |
 
 Applied migration bytes are immutable. A future schema change is a new ordered
 resource plus a ledger test.
+
+The `provider` vocabulary on live relations is `claude`, `codex` and
+`antigravity`, enforced by the three named CHECK constraints above and mirrored
+by `core.identity.Provider` and the provider registry.
 
 ## Current relations
 

@@ -51,8 +51,16 @@ def alias(locator: NativeLocator | None = None) -> PhysicalAlias:
 
 class TestClosedContracts:
     def test_provider_values(self) -> None:
-        assert tuple(Provider) == (Provider.CLAUDE, Provider.CODEX)
-        assert [value.value for value in Provider] == ["claude", "codex"]
+        assert tuple(Provider) == (
+            Provider.CLAUDE,
+            Provider.CODEX,
+            Provider.ANTIGRAVITY,
+        )
+        assert [value.value for value in Provider] == [
+            "claude",
+            "codex",
+            "antigravity",
+        ]
 
     def test_session_kind_values(self) -> None:
         assert [value.value for value in SessionKind] == [
@@ -119,6 +127,19 @@ class TestCanonicalLocator:
                 ),
                 f"ccchat:v1:codex:session-id:ordinal:7:sha256:{DIGEST}",
             ),
+            (
+                NativeLocator(
+                    provider=Provider.ANTIGRAVITY,
+                    source_session_id="0e2ac8c2-7f3b-4a4d-9c3e-2f1d6b7a8c9d",
+                    key_kind=LocatorKeyKind.ORDINAL,
+                    key=3,
+                    record_digest=DIGEST,
+                ),
+                (
+                    "ccchat:v1:antigravity:0e2ac8c2-7f3b-4a4d-9c3e-2f1d6b7a8c9d"
+                    f":ordinal:3:sha256:{DIGEST}"
+                ),
+            ),
         ],
     )
     def test_formats_and_parses_exact_canonical_strings(
@@ -147,10 +168,24 @@ class TestCanonicalLocator:
             "ccchat:v1:codex:session:ordinal:1:sha256:ABCDEF" + "0" * 58,
             "ccchat:v1:codex:session:ordinal:1:sha256:" + "a" * 63,
             "ccchat:v1:codex:session:ordinal:1:md5:" + DIGEST,
+            "ccchat:v1:antigravity:session:uuid:message",
+            "ccchat:v1:antigravity:session:id:message",
         ],
     )
     def test_rejects_noncanonical_locator_syntax(self, value: str) -> None:
         assert parse_locator(value) is ResolutionStatus.MALFORMED_LOCATOR
+
+    @pytest.mark.parametrize("key_kind", [LocatorKeyKind.UUID, LocatorKeyKind.ID])
+    def test_antigravity_admits_only_ordinal_keys(
+        self, key_kind: LocatorKeyKind
+    ) -> None:
+        with pytest.raises(ValueError, match="antigravity locators require ordinal"):
+            NativeLocator(
+                provider=Provider.ANTIGRAVITY,
+                source_session_id="session",
+                key_kind=key_kind,
+                key="message",
+            )
 
 
 identifier = st.text(

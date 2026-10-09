@@ -10,6 +10,7 @@ from threading import Event
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from cc_search_chats.core.identity import Provider
 from cc_search_chats.providers.claude import (
@@ -297,6 +298,7 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
         (8, "skipped_record_coverage_schema.sql", 64),
         (9, "drop_auto_refresh_state_schema.sql", 64),
         (10, "coherent_selection_guard_schema.sql", 64),
+        (11, "provider_antigravity_schema.sql", 64),
     )
     assert next(
         postgres_connection.execute(
@@ -323,7 +325,7 @@ def test_pending_migrations_is_read_only_and_reports_the_packaged_suffix(
     assert tuple(
         migration.version
         for migration in migrations.pending_migrations(postgres_connection)
-    ) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    ) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
     assert (
         next(postgres_connection.execute("SELECT to_regnamespace('cc_search_chats')"))[
             0
@@ -358,7 +360,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
     monkeypatch.setattr(
         migrations,
         "_MIGRATIONS",
-        (*migrations._MIGRATIONS, migrations.Migration(11, "missing-migration.sql")),
+        (*migrations._MIGRATIONS, migrations.Migration(12, "missing-migration.sql")),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -368,7 +370,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
         postgres_connection.execute(
             "SELECT version FROM cc_search_chats.schema_migration ORDER BY version"
         )
-    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,))
+    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,))
 
 
 def test_migration_9_drops_only_the_retired_auto_refresh_state(
@@ -402,6 +404,145 @@ def test_migration_9_drops_only_the_retired_auto_refresh_state(
             "SELECT to_regclass('cc_search_chats.auto_refresh_state') IS NULL"
         )
     )[0]
+
+
+_PROVIDER_CHECK_TABLES = (
+    "message_current",
+    "source_root_current",
+    "source_failure_current",
+)
+
+
+def _provider_check_constraints(
+    connection: psycopg.Connection, table: str
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        connection.execute(
+            """
+            SELECT constraint_entry.conname,
+                   pg_get_constraintdef(constraint_entry.oid)
+            FROM pg_constraint AS constraint_entry
+            JOIN pg_attribute AS attribute
+              ON attribute.attrelid = constraint_entry.conrelid
+             AND attribute.attnum = ANY (constraint_entry.conkey)
+            WHERE constraint_entry.conrelid = %s::regclass
+              AND constraint_entry.contype = 'c'
+              AND array_length(constraint_entry.conkey, 1) = 1
+              AND attribute.attname = 'provider'
+            ORDER BY constraint_entry.conname
+            """,
+            (f"cc_search_chats.{table}",),
+        )
+    )
+
+
+def _insert_provider_rows(connection: psycopg.Connection, provider: str) -> None:
+    connection.execute(
+        """
+        INSERT INTO cc_search_chats.source_root_current (
+            source_root_id, provider, resolved_path, configured_order
+        ) VALUES (repeat(%s, 64), %s, %s, 9)
+        """,
+        (provider[:1], provider, f"/synthetic/{provider}"),
+    )
+    connection.execute(
+        """
+        INSERT INTO cc_search_chats.message_current (
+            provider, source_session_id, logical_message_id, canonical_locator,
+            timestamp_text, role, session_kind, conversation_epoch,
+            content_class, prose_content, submitted_by, embedding_input_digest
+        ) VALUES (
+            %s, 'session', 'record-0-' || repeat('a', 64),
+            'ccchat:v1:' || %s || ':session:ordinal:0:sha256:' || repeat('a', 64),
+            '2026-10-01T00:00:00Z', 'user', 'primary', 0, 'prose', 'hello',
+            'unknown', repeat('b', 64)
+        )
+        """,
+        (provider, provider),
+    )
+    connection.execute(
+        """
+        INSERT INTO cc_search_chats.source_failure_current (
+            source_root_id, source_file_relative, provider, file_device,
+            file_inode, observed_size, observed_mtime_ns, parser_state_version,
+            failure_code, failure_detail, failure_class,
+            attempted_content_bytes, consecutive_failures
+        ) VALUES (
+            repeat(%s, 64), 'session/transcript.jsonl', %s, 1, 1, 10, 1, 1,
+            'fixture', 'fixture failure', 'deterministic', 0, 1
+        )
+        """,
+        (provider[:1], provider),
+    )
+
+
+def test_migration_11_replaces_provider_checks_whatever_their_names(
+    postgres_connection: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packaged_migrations = migrations._MIGRATIONS
+    through_v10 = tuple(
+        migration for migration in packaged_migrations if migration.version <= 10
+    )
+    monkeypatch.setattr(migrations, "_MIGRATIONS", through_v10)
+    migrations.apply_migrations(postgres_connection)
+    for table in _PROVIDER_CHECK_TABLES:
+        ((name, _definition),) = _provider_check_constraints(postgres_connection, table)
+        postgres_connection.execute(
+            sql.SQL(
+                "ALTER TABLE cc_search_chats.{table} RENAME CONSTRAINT {old} TO {new}"
+            ).format(
+                table=sql.Identifier(table),
+                old=sql.Identifier(name),
+                new=sql.Identifier(f"legacy_{table}_chk"),
+            )
+        )
+    postgres_connection.execute(
+        """
+        CREATE TABLE cc_search_chats.message (
+            provider text NOT NULL CHECK (provider IN ('claude', 'codex')),
+            revision_id bigint NOT NULL
+        )
+        """
+    )
+    (legacy_before,) = _provider_check_constraints(postgres_connection, "message")
+    with (
+        pytest.raises(psycopg.errors.CheckViolation),
+        postgres_connection.transaction(),
+    ):
+        _insert_provider_rows(postgres_connection, "antigravity")
+
+    monkeypatch.setattr(migrations, "_MIGRATIONS", packaged_migrations)
+    assert tuple(
+        migration.version
+        for migration in migrations.pending_migrations(postgres_connection)
+    ) == (11,)
+    migrations.apply_migrations(postgres_connection)
+
+    for table in _PROVIDER_CHECK_TABLES:
+        checks = _provider_check_constraints(postgres_connection, table)
+        assert len(checks) == 1, checks
+        name, definition = checks[0]
+        assert name == f"{table}_provider_check"
+        assert "'antigravity'" in definition
+    _insert_provider_rows(postgres_connection, "antigravity")
+    with (
+        pytest.raises(psycopg.errors.CheckViolation),
+        postgres_connection.transaction(),
+    ):
+        _insert_provider_rows(postgres_connection, "gemini")
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.message_current "
+                "WHERE provider = 'antigravity'"
+            )
+        )[0]
+        == 1
+    )
+    assert _provider_check_constraints(postgres_connection, "message") == (
+        legacy_before,
+    )
 
 
 def _upgrade_seeded_v6_schema(
@@ -469,6 +610,7 @@ def _upgrade_seeded_v6_schema(
         8,
         9,
         10,
+        11,
     )
     migrations.apply_migrations(connection)
 

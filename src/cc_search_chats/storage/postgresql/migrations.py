@@ -30,6 +30,7 @@ _MIGRATIONS = (
     Migration(8, "skipped_record_coverage_schema.sql"),
     Migration(9, "drop_auto_refresh_state_schema.sql"),
     Migration(10, "coherent_selection_guard_schema.sql"),
+    Migration(11, "provider_antigravity_schema.sql"),
 )
 
 

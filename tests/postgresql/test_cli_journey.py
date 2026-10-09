@@ -14,7 +14,7 @@ from psycopg.conninfo import conninfo_to_dict
 from cc_search_chats.cli import main
 from cc_search_chats.semantic import SemanticChunk
 from cc_search_chats.semantic.query_embedder import QueryEmbeddingResult
-from cc_search_chats.storage.postgresql import migrate
+from cc_search_chats.storage.postgresql import migrate, migrations
 
 pytestmark = pytest.mark.postgresql
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "providers"
@@ -207,7 +207,7 @@ def test_migration_reporting_uses_applied_ledger_version(
             """
             INSERT INTO cc_search_chats.schema_migration (
                 version, resource_name, sha256
-            ) VALUES (11, 'future_schema.sql', %s)
+            ) VALUES (12, 'future_schema.sql', %s)
             """,
             ("0" * 64,),
         )
@@ -231,7 +231,7 @@ def test_migration_reporting_uses_applied_ledger_version(
                 "SELECT max(version) FROM cc_search_chats.schema_migration"
             )
         )[0]
-    assert ledger_version == 11
+    assert ledger_version == 12
     if json_output:
         assert json.loads(output.out)["applied_schema_version"] == ledger_version
     else:
@@ -301,9 +301,35 @@ def test_postgresql_cli_journey_with_events(
     )
     monkeypatch.setattr("cc_search_chats.cli.chunk_passages", _single_chunks)
 
+    through_v10 = tuple(
+        migration for migration in migrations._MIGRATIONS if migration.version <= 10
+    )
+    with monkeypatch.context() as older_release:
+        older_release.setattr(migrations, "_MIGRATIONS", through_v10)
+        with psycopg.connect(postgres_cluster.dsn, autocommit=True) as connection:
+            migrations.apply_migrations(connection)
+    code, pending = _run(
+        monkeypatch, capsys, "search", "visible", "--literal", "--json"
+    )
+    assert code == 6
+    pending_payload = json.loads(pending.out)
+    assert pending_payload["status"] == "maintenance_required"
+    assert cast("dict[str, object]", pending_payload["error"])["pending_versions"] == [
+        11
+    ]
+    with psycopg.connect(postgres_cluster.dsn, autocommit=True) as connection:
+        assert (
+            next(
+                connection.execute(
+                    "SELECT max(version) FROM cc_search_chats.schema_migration"
+                )
+            )[0]
+            == 10
+        )
+
     code, migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
     assert code == 0
-    assert json.loads(migrated.out)["applied_schema_version"] == 10
+    assert json.loads(migrated.out)["applied_schema_version"] == 11
     code, indexed = _run(monkeypatch, capsys, "index", "--json")
     assert code == 0
     indexed_payload = json.loads(indexed.out)

@@ -21,6 +21,7 @@ class Provider(StrEnum):
 
     CLAUDE = "claude"
     CODEX = "codex"
+    ANTIGRAVITY = "antigravity"
 
 
 class SessionKind(StrEnum):
@@ -59,6 +60,7 @@ class LocatorKeyKind(StrEnum):
 _LOCATOR_KEY_KINDS: dict[Provider, frozenset[LocatorKeyKind]] = {
     Provider.CLAUDE: frozenset({LocatorKeyKind.UUID}),
     Provider.CODEX: frozenset({LocatorKeyKind.ID, LocatorKeyKind.ORDINAL}),
+    Provider.ANTIGRAVITY: frozenset({LocatorKeyKind.ORDINAL}),
 }
 
 
