@@ -1,6 +1,6 @@
 # Antigravity Primary Sessions Design
 
-**Status:** Draft
+**Status:** Accepted
 
 **Supersedes:** in `docs/design-plans/2026-08-10-cross-vendor-semantic-search.md`,
 the Definition of Done sentence (lines 55–56) and the AC1 failure criterion

@@ -307,3 +307,47 @@ and shows every admitted session carries a derived working directory.
 - Finished-work UAT (plan.md) needs the separately authorised ADR 0007
   backup, `index --migrate` and one `index` run on an installed 2.4.0; not
   run by execution. Normalisation follows accepted UAT.
+
+## Normalisation, integration and production deployment (2026-10-09)
+
+Authorised by the human ("yes, commit and push", "happy to install", "do what
+you need to, on the archive filesystem"). Procedure: `docs/runbooks/laptop-deployment.md`,
+preserving upgrade.
+
+- Checkpoints folded into `5c00e424ff22b64dbb2bd1ad2d4151f0d77d66f3`
+  (accepted tree preserved); `main` fast-forwarded and pushed;
+  `main == origin/main`.
+- Installed `cc-search-chats 2.4.0` from that commit via
+  `uv tool install --force` (provenance verified). Timer disabled for the
+  upgrade; previous installed commit `0762b6b` (2.3.6), generation 104,
+  semantic build 89, `needs_attention 98`.
+- Full `pg_dump` (ADR 0007) completed before migration: 38,514,832,485 bytes,
+  archived at `/mnt/archive/scratch/cc-search-chats/upgrades/5c00e424…/
+  cc-search-chats-before.dump`; pointer in the evidence directory
+  `~/.local/state/cc-search-chats/upgrades/5c00e424…/backup-location`.
+- `index --migrate`: `applied_schema_version 11`; renamed provider
+  constraints verified; legacy quarantine untouched.
+- First `index` (run 107): exit 0, `status complete`, corpus generation 105,
+  semantic build 90 (`fresh`, 428,737 units). The Claude parser-version 6
+  bump from 2.3.7 reparsed 10,734 sources (7.15 GB read); no re-embedding of
+  unchanged prose. Antigravity root: 228 discovered, 7 indexed, 221 excluded,
+  0 pending, 0 blocked, matching the read-only sanity check. Evidence:
+  `index.stdout.json`, `index.stderr.ndjson`, `post-index-status.json`.
+- `refresh.state partial` from five blocked Claude files, all written today by
+  Claude Code 2.1.295 and all still growing: four carry a `last-prompt`
+  record with a new `explicit` key (10 records corpus-wide) and one subagent
+  file carries an `attachment` of type `snapshot` with `agentId`,
+  `rendered` and `renderedRole`. Neither keyset is in
+  `providers/claude.py`; the deterministic `unknown_conversation_record`
+  failure is the designed response. `needs_attention` fell from 98 to 5; the
+  five are new. Ticket raised in `.notes/project_open-questions.md`; not in
+  this plan's scope.
+- Five design-authority locators now return `resolved` through the installed
+  CLI; design status flipped to Accepted.
+- Smoke on the installed CLI: `--literal` complete; `--semantic` complete
+  with `retrieval_mode hybrid`, no degradation warning (`model_load_ms`
+  15,068, `query_embed_ms` 2,038); `--literal --provider antigravity`
+  returned only Antigravity hits with derived project paths.
+- `cc-search-chats-index.timer` re-enabled (next 2026-10-10 03:29 AEDT).
+  Claude marketplace refreshed and plugin at 2.4.0; Codex plugin re-added.
+  Systemd units unchanged in this release.
