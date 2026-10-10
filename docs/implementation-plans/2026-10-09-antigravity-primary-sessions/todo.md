@@ -8,6 +8,3 @@ Completed items move to `worklog.md`; do not tick them here.
       search a phrase typed into an October Antigravity session, resolve one
       hit, confirm `index --status` is calm, and confirm a pre-October or
       subagent-only phrase is not found.
-- [ ] Decide the follow-up for the five Claude files blocked by new
-      Claude Code 2.1.295 record shapes (see
-      `.notes/project_open-questions.md`); outside this plan's scope.

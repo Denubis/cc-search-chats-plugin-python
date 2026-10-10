@@ -351,3 +351,18 @@ preserving upgrade.
 - `cc-search-chats-index.timer` re-enabled (next 2026-10-10 03:29 AEDT).
   Claude marketplace refreshed and plugin at 2.4.0; Codex plugin re-added.
   Systemd units unchanged in this release.
+
+## Follow-up: Claude Code 2.1.295 record shapes (2026-10-10)
+
+The human ruled the five blocked files must index now. Released
+cc-search-chats 2.4.1 (`74f7c9276c4b474c979b937052a3de466beb5344`): the
+`last-prompt` `explicit` keyset and the `agentId` + `renderedRole`
+attachment keysets (with and without `renderedBesideToolResult`) are
+excluded metadata; Claude parser-state version 7. Red tests failed for
+exactly the three new cases before the change; after it 943 unit and 156
+PostgreSQL tests passed with lint, format, type, complexity and dead-code
+gates clean. Installed from that commit, indexed (run published generation
+107, semantic build 92): `needs_attention 0`, `blocked 0`,
+`completeness complete`, Antigravity unchanged at 7 indexed / 221 excluded.
+Timer re-enabled; Claude plugin updated to 2.4.1; Codex plugin re-added.
+Decision recorded in `.notes/decisions/2026-10-10-claude-2-1-295-record-shapes.md`.
