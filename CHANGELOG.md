@@ -1,5 +1,35 @@
 # Changelog
 
+## cc-search-chats 2.4.2
+
+**Fixed:**
+- Antigravity `SYSTEM`/`ERROR_MESSAGE` records (harness errors such as stream
+  timeouts, interrupted streams and safety-filter blocks, with or without
+  injected `content`) are now excluded injected context, as `SYSTEM_MESSAGE`
+  is, rather than unknown record pairs. In-scope sessions containing them are
+  indexed instead of failing closed; their `error` and `content` text is never
+  searchable. A session whose first record is an `ERROR_MESSAGE` is still
+  blocked as an unrecognised first record.
+- Claude Code 2.1.301 and later write the harness's API request log into
+  each session file: `api-request` rows (with or without `base` and
+  `agentId`), `api-request-blob` rows (with or without `agentId`) and
+  `api-request-shape` rows (with or without `agentId`). The log duplicates
+  visible prose and also carries injected context, thinking and tool results.
+  By human ruling on 2026-10-21 under ADR 0003, the whole family is excluded
+  transport metadata. It is never persisted or searchable in any mode, creates
+  no messages or tool rows, and changes neither session identity, session kind
+  nor conversation epochs. Files containing it no longer fail closed.
+- Claude Code attachment rows carrying `agentId` and `renderedRole` together
+  with `slug` (2.1.288), with `renderedBesideToolResult` and `slug` (2.1.288),
+  or with `renderedInHumanTurn` (2.1.301) are now excluded metadata rather
+  than unknown records, so they no longer block the files that contain them.
+  Other unaudited shapes still fail closed.
+- The Claude and Antigravity parser-state versions advance to retry unchanged
+  blocked files on the next index run. Sources of both providers reparse once
+  and every Antigravity session is re-admitted from its first record, so
+  out-of-scope sessions are checkpointed as excluded again; unchanged embeddings
+  are reused.
+
 ## cc-search-chats 2.4.1
 
 **Fixed:**

@@ -494,6 +494,17 @@ def _project_record(record: _DecodedRecord) -> _Projection:
                 ),
             ),
         )
+    if pair == ("SYSTEM", "ERROR_MESSAGE"):
+        return _Projection(
+            rows=(),
+            diagnostics=(
+                _diagnostic(
+                    AntigravityDiagnosticCode.EXCLUDED_INJECTED,
+                    record.envelope,
+                    "harness error messages are deliberately non-searchable",
+                ),
+            ),
+        )
     if pair == ("SYSTEM", "CHECKPOINT"):
         return _Projection(rows=(), diagnostics=(), epoch_boundary=True)
     raise _RecordRejectedError(

@@ -54,6 +54,32 @@ def user_input(text: str, created_at: str = "2026-10-03T09:15:00Z") -> dict:
     )
 
 
+def planner(text: str, created_at: str) -> dict:
+    return record("MODEL", "PLANNER_RESPONSE", created_at, content=text)
+
+
+ERROR_MESSAGES = {
+    "with_content": record(
+        "SYSTEM",
+        "ERROR_MESSAGE",
+        "2026-10-03T09:15:06Z",
+        error="error-decoy-blackthorn",
+        content="error-content-decoy-hornbeam",
+    ),
+    "without_content": record(
+        "SYSTEM",
+        "ERROR_MESSAGE",
+        "2026-10-03T09:15:06Z",
+        error="error-decoy-whitebeam",
+    ),
+    "common_shape_only": {
+        "source": "SYSTEM",
+        "type": "ERROR_MESSAGE",
+        "created_at": "2026-10-03T09:15:06Z",
+    },
+}
+
+
 def raw_envelope(raw: bytes, *, ordinal: int, offset: int) -> RecordEnvelope:
     return RecordEnvelope(
         source_file_relative=RELATIVE,
@@ -170,6 +196,16 @@ class TestAdmission:
     )
     def test_unrecognised_first_records_block(self, raw: bytes) -> None:
         decision = admit_antigravity_session(raw)
+        assert (decision.outcome, decision.code) == (
+            AdmissionOutcome.BLOCKED,
+            AntigravityDiagnosticCode.UNRECOGNISED_FIRST_RECORD,
+        )
+
+    @pytest.mark.parametrize("variant", ["with_content", "without_content"])
+    def test_error_message_first_session_stays_blocked(self, variant: str) -> None:
+        decision = admit_antigravity_session(
+            json.dumps(ERROR_MESSAGES[variant]).encode()
+        )
         assert (decision.outcome, decision.code) == (
             AdmissionOutcome.BLOCKED,
             AntigravityDiagnosticCode.UNRECOGNISED_FIRST_RECORD,
@@ -384,6 +420,39 @@ class TestProjection:
         )
         assert first.messages + second.messages == one.messages
         assert second.next_state == one.next_state
+
+
+class TestErrorMessageRecords:
+    @pytest.mark.parametrize("variant", list(ERROR_MESSAGES))
+    def test_error_message_is_excluded_injected_context(self, variant: str) -> None:
+        parsed = parse_antigravity_session(
+            envelopes(
+                user_input("weigh the walnut harvest"),
+                planner("weighing the walnut harvest", "2026-10-03T09:15:04Z"),
+                ERROR_MESSAGES[variant],
+                user_input("try the walnut scales again", "2026-10-03T09:16:00Z"),
+                planner("ninety kilograms of walnuts", "2026-10-03T09:16:05Z"),
+            ),
+            context=CONTEXT,
+        )
+
+        assert [d.code for d in parsed.diagnostics if d.record_ordinal == 2] == [
+            AntigravityDiagnosticCode.EXCLUDED_INJECTED
+        ]
+        assert [(m.role, m.text, m.conversation_epoch) for m in parsed.messages] == [
+            ("user", "weigh the walnut harvest", 0),
+            ("assistant", "weighing the walnut harvest", 0),
+            ("user", "try the walnut scales again", 0),
+            ("assistant", "ninety kilograms of walnuts", 0),
+        ]
+        assert parsed.next_state == AntigravityParserState(next_conversation_epoch=0)
+        everything = "\n".join(message.text for message in parsed.messages)
+        for decoy in (
+            "error-decoy-blackthorn",
+            "error-content-decoy-hornbeam",
+            "error-decoy-whitebeam",
+        ):
+            assert decoy not in everything
 
 
 class TestDerivedWorkingDirectory:

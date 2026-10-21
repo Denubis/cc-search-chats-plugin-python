@@ -366,3 +366,60 @@ gates clean. Installed from that commit, indexed (run published generation
 `completeness complete`, Antigravity unchanged at 7 indexed / 221 excluded.
 Timer re-enabled; Claude plugin updated to 2.4.1; Codex plugin re-added.
 Decision recorded in `.notes/decisions/2026-10-10-claude-2-1-295-record-shapes.md`.
+
+## Follow-up: Antigravity error messages and Claude Code 2.1.288–2.1.302 record shapes (2026-10-21)
+
+The laptop's first index after migration 11 reported 26 deterministic blocked
+sources, all `needs_attention`: 4 `antigravity_unknown_record_pair` and 22
+`unknown_conversation_record` (`~/.local/state/cc-search-chats/upgrades/cf144e47…/index.stdout.json`).
+The supervisor's key-only inspection attributed them to three unregistered
+shapes. Prepared cc-search-chats 2.4.2 from `cf144e4` under the supervisor's
+adopted defaults (ADR 0003 record policy): Antigravity `SYSTEM`/`ERROR_MESSAGE`
+is excluded injected context exactly as `SYSTEM_MESSAGE` is, with only the
+common shape required, and a first-record `ERROR_MESSAGE` still blocks
+admission; Claude `api-request-shape` (with and without `agentId`) and the
+`agentId` + `rendered` + `renderedRole` + `slug` attachment keyset are excluded
+metadata. Parser-state versions: Claude 8, Antigravity 2. Red tests failed for
+exactly the new cases before the change: three Antigravity `ERROR_MESSAGE`
+projections (`antigravity_unknown_record_pair`), three Claude keysets
+(`unknown_conversation_record`), two Claude primary sessions whose kind became
+`unknown`, the PostgreSQL `ERROR_MESSAGE` refresh test (one blocked source),
+and the version pins. After it 953 unit and 157 PostgreSQL tests passed with
+lint, format, type, complexity (snapshot unchanged), dead-code, pre-commit
+configuration and `--help` gates clean. Not installed or indexed by this step.
+
+The index reports only the first unknown record per file. The supervisor's
+read-only, in-memory parse of the 26 blocked files and the Antigravity
+sessions over that tree found no unsupported Antigravity records, but 15 of
+the 22 Claude files still held unknown records: two more attachment variants,
+and an `api-request`/`api-request-blob` family that carries message content
+and awaits a human ruling, so it is not registered.
+Within the same 2.4.2 release and Claude parser-state version 8, attachment
+extras `agentId` + `rendered` + `renderedInHumanTurn` + `renderedRole`
+(`queued_command`, Claude Code 2.1.301) and `agentId` + `rendered` +
+`renderedBesideToolResult` + `renderedRole` + `slug` (`remote_session_change`,
+Claude Code 2.1.288) are excluded metadata. Red tests failed for exactly those
+two keysets (`unknown_conversation_record`); after the change 955 unit and 157
+PostgreSQL tests passed with the same gates clean and the complexity snapshot
+unchanged. Files that also contain an `api-request` family record stay blocked
+until that ruling. Not installed or indexed by this step.
+
+The human ruled the family out the same day (Brian, 2026-10-21, as relayed by
+the supervisor: "yes, exclude the request"). It is the harness's API request
+log, duplicating visible prose and carrying injected context, thinking and
+tool results, and is excluded transport metadata under ADR 0003. Within 2.4.2
+and Claude parser-state version 8, six top-level keysets are excluded
+metadata: `api-request` with and without `base`, each with and without
+`agentId`, and `api-request-blob` with and without `agentId`. The matcher reads
+top-level keys only and never inspects a blob's `message`. Red tests failed for
+exactly the new cases before the change: the six keysets
+(`unknown_conversation_record`), four primary sessions carrying an
+`agentId`-bearing `api-request` or blob whose kind became `unknown`, and the
+PostgreSQL search-mode test (one blocked source). That test proves text present
+only in request parameters, request tails, or user and assistant blob content
+(string, text, thinking, tool-use and tool-result) is in no current row and is
+found by no literal, `--tools`, `--agents`, exhaustive, semantic or hybrid
+search, while visible prose stays primary at epoch 0. After the change 965 unit
+and 158 PostgreSQL tests passed with lint, format, type, complexity (snapshot
+unchanged), dead-code, pre-commit configuration and `--help` gates clean. Not
+installed or indexed by this step.

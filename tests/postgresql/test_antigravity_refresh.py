@@ -375,6 +375,42 @@ def test_ac4_content_boundary_and_unregistered_pair(
     }
 
 
+def test_error_message_records_are_excluded_without_blocking_the_session(
+    postgres_connection: psycopg.Connection, tmp_path: Path
+) -> None:
+    root = _root(
+        build_antigravity_root(tmp_path / "brain", "october_human", "error_message")
+    )
+    result = _index(postgres_connection, root)
+
+    assert result.blocked_source_count == 0
+    assert _failures(postgres_connection) == {}
+    hits = search_messages(postgres_connection, "chestnut crates")
+    assert {hit.text for hit in hits} == {
+        "Please count the chestnut crates",
+        "Counting the chestnut crates now.",
+        "Recount the chestnut crates please",
+        "There are twelve chestnut crates, visible-control-sorrel.",
+    }
+    assert {hit.conversation_epoch for hit in hits} == {0}
+    assert _found_anywhere(postgres_connection, "visible-control-sorrel")
+    for decoy in (
+        "error-decoy-spindle",
+        "error-content-decoy-guelder",
+        "error-decoy-dogwood",
+    ):
+        assert not _found_anywhere(postgres_connection, decoy), decoy
+
+    envelope = _envelope(postgres_connection, root, "index")
+    coverage = cast("dict[str, object]", envelope["coverage"])
+    assert coverage["completeness"] == "complete"
+    assert coverage["source_issues"] == {
+        "retry_after_parser_update": 0,
+        "retryable_failures": 0,
+        "needs_attention": 0,
+    }
+
+
 def test_ac5_root_and_session_decoys_are_silent_and_unsearchable(
     postgres_connection: psycopg.Connection, tmp_path: Path
 ) -> None:

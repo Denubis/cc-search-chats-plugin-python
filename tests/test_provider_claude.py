@@ -366,6 +366,15 @@ class TestClaudeRecognizedShapes:
             {"rendered", "renderedRole"},
             {"agentId", "rendered", "renderedRole"},
             {"agentId", "rendered", "renderedBesideToolResult", "renderedRole"},
+            {"agentId", "rendered", "renderedRole", "slug"},
+            {"agentId", "rendered", "renderedInHumanTurn", "renderedRole"},
+            {
+                "agentId",
+                "rendered",
+                "renderedBesideToolResult",
+                "renderedRole",
+                "slug",
+            },
             {"rendered", "renderedRole", "session_id"},
             {"rendered", "renderedRole", "slug"},
             {"rendered", "renderedRole", "sessionKind"},
@@ -488,6 +497,45 @@ class TestClaudeRecognizedShapes:
                 {"type", "lastPrompt", "leafUuid", "sessionId"},
             ),
             ("last-prompt", {"type", "explicit", "leafUuid", "sessionId"}),
+            (
+                "api-request-shape",
+                {"type", "sessionId", "shape", "shapeHash", "timestamp", "version"},
+            ),
+            (
+                "api-request-shape",
+                {
+                    "type",
+                    "agentId",
+                    "sessionId",
+                    "shape",
+                    "shapeHash",
+                    "timestamp",
+                    "version",
+                },
+            ),
+            *[
+                (
+                    "api-request",
+                    {
+                        "type",
+                        "id",
+                        "cacheControl",
+                        "keep",
+                        "params",
+                        "querySource",
+                        "requestDigest",
+                        "sessionId",
+                        "shapeHash",
+                        "tail",
+                        "timestamp",
+                        "version",
+                        *extras,
+                    },
+                )
+                for extras in ((), ("base",), ("agentId",), ("agentId", "base"))
+            ],
+            ("api-request-blob", {"type", "hash", "message", "sessionId"}),
+            ("api-request-blob", {"type", "agentId", "hash", "message", "sessionId"}),
             ("relocated", {"type", "relocatedCwd", "sessionId"}),
             ("launched", {"type"}),
             ("started", {"type", "agentId", "key", "label", "phase"}),
@@ -994,6 +1042,141 @@ class TestClaudeRecognizedShapes:
 
         assert result.session_kind is SessionKind.UNKNOWN
         assert result.messages[0].submitted_by is SubmittedBy.UNKNOWN
+
+    @staticmethod
+    def _api_request_blob(message: dict[str, object]) -> dict[str, object]:
+        return {
+            "type": "api-request-blob",
+            "agentId": "agent",
+            "hash": "synthetic-blob-hash",
+            "message": message,
+            "sessionId": "session",
+        }
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "api-request-shape",
+            "attachment",
+            "api-request",
+            "api-request-blob-user-string",
+            "api-request-blob-user-blocks",
+            "api-request-blob-assistant-blocks",
+        ],
+    )
+    def test_agent_id_metadata_leaves_a_primary_session_unchanged(
+        self, shape: str, tmp_path: Path
+    ) -> None:
+        metadata = {
+            "api-request-shape": {
+                "type": "api-request-shape",
+                "agentId": "agent",
+                "sessionId": "session",
+                "shape": {"synthetic": True},
+                "shapeHash": "synthetic-hash",
+                "timestamp": "2026-10-20T00:00:01Z",
+                "version": "2.1.302",
+            },
+            "attachment": self._attachment_with(
+                {
+                    "agentId": "agent",
+                    "rendered": [{"content": "rendered injected text"}],
+                    "renderedRole": "system",
+                    "slug": "slug",
+                }
+            ),
+            "api-request": {
+                "type": "api-request",
+                "agentId": "agent",
+                "id": "synthetic-request",
+                "base": "synthetic-blob-hash",
+                "cacheControl": {"type": "ephemeral"},
+                "keep": 1,
+                "params": {"system": "request params decoy text"},
+                "querySource": "synthetic",
+                "requestDigest": "synthetic-digest",
+                "sessionId": "session",
+                "shapeHash": "synthetic-hash",
+                "tail": [{"role": "user", "content": "request tail decoy text"}],
+                "timestamp": "2026-10-20T00:00:01Z",
+                "version": "2.1.301",
+            },
+            "api-request-blob-user-string": self._api_request_blob(
+                {"role": "user", "content": "blob user string decoy"}
+            ),
+            "api-request-blob-user-blocks": self._api_request_blob(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "blob user block decoy"},
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "synthetic-tool",
+                            "content": "blob tool result decoy",
+                        },
+                    ],
+                }
+            ),
+            "api-request-blob-assistant-blocks": self._api_request_blob(
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "blob assistant block decoy"},
+                        {"type": "thinking", "thinking": "blob thinking decoy"},
+                        {
+                            "type": "tool_use",
+                            "id": "synthetic-tool",
+                            "name": "BlobDecoyTool",
+                            "input": {"path": "blob tool input decoy"},
+                        },
+                    ],
+                    "output_config": {"synthetic": True},
+                }
+            ),
+        }[shape]
+        records = (
+            {
+                "type": "user",
+                "uuid": "primary-user",
+                "sessionId": "session",
+                "timestamp": "2026-10-20T00:00:00Z",
+                "isSidechain": False,
+                "message": {"role": "user", "content": "visible primary prose"},
+            },
+            metadata,
+            {
+                "type": "assistant",
+                "uuid": "primary-assistant",
+                "sessionId": "session",
+                "timestamp": "2026-10-20T00:00:02Z",
+                "isSidechain": False,
+                "message": {"role": "assistant", "content": "visible primary reply"},
+            },
+        )
+        path = tmp_path / "session.jsonl"
+        path.write_text("".join(json.dumps(item) + "\n" for item in records))
+        read = read_bounded_jsonl(
+            path,
+            source_file_relative=Path("project/session.jsonl"),
+            target_size=path.stat().st_size,
+        )
+
+        result = parse_claude_session(
+            read.envelopes, context=ClaudeSessionContext(source_session_id="session")
+        )
+
+        assert result.session_kind is SessionKind.PRIMARY
+        assert [
+            (message.text, message.session_kind, message.conversation_epoch)
+            for message in result.messages
+        ] == [
+            ("visible primary prose", SessionKind.PRIMARY, 0),
+            ("visible primary reply", SessionKind.PRIMARY, 0),
+        ]
+        assert result.next_state == ClaudeParserState()
+        assert [d.code for d in result.diagnostics if d.record_ordinal == 1] == [
+            ClaudeDiagnosticCode.EXCLUDED_METADATA
+        ]
 
 
 class TestClaudeFailClosedDiagnostics:

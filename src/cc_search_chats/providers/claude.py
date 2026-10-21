@@ -622,6 +622,9 @@ _CLAUDE_METADATA_KEYSETS["attachment"].update(
         {"rendered", "renderedRole"},
         {"agentId", "rendered", "renderedRole"},
         {"agentId", "rendered", "renderedBesideToolResult", "renderedRole"},
+        {"agentId", "rendered", "renderedRole", "slug"},
+        {"agentId", "rendered", "renderedInHumanTurn", "renderedRole"},
+        {"agentId", "rendered", "renderedBesideToolResult", "renderedRole", "slug"},
         {"rendered", "renderedRole", "session_id"},
         {"rendered", "renderedRole", "slug"},
         {"rendered", "renderedRole", "sessionKind"},
@@ -687,6 +690,36 @@ _CLAUDE_METADATA_KEYSETS["last-prompt"].update(
         frozenset({"type", "explicit", "leafUuid", "sessionId"}),
     )
 )
+_CLAUDE_METADATA_KEYSETS["api-request-shape"] = {
+    frozenset({"type", "sessionId", "shape", "shapeHash", "timestamp", "version"}),
+    frozenset(
+        {"type", "agentId", "sessionId", "shape", "shapeHash", "timestamp", "version"}
+    ),
+}
+_API_REQUEST_BASE_KEYS = frozenset(
+    {
+        "type",
+        "id",
+        "cacheControl",
+        "keep",
+        "params",
+        "querySource",
+        "requestDigest",
+        "sessionId",
+        "shapeHash",
+        "tail",
+        "timestamp",
+        "version",
+    }
+)
+_CLAUDE_METADATA_KEYSETS["api-request"] = {
+    _API_REQUEST_BASE_KEYS | frozenset(extras)
+    for extras in ((), ("base",), ("agentId",), ("agentId", "base"))
+}
+_CLAUDE_METADATA_KEYSETS["api-request-blob"] = {
+    frozenset({"type", "hash", "message", "sessionId"}),
+    frozenset({"type", "agentId", "hash", "message", "sessionId"}),
+}
 _CLAUDE_METADATA_KEYSETS["relocated"] = {
     frozenset({"type", "relocatedCwd", "sessionId"})
 }

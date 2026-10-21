@@ -351,6 +351,7 @@ ANTIGRAVITY_SESSION_IDS = {
     "system_first": "3d4e5f6a-7b8c-4d9e-8f0a-2b3c4d5e6f7a",
     "unknown_first": "4e5f6a7b-8c9d-4eaf-9a1b-3c4d5e6f7a8b",
     "unregistered_pair": "5f6a7b8c-9dae-4fb0-8b2c-4d5e6f7a8b9c",
+    "error_message": "6a7b8c9d-aebf-4c0d-9e1f-5a6b7c8d9e0f",
 }
 
 

@@ -29,6 +29,8 @@ from cc_search_chats.providers.source_discovery import (
 from cc_search_chats.semantic import SemanticChunk
 from cc_search_chats.storage.postgresql import (
     RefreshProgress,
+    exhaustive_search_page,
+    hybrid_search,
     index_corpus,
     migrate,
     semantic_search,
@@ -773,9 +775,9 @@ def test_native_record_policy_parser_state_versions() -> None:
         adapter.provider: adapter.parser_state_version
         for adapter in registry.provider_adapters()
     } == {
-        Provider.CLAUDE: 7,
+        Provider.CLAUDE: 8,
         Provider.CODEX: 5,
-        Provider.ANTIGRAVITY: 1,
+        Provider.ANTIGRAVITY: 2,
     }
 
 
@@ -915,6 +917,196 @@ def test_claude_attachment_parser_bump_recovers_unchanged_blocked_source(
             "SELECT count(*) FROM cc_search_chats.source_failure_current"
         )
     ) == (0,)
+
+
+_API_REQUEST_DECOYS = (
+    "request-params-decoy-teasel",
+    "request-tail-decoy-burdock",
+    "blob-user-string-decoy-sedge",
+    "blob-user-block-decoy-bracken",
+    "blob-tool-result-decoy-yarrow",
+    "blob-assistant-block-decoy-tansy",
+    "blob-thinking-decoy-mallow",
+    "blob-tool-input-decoy-vetch",
+    "BlobDecoyTool",
+)
+
+
+def _api_request_family_records(session: str) -> tuple[dict[str, object], ...]:
+    """Visible prose around every api-request keyset, with decoys in blob content."""
+
+    def visible(role: str, uuid: str, text: str, second: int) -> dict[str, object]:
+        return {
+            "type": role,
+            "uuid": uuid,
+            "sessionId": session,
+            "timestamp": f"2026-10-21T00:00:0{second}Z",
+            "cwd": "/synthetic/repository",
+            "isSidechain": False,
+            "message": {"role": role, "content": text},
+        }
+
+    def blob(message: dict[str, object], **extra: object) -> dict[str, object]:
+        return {
+            "type": "api-request-blob",
+            "hash": "synthetic-blob",
+            "message": message,
+            "sessionId": session,
+            **extra,
+        }
+
+    request = {
+        "type": "api-request",
+        "id": "synthetic-request",
+        "cacheControl": {"type": "ephemeral"},
+        "keep": 1,
+        "params": {"system": "request-params-decoy-teasel"},
+        "querySource": "synthetic",
+        "requestDigest": "synthetic-digest",
+        "sessionId": session,
+        "shapeHash": "synthetic-shape",
+        "tail": [{"role": "user", "content": "request-tail-decoy-burdock"}],
+        "timestamp": "2026-10-21T00:00:01Z",
+        "version": "2.1.301",
+    }
+    return (
+        visible("user", "api-user", "Light the lantern visible-control-lantern", 0),
+        {
+            "type": "api-request-shape",
+            "sessionId": session,
+            "shape": {"synthetic": True},
+            "shapeHash": "synthetic-shape",
+            "timestamp": "2026-10-21T00:00:01Z",
+            "version": "2.1.301",
+        },
+        request,
+        {**request, "base": "synthetic-blob"},
+        {**request, "agentId": "agent"},
+        {**request, "agentId": "agent", "base": "synthetic-blob"},
+        blob({"role": "user", "content": "blob-user-string-decoy-sedge"}),
+        blob(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "blob-user-block-decoy-bracken"},
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "synthetic-tool",
+                        "content": "blob-tool-result-decoy-yarrow",
+                    },
+                ],
+            }
+        ),
+        blob(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "blob-assistant-block-decoy-tansy"},
+                    {"type": "thinking", "thinking": "blob-thinking-decoy-mallow"},
+                    {
+                        "type": "tool_use",
+                        "id": "synthetic-tool",
+                        "name": "BlobDecoyTool",
+                        "input": {"path": "blob-tool-input-decoy-vetch"},
+                    },
+                ],
+                "output_config": {"synthetic": True},
+            },
+            agentId="agent",
+        ),
+        visible("assistant", "api-assistant", "The lantern is lit.", 2),
+    )
+
+
+def test_claude_api_request_family_is_found_in_no_search_mode(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    session = "claude-api-request"
+    project = tmp_path / "claude" / "project"
+    project.mkdir(parents=True)
+    shutil.copy(
+        FIXTURES / "claude_primary.jsonl", project / "claude-session-primary.jsonl"
+    )
+    (project / f"{session}.jsonl").write_text(
+        "".join(
+            json.dumps(record) + "\n" for record in _api_request_family_records(session)
+        )
+    )
+    root = _source_root(Provider.CLAUDE, tmp_path / "claude")
+
+    result = refresh_native_sources(postgres_connection, source_roots=(root,))
+
+    assert result.blocked_source_count == 0
+    visible = {"Light the lantern visible-control-lantern", "The lantern is lit."}
+    assert set(
+        postgres_connection.execute(
+            """
+            SELECT session_kind, conversation_epoch, content_class, prose_content
+            FROM cc_search_chats.message_current
+            WHERE source_session_id = %s
+            """,
+            (session,),
+        )
+    ) == {("primary", 0, "prose", text) for text in visible}
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    semantic_texts = {
+        hit.text
+        for hit in semantic_search(postgres_connection, vector, include_agents=True)
+    }
+    assert visible <= semantic_texts
+    assert any(
+        hit.message.text == "Light the lantern visible-control-lantern"
+        and hit.literal_rank == 1
+        for hit in hybrid_search(
+            postgres_connection, "visible-control-lantern", vector, include_agents=True
+        )
+    )
+    modes = [(agents, tools) for agents in (False, True) for tools in (False, True)]
+    for agents, tools in modes:
+        assert [
+            hit.source_session_id
+            for hit in _search_messages(
+                postgres_connection,
+                "visible-control-lantern",
+                include_agents=agents,
+                include_tools=tools,
+            )
+        ] == [session]
+        assert exhaustive_search_page(
+            postgres_connection,
+            "visible-control-lantern",
+            include_agents=agents,
+            include_tools=tools,
+        ).hits
+    for decoy in _API_REQUEST_DECOYS:
+        for agents, tools in modes:
+            assert (
+                _search_messages(
+                    postgres_connection,
+                    decoy,
+                    include_agents=agents,
+                    include_tools=tools,
+                )
+                == ()
+            ), decoy
+            assert (
+                exhaustive_search_page(
+                    postgres_connection,
+                    decoy,
+                    include_agents=agents,
+                    include_tools=tools,
+                ).hits
+                == ()
+            ), decoy
+        assert not any(decoy in text for text in semantic_texts), decoy
+        assert not any(
+            decoy in hit.message.text
+            for hit in hybrid_search(
+                postgres_connection, decoy, vector, include_agents=True
+            )
+        ), decoy
 
 
 def test_codex_added_lifecycle_key_indexes_complete_and_searchable(
