@@ -423,3 +423,43 @@ search, while visible prose stays primary at epoch 0. After the change 965 unit
 and 158 PostgreSQL tests passed with lint, format, type, complexity (snapshot
 unchanged), dead-code, pre-commit configuration and `--help` gates clean. Not
 installed or indexed by this step.
+
+## Laptop migration and 2.4.2 deployment (2026-10-21)
+
+Context: the laptop (`Ihde`) had been upgraded to 2.4.1 on 2026-10-16 without
+migration 11, so the nightly timer and every search exited 6
+(`maintenance_required`, pending 11) from 2026-10-17. The 2026-10-09 migration
+recorded above was on the other machine.
+
+- Authorised by the human ("if we can get away with migrate, do so"; then
+  "yes do so" for commit, push, install and index). Procedure:
+  `docs/runbooks/laptop-deployment.md`, preserving upgrade.
+- `pg_dump` (ADR 0007) before migration: 539,027,018 bytes at
+  `~/.local/state/cc-search-chats/upgrades/cf144e47…/cc-search-chats-before.dump`.
+  `index --migrate` → `applied_schema_version 11`; the three current-table
+  provider constraints admit `antigravity`; legacy `message` untouched.
+- First index on 2.4.1 (run 72, generation 69, semantic build 67): `partial`,
+  26 blocked sources (4 `antigravity_unknown_record_pair`, 22
+  `unknown_conversation_record`), which led to 2.4.2 above. The in-memory
+  parse of those 26 files plus every Antigravity session over the 2.4.2 tree
+  found zero unsupported records (13 admitted, 19 excluded, 0 blocked).
+- 2.4.2 committed as `3f7529093cb496e7ae347f3b7d2f86bad75a850f`, pushed,
+  installed from that commit (provenance, CUDA and model revision
+  `c44c20ab…` proven). Index run 73: exit 0, `complete`, generation 70,
+  semantic build 68 (55,457 units), 0 blocked, 0 warnings, `needs_attention 0`.
+  Antigravity root: 32 discovered, 13 indexed, 19 excluded. Evidence:
+  `~/.local/state/cc-search-chats/upgrades/3f752909…/`.
+- Smoke on the installed CLI: `--literal` and `--semantic` (hybrid, no
+  degradation) both find an October Antigravity phrase; a phrase from this
+  previously blocked Claude session is found; a phrase present only in an
+  `api-request-blob` tool_result block returns zero hits with
+  `--literal --tools --agents`.
+- Timer re-enabled (next 2026-10-22 03:17 AEDT); Claude plugin updated
+  2.4.1 → 2.4.2; Codex plugin re-added at 2.4.2.
+- Decision recorded in
+  `.notes/decisions/2026-10-21-exclude-api-request-family-and-antigravity-error-messages.md`.
+- Observed, not changed: the root row's `discovered_files` omitted blocked
+  files on run 72 (28 shown for 32 present); indexing a fresh database whose
+  only source is blocked raises a bare `ValueError` (Opus, disposable test);
+  the accepted Antigravity design's record table lacks the `ERROR_MESSAGE`
+  row and still says parser version 1.
