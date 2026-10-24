@@ -263,3 +263,139 @@ Green evidence (2026-10-24, this checkout):
 - `ruff check`, `ruff format --check`, `ty check`: passed; `complexipy`
   watermark passed, snapshot unchanged; `vulture` exit 0; `pre-commit
   validate-config` ok.
+
+## Outcome 5: Decision records, contracts and release metadata (2026-10-24)
+
+Changed surfaces: new ADR 0009 and register row; ADR 0003 pointer sentence;
+Antigravity design row annotated as overturned for flagged runs; CHANGELOG
+2.5.0 section; version 2.5.0 in `pyproject.toml`, `uv.lock` (`uv lock`),
+both plugin manifests, the marketplace, the README label and
+`tests/test_plugin_packaging.py`; laptop runbook preserving-upgrade note for
+migration 12, the baseline reparse, the first-status expectation and a
+one-off `index --force-retry`.
+
+Operational probe: a temporary PostgreSQL test (removed afterwards) captured
+real `index --json`, `index --status --json`, `search --literal --json` and
+both human outputs from the disposable cluster with one blocked, one ignored
+and one acknowledged shape, plus `--help` and `index --help`, under
+`/tmp/cc-unknown-shapes-envelopes/`. The human lines matched the design's
+one-line form; status carried `unknown_shapes.pending` (2) and
+`.acknowledged` (1, with note and date); search carried the two pending
+warnings and no list.
+
+Two Opus reviews were delegated (the human asked whether delegation was in
+use; until then execution was direct). Findings verified against the tree
+and resolved:
+
+- Doc inspection, Important: "the first status lists every shape the corpus
+  holds" overstated default mode (one `failure_shape` per blocked file).
+  Human ruled "correct the wording"; CHANGELOG, ADR 0009, laptop runbook and
+  a design implementation note now say indexed files plus the first blocking
+  shape of each blocked file.
+- Doc inspection, Flagged: error envelopes lacked the three scalars. Adopted
+  default after presenting both options: `_error_envelope` now carries them
+  as zero; README and CLAUDE.md say error envelopes carry zero counts and no
+  shape warnings.
+- Doc inspection, Flagged: "blocked means the file is outside the index" was
+  wrong for a previously indexed file (existing test
+  `test_unsupported_appended_shape_does_not_advance_checkpoint` keeps earlier
+  prose searchable); skill, command and runbook now say "content since its
+  last good checkpoint".
+- Doc inspection, Minor (all wording, applied): two-segment key order stated
+  wherever "sorted key names" appeared; human lines attributed to search,
+  index and status only; "ignored" wording covers content blocks and the
+  silent family; `acknowledged` listed as a disposition value; warning field
+  names enumerated in README; design examples (TOML, warning JSON, human
+  line) corrected to the implemented form with a dated note; "beside
+  index.env" qualified by `XDG_CONFIG_HOME`; "half an hour" stated as an
+  extrapolation from the measured Codex figure.
+- Code review, Flagged: unknown message roles shared one fingerprint. A
+  read-only audit of the local corpora (228 Codex files, 3,983 Claude files,
+  `/tmp/role-audit/audit.py`) found only `user`, `assistant` and `developer`
+  roles and no non-list Codex content, so no present record is affected.
+  Human ruled "yes please" to naming the role: the record path is now
+  `response_item/message/<role>` (Codex) and `<record_type>/message/<role>`
+  (Claude); provider tests updated and two distinct-role tests added; ADR
+  0009 records the ruling.
+- Code review, Minor: shapes with empty keys cannot be acknowledged (loader
+  rejects empty keys per the design). Adopted default: unacknowledgeable;
+  runbook §5 and ADR 0009 say so.
+- Code review, Minor: Antigravity files blocked before migration 12 keep a
+  NULL `failure_shape` and raise no warning until retried. Adopted default:
+  the laptop runbook's upgrade note instructs a one-off `index --force-retry`.
+- Code review confirmed: no value leak at any of the ten shape-code sites
+  (searched two ways), no staging leak under ignore mode including Codex
+  carry, per-file map consistency across replace/append/cwd-reparse, summary
+  SQL equivalence to digest grouping, loader closedness and the single
+  index-only opener before re-exec and before any connection, schema v5
+  additivity and unchanged completeness.
+
+Green evidence after the review round (2026-10-24): `pytest -m 'not
+postgresql'` 1046 passed; `pytest -m postgresql` 169 passed; ruff check and
+format, ty, complexipy (snapshot unchanged), vulture, pre-commit
+validate-config, `git diff --check` all clean; `cc-search-chats --version`
+→ 2.5.0; `tests/test_plugin_packaging.py` 16 passed.
+
+## UAT probe 1 failed and was fixed (2026-10-24)
+
+Human ruling (Brian, verbatim): "ugh, that's... so much noise. literally it's
+just 'some shapes could not be indexed, but the messages are there, go get the
+user to figure out what changed' but less stupidly said". It overturns the
+design's per-shape human lines for `search` only; human `index` and
+`index --status` keep them and JSON output is unchanged.
+
+Changed files:
+
+- `src/cc_search_chats/cli.py`: new pure `_unknown_shape_summary_line`
+  counts the envelope's pending `unknown_record_shape` warnings; human
+  `search` prints that single note after its results, or nothing at zero.
+- `tests/test_cli.py`: unit test for zero, one and two pending shapes, with
+  acknowledged counts and a non-shape warning present that must not count.
+- `tests/postgresql/test_unknown_shapes.py`: human `search` expects exactly
+  one note (two shapes) after the last locator and no `unknown shape ` line;
+  the exact per-shape line assertion moved to human `index --status`, which
+  also carries no note; after acknowledgement, human `search` shows results
+  and no note.
+- `CLAUDE.md` CLI contract, `CHANGELOG.md` 2.5.0 "Added", and the design's
+  "Reporting (all readers)" paragraph.
+
+Red before the fix: the unit test failed four times with `AttributeError`
+(helper absent); the reader test failed at the new assertion that human
+`search` prints no `unknown shape ` line. The acknowledgement test passed
+before and after, as a guard.
+
+Fresh evidence after the fix (2026-10-24): `pytest -m 'not postgresql'`
+1050 passed; `pytest -m postgresql` 169 passed (including
+`test_unknown_shapes.py` and `test_cli_journey.py`, 10 passed when run
+alone); ruff check and format, ty, complexipy (snapshot byte-identical),
+vulture and `git diff --check` all clean. A temporary PostgreSQL test
+(removed afterwards) captured real human `search` output with one and two
+pending shapes and human `index --status` with two, under
+`/tmp/search-noise-fix/probe/`: each search ended with the single note, and
+status kept one line per shape.
+
+## UAT accepted and history normalised (2026-10-24)
+
+Human ruling (Brian, verbatim) on the re-presented probe 1 and the remaining
+steps: "yes, that's fine 1, 2 fine, 3 yes". Probe 1 accepted with the single
+trailing `search` note; normalisation and direct delivery authorised.
+
+Accepted tree `ae55e15f539b9e52eb26f00c84f68027e03719ee` (private HEAD
+`56d7a70`, preserved as local tag `private/unknown-shape-accepted`). Folding
+the UAT fix into the reader-reporting outcome conflicted in six files because
+its hunks were written against the later release commit's text, so the fix
+(`7a0840f`) and the todo-only checkpoint (`56d7a70`) were folded into the
+contracts-and-release commit instead, whose message now records the ruling.
+Normalised series on `main` (`59bbbe2`): `93f74c7` record shapes, `85c5914`
+ignore mode, `28df641` report on every reader, `0316ef7` acknowledgement
+file, `29be5f7` ADR 0009, contracts, release 2.5.0 and the search note. The
+rewritten HEAD tree equals the accepted tree exactly.
+
+Post-normalisation evidence: `pytest -m 'not postgresql'` 1050 passed;
+`pytest -m postgresql` 169 passed; ruff check and format, ty, complexipy
+(snapshot unchanged), vulture, pre-commit validate-config and
+`git diff --check` all clean; status clean. Semantic-mode human search with
+pending shapes was not run end to end: `_print_human_search` is the only
+human search printer, reached through `_output_search` for both modes, and
+appends the note after the results in both; semantic mode only adds header
+lines. The literal PostgreSQL reader test pins the note's placement.

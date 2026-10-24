@@ -2779,7 +2779,7 @@ class TestCodexUnknownShapeFingerprints:
                     "payload": {"type": "message", "role": "tool", "content": []},
                 },
                 CodexDiagnosticCode.UNKNOWN_ROLE,
-                "response_item/message",
+                "response_item/message/tool",
             ),
         ],
     )
@@ -2846,3 +2846,27 @@ class TestCodexUnknownShapeFingerprints:
                 CodexDiagnosticCode.UNKNOWN_COMPACTION,
             }
         )
+
+    def test_distinct_unknown_roles_are_distinct_shapes(self) -> None:
+        def shape_for(role: str):
+            [diagnostic] = parse_codex_session(
+                (
+                    envelope(
+                        {
+                            "timestamp": "2026-08-11T09:00:00Z",
+                            "type": "response_item",
+                            "payload": {"type": "message", "role": role, "content": []},
+                        }
+                    ),
+                ),
+                context=CodexSessionContext(source_session_id="shape-session"),
+                prior_state=established_unknown_session("shape-session"),
+            ).diagnostics
+            assert diagnostic.code is CodexDiagnosticCode.UNKNOWN_ROLE
+            assert diagnostic.shape is not None
+            return diagnostic.shape
+
+        critic, narrator = shape_for("critic"), shape_for("narrator")
+        assert critic.record_path == "response_item/message/critic"
+        assert narrator.record_path == "response_item/message/narrator"
+        assert critic.digest != narrator.digest

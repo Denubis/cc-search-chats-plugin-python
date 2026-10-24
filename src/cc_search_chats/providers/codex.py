@@ -1380,7 +1380,9 @@ def _parse_response_item(
                     CodexDiagnosticCode.UNKNOWN_ROLE,
                     record.envelope,
                     f"unrecognized Codex message role: {role!r}",
-                    _record_shape(record, "response_item/message"),
+                    _record_shape(
+                        record, f"response_item/message/{path_segment(role)}"
+                    ),
                 ),
             )
         text, diagnostics = _message_content(payload, role, record)

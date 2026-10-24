@@ -57,7 +57,10 @@ required minima rather than exact schemas. A payload is recognized as excluded
 when its registered type is known and its keys are a superset of at least one
 registered required-key set. Extra metadata cannot turn a known non-conversation
 event into searchable content or block its source. A registered type missing a
-required key, or an unregistered type, remains unknown and fails closed.
+required key, or an unregistered type, remains unknown and fails closed. Since
+2026-10-24 every such unknown shape is also reported by key-name fingerprint,
+an explicit per-run flag may index around it, and the operator may acknowledge
+it by file; see ADR 0009.
 
 The 2026-09-06 compatibility fix applies this boundary to Codex
 `token_usage_record` envelopes and legacy `ghost_snapshot` response items.

@@ -144,9 +144,11 @@ They do not require repair or make processing coverage partial.
 An `unknown_record_shape` warning (one per distinct pending shape, with
 provider, record path, key names, record and file counts and a first example)
 is a parser-coverage note: the native log contains a record family the
-installed parser does not recognise. With `dispositions` `blocked` the whole
-file is outside the index until a parser release or a flagged index run; with
-`ignored` only that record was omitted. It is not a count of missing
+installed parser does not recognise. With `dispositions` `blocked`, that
+file's content since its last good checkpoint (all of it, for a never-indexed
+file) is outside the index until a parser release or a flagged index run; with
+`ignored`, the records of that shape (or, for an unknown content block, just
+the block) were left out and counted. It is not a count of missing
 conversations and does not invalidate a resolved hit. Mention it only when it
 bears on the answer (a miss in a provider whose shapes are blocked) or when the
 user asks about coverage; `index --status` lists the shapes in full.

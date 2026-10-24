@@ -1499,7 +1499,7 @@ class TestClaudeUnknownShapeFingerprints:
                     "message": {"role": "tool", "content": _SHAPE_SENTINEL},
                 },
                 ClaudeDiagnosticCode.UNKNOWN_ROLE,
-                "user",
+                "user/message/tool",
                 ("message", "type", "uuid", "payload.content", "payload.role"),
             ),
             (
@@ -1561,3 +1561,26 @@ class TestClaudeUnknownShapeFingerprints:
 
         assert result.messages
         assert all(diagnostic.shape is None for diagnostic in result.diagnostics)
+
+    def test_distinct_unknown_roles_are_distinct_shapes(self) -> None:
+        def shape_for(role: str):
+            [diagnostic] = parse_claude_session(
+                (
+                    envelope(
+                        {
+                            "type": "assistant",
+                            "uuid": f"role-{role}",
+                            "message": {"role": role, "content": "x"},
+                        }
+                    ),
+                ),
+                context=ClaudeSessionContext(source_session_id="shape-session"),
+            ).diagnostics
+            assert diagnostic.code is ClaudeDiagnosticCode.UNKNOWN_ROLE
+            assert diagnostic.shape is not None
+            return diagnostic.shape
+
+        critic, narrator = shape_for("critic"), shape_for("narrator")
+        assert critic.record_path == "assistant/message/critic"
+        assert narrator.record_path == "assistant/message/narrator"
+        assert critic.digest != narrator.digest

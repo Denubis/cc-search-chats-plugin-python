@@ -3,7 +3,7 @@
 Search and recover context from native Claude Code, Codex and primary
 Antigravity CLI chat history.
 
-Current release: cc-search-chats 2.4.3
+Current release: cc-search-chats 2.5.0
 
 The CLI reads vendor JSONL session logs without modifying them, maintains a
 normalized PostgreSQL search projection, and supports PostgreSQL full-text
@@ -224,13 +224,18 @@ command writes one stdout object containing:
 - `coverage.unknown_shape_records`, `coverage.unknown_shapes_pending`, and
   `coverage.unknown_shapes_acknowledged` count native record shapes the parsers
   do not recognise, derived from current rows. Every command carries one
-  `unknown_record_shape` warning per pending shape (provider, record path,
-  sorted key names, record and file counts, first example coordinates,
-  `dispositions` of `blocked` or `ignored`, parser version); the warning persists
+  `unknown_record_shape` warning per pending shape: `provider`, `record_path`,
+  `keys` (the unit's own key names sorted, then `payload.`-prefixed nested key
+  names sorted), `record_count`, `file_count`, `first_source_root_id`,
+  `first_source_file_relative`, `first_source_line`, `dispositions` (the set
+  seen across files: `blocked`, `ignored`, `acknowledged`) and
+  `parser_state_version`; the warning persists
   across unchanged runs until a parser release registers the shape or the
   operator acknowledges it. `index --status` additionally lists
-  `unknown_shapes.pending` and `unknown_shapes.acknowledged`; search does not
-  carry that list. Key names only are reported, never values
+  `unknown_shapes.pending` and `unknown_shapes.acknowledged`, whose entries add
+  `note` and `acknowledged` for acknowledged shapes; search does not carry that
+  list. Error envelopes carry the three counts as zero and no shape warning.
+  Key names only are reported, never values
 - `refresh.corpus_generation`, `semantic.semantic_build`,
   `semantic.corpus_generation`, and their state/progress fields; semantic
   search also reports `semantic.model_load_ms`, `semantic.query_embed_ms`, and

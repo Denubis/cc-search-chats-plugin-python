@@ -516,6 +516,9 @@ def _error_envelope(
             "pending_tail_files": 0,
             "completeness": "unknown",
             "source_issues": None,
+            "unknown_shape_records": 0,
+            "unknown_shapes_pending": 0,
+            "unknown_shapes_acknowledged": 0,
         },
         "refresh": {
             "corpus_generation": None,
@@ -967,6 +970,22 @@ def _unknown_shape_line(warning: Mapping[str, object]) -> str:
     )
 
 
+def _unknown_shape_summary_line(envelope: Mapping[str, object]) -> str | None:
+    """Return the single human search note for pending unknown shapes, if any."""
+    pending = sum(
+        warning.get("code") == "unknown_record_shape"
+        for warning in cast("Sequence[Mapping[str, object]]", envelope["warnings"])
+    )
+    if pending == 0:
+        return None
+    noun_verb = "shape awaits" if pending == 1 else "shapes await"
+    return (
+        f"Note: {pending} unrecognised record {noun_verb} a parser update or "
+        "acknowledgement; the results above are unaffected. "
+        "See `cc-search-chats index --status`."
+    )
+
+
 def _print_unknown_shape_lines(
     envelope: Mapping[str, object], *, file: TextIO | None = None
 ) -> None:
@@ -1254,7 +1273,9 @@ def _print_human_search(
             f"{result['session_id']} ({result['role']})\n"
             f"  {result['text']}\n  {result['locator']}"
         )
-    _print_unknown_shape_lines(envelope)
+    shape_note = _unknown_shape_summary_line(envelope)
+    if shape_note is not None:
+        print(shape_note)
 
 
 def _search_identity(

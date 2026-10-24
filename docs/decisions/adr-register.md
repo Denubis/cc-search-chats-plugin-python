@@ -15,3 +15,4 @@ ruling.
 | [0006](0006-automatic-semantic-model-cpu-offload.md) | Offload semantic model weights to CPU RAM automatically when VRAM is short | Accepted | 2026-09-20 |
 | [0007](0007-back-up-only-before-a-schema-migration.md) | Back up the database only before a schema migration | Accepted | 2026-09-20 |
 | [0008](0008-index-recent-primary-antigravity-sessions.md) | Index recent primary Antigravity sessions under a new design | Accepted | 2026-10-08 |
+| [0009](0009-unknown-shape-reporting.md) | Report every unknown record shape; ignore under a flag; acknowledge by file | Accepted | 2026-10-24 |

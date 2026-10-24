@@ -771,12 +771,14 @@ def _diagnostic(
     )
 
 
-def _record_shape(payload: dict[str, object], nested_key: str) -> RecordShape:
+def _record_shape(
+    payload: dict[str, object], nested_key: str, *, suffix: str = ""
+) -> RecordShape:
     """Fingerprint one record and its nested object (``message`` or metadata)."""
     nested = payload.get(nested_key)
     return record_shape(
         Provider.CLAUDE.value,
-        path_segment(payload.get("type")),
+        path_segment(payload.get("type")) + suffix,
         payload,
         nested if _is_json_object(nested) else None,
     )
@@ -1499,7 +1501,9 @@ def parse_claude_session(
                     ClaudeDiagnosticCode.UNKNOWN_ROLE,
                     record.envelope,
                     f"unrecognized or contradictory message role: {role!r}",
-                    _record_shape(payload, "message"),
+                    _record_shape(
+                        payload, "message", suffix=f"/message/{path_segment(role)}"
+                    ),
                 )
             )
             continue

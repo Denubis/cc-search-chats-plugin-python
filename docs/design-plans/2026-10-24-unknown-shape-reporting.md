@@ -156,7 +156,9 @@ work, scheduled from the report).
 A shape is a frozen value `(provider, record_path, keys)` where `record_path`
 is the provider's record family and type joined by `/` (Codex
 `response_item/additional_tools`, `event_msg/<type>`, `<outer_type>` for an
-unknown outer; Claude `<record_type>` or `<record_type>/content/<block_type>`;
+unknown outer, `response_item/message/<role>` for an unknown role; Claude
+`<record_type>`, `<record_type>/message/<role>` or
+`<record_type>/content/<block_type>`;
 Antigravity `<source>/<record_type>`), and `keys` is the sorted tuple of
 top-level key names of the envelope followed by `payload.` prefixed top-level
 payload key names. Values never enter the fingerprint. Its canonical string
@@ -202,6 +204,10 @@ The Codex and Claude parser-state versions advance with this change so the
 first index after installation reparses every source from byte zero and the
 summary starts from a complete baseline rather than filling in as files
 change. Antigravity's version advances only if its diagnostics change shape.
+(Implementation note, 2026-10-24: a blocked file records only the shape that
+blocked it, since refresh stops at the first blocking diagnostic and writes no
+checkpoint for that file; the baseline is complete for indexed files and shows
+the first blocking shape of each blocked file. A flagged run reveals the rest.)
 
 ### Ignore mode (index only)
 
@@ -248,10 +254,14 @@ an example under `docs/`, never a live list.
 [[shape]]
 provider = "codex"
 record_path = "response_item/additional_tools"
-keys = ["id", "role", "tools", "type"]
+keys = ["metadata", "ordinal", "payload", "timestamp", "type",
+        "payload.id", "payload.role", "payload.tools", "payload.type"]
 note = "developer-role tool definitions; no prose"
 acknowledged = 2026-10-24
 ```
+
+(Example corrected 2026-10-24 to the implemented two-segment key form; the
+shipped `docs/examples/acknowledged-shapes.toml` is the reference.)
 
 Matching is exact on `(provider, record_path, keys)`; an added or removed key
 is a different shape and warns again. `index` loads the file before any
@@ -275,11 +285,12 @@ files:
 ```json
 {"code": "unknown_record_shape", "provider": "codex",
  "record_path": "response_item/additional_tools",
- "keys": ["id", "role", "tools", "type"],
+ "keys": ["metadata", "ordinal", "payload", "timestamp", "type",
+          "payload.id", "payload.role", "payload.tools", "payload.type"],
  "record_count": 7, "file_count": 5,
  "first_source_root_id": "…", "first_source_file_relative": "2026/10/23/…jsonl",
  "first_source_line": 3, "dispositions": ["blocked"],
- "parser_state_version": 6}
+ "parser_state_version": 7}
 ```
 
 `dispositions` is the set observed across files: `blocked` while the file is
@@ -294,11 +305,14 @@ same fields as the warning plus `note` and `acknowledged` for acknowledged
 entries. Search does not return that list.
 
 Human output prints one line per pending shape after the results, in the
-form `unknown shape codex response_item/additional_tools {id, role, tools,
-type}: 7 records in 5 files, first 2026/10/23/….jsonl:3, blocked`. Agent
+form `unknown shape codex response_item/additional_tools {metadata, ordinal,
+payload, timestamp, type, payload.id, payload.role, payload.tools,
+payload.type}: 7 records in 5 files, first 2026/10/23/….jsonl:3, blocked`. Agent
 guidance in the skill and command tells a consumer that these warnings
 describe parser coverage, are not missing conversations, and should be
 mentioned only when they bear on the answer or the user asks about coverage.
+(UAT ruling 2026-10-24: `search` prints a single summary note instead; the
+per-shape lines stay on `index` and `index --status`.)
 
 ### Documents brought current at implementation
 

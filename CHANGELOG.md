@@ -1,5 +1,51 @@
 # Changelog
 
+## cc-search-chats 2.5.0
+
+**Added:**
+- Every unregistered native record shape is now reported, in every mode, by a
+  key-name fingerprint (provider, record path, key names (the unit's own keys sorted, then its `payload.`-prefixed nested keys sorted; never values)). `index`, `index --status`, `search` and the other commands carry one
+  `unknown_record_shape` warning per pending shape with record and file
+  counts, a first example and `dispositions` (`blocked`, `ignored` or
+  `acknowledged`);
+  `coverage` gains `unknown_shape_records`, `unknown_shapes_pending` and
+  `unknown_shapes_acknowledged`; `index --status` lists
+  `unknown_shapes.pending` and `unknown_shapes.acknowledged`; human `search`
+  prints one summary note counting pending shapes after its results, and human
+  `index` and `index --status` print one `unknown shape …` line per pending
+  shape after their results. The
+  report is derived from current rows and persists across unchanged runs. The
+  silent family (Codex `unknown_metadata_shape` and `unknown_compaction`,
+  Claude `invalid_compact_boundary`) is counted instead of dropped without
+  trace (ADR 0009).
+- `index --ignore-unknown-records`, or `CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1`
+  in the operator's `index.env`, indexes around an unknown record shape instead
+  of blocking the whole file; the record (or, for an unknown content block,
+  just that block) is left out, counted, and reported.
+  Identity, payload and admission failures still block. A flagged run retries
+  files an earlier run blocked on an unknown-shape code. The packaged systemd
+  unit is unchanged and the default stays fail-closed.
+- An operator-owned acknowledgement file,
+  `$XDG_CONFIG_HOME/cc-search-chats/acknowledged-shapes.toml` (default
+  `~/.config/cc-search-chats/`), names shapes already looked at by exact
+  provider, record path and key set. `index` validates it closed and stamps
+  matching shapes `acknowledged` without reparsing; they stop warning but
+  stay counted. A malformed or unreadable file makes `index` exit 2 before the
+  systemd scope or any database write; readers never open the file. Format in
+  `docs/examples/acknowledged-shapes.toml` and the maintenance runbook.
+
+**Changed:**
+- Migration 12 adds `source_file_current.unknown_shapes`,
+  `source_failure_current.failure_shape` and
+  `refresh_run.ignored_unknown_record_count`. Apply it with `index --migrate`
+  after the ADR 0007 backup. The Codex parser-state version advances to 7 and
+  Claude to 9, so the first index afterwards reparses both corpora from byte
+  zero (roughly half an hour, extrapolated from the 2.4.3 run: 640 MB of
+  Codex in about twelve minutes, with about 1.0 GB of Claude to follow). The
+  first status then lists every unknown shape in indexed files plus the first
+  blocking shape of each blocked file; a flagged run reveals the rest of a
+  blocked file.
+
 ## cc-search-chats 2.4.3
 
 **Fixed:**

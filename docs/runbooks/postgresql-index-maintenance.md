@@ -162,9 +162,13 @@ nothing.
    (`unknown_shapes.pending[]`: `provider`, `record_path`, `keys`, counts and
    a first example) or from the one-line human form.
 2. Append one `[[shape]]` table with that exact `provider`, `record_path` and
-   `keys` list, a `note`, and an `acknowledged` date. Matching is exact on the
-   three fields; an added or removed key is a different shape and warns again
-   until acknowledged on its own.
+   `keys` list (the unit's own key names sorted, then its `payload.`-prefixed
+   nested key names sorted, exactly as reported), a `note`, and an
+   `acknowledged` date. Matching is exact on the three fields; an added or
+   removed key is a different shape and warns again until acknowledged on its
+   own. A shape reported with an empty `keys` list (a record or content block
+   that is not a JSON object) cannot be acknowledged; it warns until a parser
+   release.
 3. Run `cc-search-chats index`. The run stamps `acknowledged` on every current
    occurrence without reparsing, so an unchanged corpus needs no new
    generation. Search and status stop warning for it; it stays in
@@ -174,15 +178,15 @@ nothing.
    it warns again.
 
 Failure behaviour: a file that is not valid TOML, an entry missing a field or
-carrying an unknown one, an unknown provider, an empty or unsorted `keys`
-list, a non-date `acknowledged`, a duplicate shape, or an unreadable file makes
+carrying an unknown one, an unknown provider, an empty `keys` list or one
+not in the reported order, a non-date `acknowledged`, a duplicate shape, or an unreadable file makes
 `index` exit 2 with `configuration_invalid` and a message naming the entry and
 field, before the systemd scope is created and before any database write. The
 nightly timer fails the same way until the file is fixed; `index --status`,
 `search` and the other readers never open the file and keep reporting the
 previous state. Blocked shapes (`dispositions` contains `blocked`) cannot be
-acknowledged: a blocked file is outside the index until a parser release or a
-flagged run (`index --ignore-unknown-records`, or
+acknowledged: a blocked file's content since its last good checkpoint is
+outside the index until a parser release or a flagged run (`index --ignore-unknown-records`, or
 `CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1` in `index.env`).
 
 ## 6. Recovery

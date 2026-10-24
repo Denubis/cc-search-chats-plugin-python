@@ -190,7 +190,8 @@ record is counted and reported by shape, and a flagged run retries files that an
 earlier run blocked on such a shape. This is operator policy, not a packaged
 default: the unit ships without it, and identity, payload and admission
 failures still block with it set. The operator's acknowledgement file for
-shapes already looked at lives beside it as `acknowledged-shapes.toml`; its
+shapes already looked at is `acknowledged-shapes.toml` in the same directory
+(or under `$XDG_CONFIG_HOME/cc-search-chats/` when that is set); its
 format and lifecycle are in `docs/runbooks/postgresql-index-maintenance.md`,
 "Acknowledge an unknown shape".
 
@@ -347,7 +348,21 @@ Only with separate migration authority, apply pending migrations through the
 installed entrypoint and retain both output streams. Without a pending
 migration, skip the `--migrate` line. The 2.4.0 upgrade applies migration 11,
 which replaces the three `provider` CHECK constraints so `antigravity` rows are
-admitted; the backup above is required before it.
+admitted; the backup above is required before it. The 2.5.0 upgrade applies
+migration 12 (unknown-shape columns, ADR 0009), also behind the backup, and
+advances the Codex and Claude parser-state versions: the first `index`
+afterwards reparses every Codex and Claude source from byte zero (roughly
+half an hour, extrapolated from the 2.4.3 run) and the first `index --status`
+is expected to list, under `unknown_shapes.pending`, every unknown shape in
+indexed files plus the first blocking shape of each blocked file; a flagged
+run reveals the rest of a blocked file. Each
+is housekeeping to acknowledge in `acknowledged-shapes.toml` or a parser job to
+schedule; neither is missing conversations. Antigravity's parser version did
+not advance, so a file it blocked before the upgrade keeps a failure row
+without a shape and raises no warning; run `cc-search-chats index
+--force-retry` once after the first index so such rows are re-recorded with
+their shape. Decide at that point whether `index.env` carries
+`CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1` for the timer.
 
 ```fish
 cc-search-chats index --migrate --json >"$upgrade_evidence/index-migrate.stdout.json" 2>"$upgrade_evidence/index-migrate.stderr.ndjson"

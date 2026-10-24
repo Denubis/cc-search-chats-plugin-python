@@ -284,23 +284,32 @@ def test_pending_shape_warnings_persist_on_every_reader_until_resolved(
     code, human = _run(monkeypatch, capsys, "search", "modern visible", "--literal")
     assert code == 0
     lines = human.out.splitlines()
-    shape_lines = [line for line in lines if line.startswith("unknown shape ")]
-    assert len(shape_lines) == 2
-    assert lines.index(shape_lines[0]) > max(
+    assert not any(line.startswith("unknown shape ") for line in lines)
+    note_lines = [line for line in lines if line.startswith("Note: ")]
+    assert note_lines == [
+        (
+            "Note: 2 unrecognised record shapes await a parser update or "
+            "acknowledgement; the results above are unaffected. "
+            "See `cc-search-chats index --status`."
+        )
+    ]
+    assert lines.index(note_lines[0]) > max(
         index for index, line in enumerate(lines) if "ccchat:v1:" in line
     )
+    code, human_status = _run(monkeypatch, capsys, "index", "--status")
+    assert code == 0
+    status_lines = human_status.out.splitlines()
+    status_shape_lines = [
+        line for line in status_lines if line.startswith("unknown shape ")
+    ]
+    assert len(status_shape_lines) == 2
     assert (
         "unknown shape codex response_item/blocked_item_kind "
         "{ordinal, payload, timestamp, type, payload.id, payload.text, "
         "payload.type}: 1 record in 1 file, first "
         "2026/10/24/rollout-blocked.jsonl:3, blocked"
-    ) in shape_lines
-    code, human_status = _run(monkeypatch, capsys, "index", "--status")
-    assert code == 0
-    assert (
-        sum(line.startswith("unknown shape ") for line in human_status.out.splitlines())
-        == 2
-    )
+    ) in status_shape_lines
+    assert not any(line.startswith("Note: ") for line in status_lines)
 
 
 def test_one_shape_across_files_is_one_warning_with_summed_counts(
@@ -429,6 +438,13 @@ def test_acknowledged_shape_stops_warning_but_stays_counted(
     )
     assert code == 0
     assert _shape_warnings(json.loads(searched.out)) == []
+    code, human_search = _run(
+        monkeypatch, capsys, "search", "modern visible", "--literal"
+    )
+    assert code == 0
+    search_lines = human_search.out.splitlines()
+    assert any("ccchat:v1:" in line for line in search_lines)
+    assert not any(line.startswith("Note: ") for line in search_lines)
     code, human = _run(monkeypatch, capsys, "index", "--status")
     assert code == 0
     assert "unknown shape " not in human.out

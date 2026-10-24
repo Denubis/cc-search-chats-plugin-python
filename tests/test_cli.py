@@ -2480,6 +2480,65 @@ def test_unknown_shape_line_renders_the_one_line_form() -> None:
     )
 
 
+def _pending_shape_warning(record_path: str) -> dict[str, object]:
+    return {
+        "code": "unknown_record_shape",
+        "provider": "codex",
+        "record_path": record_path,
+        "keys": ["id", "type"],
+        "record_count": 4,
+        "file_count": 2,
+        "first_source_root_id": "root",
+        "first_source_file_relative": "2026/10/24/rollout.jsonl",
+        "first_source_line": 3,
+        "dispositions": ["ignored"],
+        "parser_state_version": 7,
+    }
+
+
+@pytest.mark.parametrize(
+    ("pending_paths", "acknowledged", "expected"),
+    [
+        ((), 0, None),
+        ((), 2, None),
+        (
+            ("response_item/first_kind",),
+            3,
+            (
+                "Note: 1 unrecognised record shape awaits a parser update or "
+                "acknowledgement; the results above are unaffected. "
+                "See `cc-search-chats index --status`."
+            ),
+        ),
+        (
+            ("response_item/first_kind", "response_item/second_kind"),
+            0,
+            (
+                "Note: 2 unrecognised record shapes await a parser update or "
+                "acknowledgement; the results above are unaffected. "
+                "See `cc-search-chats index --status`."
+            ),
+        ),
+    ],
+)
+def test_unknown_shape_summary_line_counts_only_pending_shapes(
+    pending_paths: tuple[str, ...], acknowledged: int, expected: str | None
+) -> None:
+    envelope = {
+        "coverage": {
+            "unknown_shape_records": 4 * (len(pending_paths) + acknowledged),
+            "unknown_shapes_pending": len(pending_paths),
+            "unknown_shapes_acknowledged": acknowledged,
+        },
+        "warnings": [
+            {"code": "semantic_search_degraded", "detail": "helper unavailable"},
+            *(_pending_shape_warning(path) for path in pending_paths),
+        ],
+    }
+
+    assert cli_module._unknown_shape_summary_line(envelope) == expected
+
+
 def test_index_with_invalid_acknowledgement_file_exits_2_before_scope_or_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
