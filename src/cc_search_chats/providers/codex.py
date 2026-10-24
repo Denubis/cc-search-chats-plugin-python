@@ -70,12 +70,6 @@ _TURN_CONTEXT_OBJECT_FIELDS = {
 }
 _TURN_CONTEXT_BOOLEAN_FIELDS = {"realtime_active"}
 _TURN_CONTEXT_LIST_FIELDS = {"workspace_roots"}
-_TURN_CONTEXT_FIELDS = (
-    _TURN_CONTEXT_STRING_FIELDS
-    | _TURN_CONTEXT_OBJECT_FIELDS
-    | _TURN_CONTEXT_BOOLEAN_FIELDS
-    | _TURN_CONTEXT_LIST_FIELDS
-)
 _TOKEN_USAGE_REQUIRED_COUNTERS = {
     "input_tokens",
     "cached_input_tokens",
@@ -1524,8 +1518,8 @@ def _source_diagnostics(
 
 
 def _metadata_outer_shape(record: _DecodedRecord) -> bool:
-    """Require the exact audited metadata wrapper and a valid timestamp."""
-    return set(record.payload) == {"type", "timestamp", "payload"} and (
+    """Require the audited metadata wrapper keys and a valid timestamp."""
+    return set(record.payload) >= {"type", "timestamp", "payload"} and (
         isinstance(record.payload.get("timestamp"), str)
         and is_valid_native_timestamp(record.payload["timestamp"])
     )
@@ -1542,10 +1536,7 @@ def _turn_context_shape(record: _DecodedRecord) -> bool:
     if not _metadata_outer_shape(record) or not _is_json_object(payload):
         return False
     fields = set(payload)
-    if (
-        not fields >= _TURN_CONTEXT_REQUIRED_FIELDS
-        or not fields <= _TURN_CONTEXT_FIELDS
-    ):
+    if not fields >= _TURN_CONTEXT_REQUIRED_FIELDS:
         return False
     if any(
         not isinstance(payload[field], str)

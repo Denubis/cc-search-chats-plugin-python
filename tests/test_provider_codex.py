@@ -95,6 +95,84 @@ def established_unknown_session(session_id: str) -> CodexParserState:
     )
 
 
+# Payload key names observed in local Codex turn_context records, 2026-10-24.
+_OBSERVED_TURN_CONTEXT_KEYS = (
+    "approval_policy",
+    "approvals_reviewer",
+    "collaboration_mode",
+    "comp_hash",
+    "current_date",
+    "cwd",
+    "effort",
+    "file_system_sandbox_policy",
+    "model",
+    "multi_agent_version",
+    "permission_profile",
+    "personality",
+    "realtime_active",
+    "sandbox_policy",
+    "summary",
+    "timezone",
+    "turn_id",
+    "workspace_roots",
+)
+_OBSERVED_COMPACT_TURN_CONTEXT_KEYS = tuple(
+    key
+    for key in _OBSERVED_TURN_CONTEXT_KEYS
+    if key not in {"current_date", "personality", "timezone", "workspace_roots"}
+)
+# Synthetic values of each observed field's value type; no native content.
+_METADATA_PLACEHOLDERS: dict[str, object] = {
+    "active_permission_profile": {},
+    "approval_policy": "never",
+    "approvals_reviewer": "user",
+    "collaboration_mode": {},
+    "comp_hash": "synthetic-hash",
+    "current_date": "2026-10-24",
+    "cwd": "/synthetic",
+    "cyber_access_program": "synthetic-program",
+    "disabled_plugin_ids": [],
+    "effort": "high",
+    "file_system_sandbox_policy": {},
+    "full": True,
+    "model": "synthetic-model",
+    "multi_agent_version": "synthetic-version",
+    "permission_profile": {},
+    "personality": "synthetic-personality",
+    "realtime_active": False,
+    "root_turn_id": "synthetic-turn",
+    "sandbox_policy": {},
+    "state": {},
+    "summary": "auto",
+    "timezone": "UTC",
+    "turn_id": "synthetic-turn",
+    "workspace_roots": [],
+}
+
+
+def observed_metadata_payload(keys: tuple[str, ...]) -> dict[str, object]:
+    """Build a metadata payload from observed key names and placeholder values."""
+    return {key: _METADATA_PLACEHOLDERS[key] for key in keys}
+
+
+def observed_metadata_record(
+    outer_type: str,
+    payload: dict[str, object],
+    *,
+    with_ordinal: bool,
+    omit_outer: tuple[str, ...] = (),
+) -> dict[str, object]:
+    """Wrap a metadata payload in the observed outer record shape."""
+    record: dict[str, object] = {
+        "timestamp": "2026-10-24T00:00:00Z",
+        "type": outer_type,
+        "payload": payload,
+    }
+    if with_ordinal:
+        record["ordinal"] = 7
+    return {key: value for key, value in record.items() if key not in omit_outer}
+
+
 def laptop_metadata_record(kind: str) -> dict[str, object]:
     """Build synthetic copies of the audited laptop metadata capabilities."""
     if kind == "token_usage_record":
@@ -2138,6 +2216,163 @@ class TestCodexFailClosedDiagnostics:
             assert codes == set()
         else:
             assert codes == {expected}
+
+    @pytest.mark.parametrize(
+        ("outer_type", "with_ordinal", "payload_keys"),
+        [
+            ("turn_context", True, _OBSERVED_TURN_CONTEXT_KEYS),
+            ("turn_context", True, (*_OBSERVED_TURN_CONTEXT_KEYS, "root_turn_id")),
+            (
+                "turn_context",
+                True,
+                (*_OBSERVED_TURN_CONTEXT_KEYS, "disabled_plugin_ids", "root_turn_id"),
+            ),
+            (
+                "turn_context",
+                True,
+                (
+                    *_OBSERVED_TURN_CONTEXT_KEYS,
+                    "active_permission_profile",
+                    "root_turn_id",
+                ),
+            ),
+            (
+                "turn_context",
+                True,
+                (*_OBSERVED_TURN_CONTEXT_KEYS, "active_permission_profile"),
+            ),
+            (
+                "turn_context",
+                False,
+                (*_OBSERVED_TURN_CONTEXT_KEYS, "active_permission_profile"),
+            ),
+            (
+                "turn_context",
+                True,
+                (
+                    *_OBSERVED_COMPACT_TURN_CONTEXT_KEYS,
+                    "disabled_plugin_ids",
+                    "root_turn_id",
+                ),
+            ),
+            (
+                "turn_context",
+                True,
+                (
+                    *_OBSERVED_COMPACT_TURN_CONTEXT_KEYS,
+                    "cyber_access_program",
+                    "disabled_plugin_ids",
+                    "root_turn_id",
+                ),
+            ),
+            ("world_state", True, ("full", "state")),
+        ],
+    )
+    def test_observed_modern_metadata_variants_are_recognized(
+        self,
+        outer_type: str,
+        with_ordinal: bool,
+        payload_keys: tuple[str, ...],
+    ) -> None:
+        record = observed_metadata_record(
+            outer_type,
+            observed_metadata_payload(payload_keys),
+            with_ordinal=with_ordinal,
+        )
+
+        result = parse_codex_session(
+            (envelope(record),),
+            context=CodexSessionContext(source_session_id="metadata-session"),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert {diagnostic.code for diagnostic in result.diagnostics} == set()
+
+    @pytest.mark.parametrize(
+        ("with_ordinal", "added_fields"),
+        [
+            (False, ("root_turn_id",)),
+            (False, ("disabled_plugin_ids",)),
+            (False, ("active_permission_profile",)),
+            (False, ("cyber_access_program",)),
+            (
+                True,
+                (
+                    "active_permission_profile",
+                    "cyber_access_program",
+                    "disabled_plugin_ids",
+                    "root_turn_id",
+                ),
+            ),
+        ],
+    )
+    def test_added_turn_context_fields_are_recognized(
+        self, with_ordinal: bool, added_fields: tuple[str, ...]
+    ) -> None:
+        record = observed_metadata_record(
+            "turn_context",
+            observed_metadata_payload((*_OBSERVED_TURN_CONTEXT_KEYS, *added_fields)),
+            with_ordinal=with_ordinal,
+        )
+
+        result = parse_codex_session(
+            (envelope(record),),
+            context=CodexSessionContext(source_session_id="metadata-session"),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert {diagnostic.code for diagnostic in result.diagnostics} == set()
+
+    @pytest.mark.parametrize(
+        ("outer_type", "payload", "omit_outer"),
+        [
+            (
+                "turn_context",
+                {
+                    **observed_metadata_payload(_OBSERVED_TURN_CONTEXT_KEYS),
+                    "realtime_active": "yes",
+                },
+                (),
+            ),
+            (
+                "turn_context",
+                observed_metadata_payload(
+                    tuple(
+                        key for key in _OBSERVED_TURN_CONTEXT_KEYS if key != "summary"
+                    )
+                ),
+                (),
+            ),
+            (
+                "turn_context",
+                observed_metadata_payload(_OBSERVED_TURN_CONTEXT_KEYS),
+                ("timestamp",),
+            ),
+            ("world_state", {"full": "yes", "state": {}}, ()),
+        ],
+    )
+    def test_modern_metadata_without_required_keys_or_types_stays_unknown(
+        self,
+        outer_type: str,
+        payload: dict[str, object],
+        omit_outer: tuple[str, ...],
+    ) -> None:
+        record = observed_metadata_record(
+            outer_type, payload, with_ordinal=True, omit_outer=omit_outer
+        )
+
+        result = parse_codex_session(
+            (envelope(record),),
+            context=CodexSessionContext(source_session_id="metadata-session"),
+            prior_state=established_unknown_session("metadata-session"),
+        )
+
+        assert result.messages == ()
+        assert {diagnostic.code for diagnostic in result.diagnostics} == {
+            CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE
+        }
 
     def test_added_inter_agent_metadata_keys_remain_excluded(self) -> None:
         result = parse_codex_session(
