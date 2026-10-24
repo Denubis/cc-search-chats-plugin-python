@@ -463,3 +463,46 @@ recorded above was on the other machine.
   only source is blocked raises a bare `ValueError` (Opus, disposable test);
   the accepted Antigravity design's record table lacks the `ERROR_MESSAGE`
   row and still says parser version 1.
+
+## Codex `additional_tools` fix and 2.4.3 deployment (2026-10-24)
+
+Context: the nightly index on this machine reported `partial`, 5 blocked Codex
+sources on `unknown_response_item` at ordinal 2, and `extract` on one of them
+returned `no_match` (exit 3). Codex CLI 0.164.0 writes a developer-role
+`response_item` payload of type `additional_tools` (keys
+`{type, id, role, tools}`, tool definitions grouped into namespaces, no
+prose). Two primary vscode sessions and the three subagents they spawned were
+blocked; `message_current` held zero rows for all five.
+
+- Diagnosed and fixed by Opus under supervision; the supervisor corroborated
+  the five files and the single shape with an independent read-only scan of
+  every October rollout, and reran every gate on the final tree.
+- Fix: `additional_tools` registered in `_INTER_AGENT_RESPONSE_KEYSETS`
+  (excluded inter-agent metadata, as `tool_search_output`); Codex parser-state
+  version 5 → 6 so unchanged blocked files are retried. A PostgreSQL test
+  reproduces the version-5 block on an unchanged file, recovers it at 6, and
+  shows six tool-definition decoys in no stored prose and no search mode. The
+  keyset alone left the file blocked (0 bytes read), proving the bump.
+- Authorised by the human ("yep, bump it"; then "yes, do so" for commit and
+  push). 2.4.3 committed as `12bd65cb13613bc0373cc3993133b575d6ff8c67`,
+  pushed, installed from that commit (provenance, CUDA, model revision
+  `c44c20ab…` proven). No migration pending, so no backup (ADR 0007).
+- Index run 84: exit 0, `complete`, generation 81, semantic build 79 (56,417
+  units), 231 sources read (640,907,760 bytes; every Codex file reparsed
+  once), 0 blocked, 0 warnings, `needs_attention 0`. Codex root: 227
+  discovered, 227 indexed. Evidence:
+  `~/.local/state/cc-search-chats/upgrades/12bd65cb…/`.
+- Smoke on the installed CLI: `extract 01a1681f… --provider codex` returns 96
+  messages; `--literal` finds `unknown_response_item` (7 hits); `--semantic`
+  delivers hybrid (20 hits, model load 9,559 ms, no degradation).
+- Timer re-enabled (next 2026-10-25 03:13 AEDT); Claude plugin updated
+  2.4.2 → 2.4.3; Codex plugin re-added at 2.4.3; host rule bytes unchanged,
+  all three execpolicy checks allow.
+- Decision recorded in
+  `.notes/decisions/2026-10-24-codex-additional-tools-and-noisy-ignore-flag.md`,
+  including the human's ruling that a noisy opt-in ignore for unknown shapes
+  is wanted (ADR 0003 amendment, design pending).
+- Observed, not changed: the five files also emit pre-existing non-blocking
+  `unknown_metadata_shape` diagnostics; whether 0.164.0 introduced them was
+  not checked. The three subagent sessions index as agent sessions and appear
+  only with `--agents`.
