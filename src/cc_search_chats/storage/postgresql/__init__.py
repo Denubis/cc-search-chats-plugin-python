@@ -44,6 +44,10 @@ from cc_search_chats.storage.postgresql.staleness import (
     UnindexedSourceCounts,
     unindexed_sources,
 )
+from cc_search_chats.storage.postgresql.unknown_shapes import (
+    UnknownShapeReport,
+    unknown_shape_summary,
+)
 
 __all__ = [
     "EventExport",
@@ -62,6 +66,7 @@ __all__ = [
     "StoredAlias",
     "StoredSession",
     "UnindexedSourceCounts",
+    "UnknownShapeReport",
     "context_messages",
     "extract_session",
     "export_human_message_events",
@@ -78,4 +83,5 @@ __all__ = [
     "search_messages",
     "semantic_search",
     "unindexed_sources",
+    "unknown_shape_summary",
 ]

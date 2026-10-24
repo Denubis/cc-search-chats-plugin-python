@@ -134,3 +134,210 @@ def test_index_ignore_mode_reaches_the_refresh_through_flag_or_variable(
         ]
     assert {"modern visible assistant", "modern visible user"} <= set(stored)
     assert not any("cli-decoy-rue" in text for text in stored)
+
+
+_SHAPE_WARNING_KEYS = {
+    "code",
+    "provider",
+    "record_path",
+    "keys",
+    "record_count",
+    "file_count",
+    "first_source_root_id",
+    "first_source_file_relative",
+    "first_source_line",
+    "dispositions",
+    "parser_state_version",
+}
+
+
+def _shape_warnings(payload: dict) -> list[dict]:
+    return [
+        warning
+        for warning in payload["warnings"]
+        if warning["code"] == "unknown_record_shape"
+    ]
+
+
+def _other_warnings(payload: dict) -> list[dict]:
+    return [
+        warning
+        for warning in payload["warnings"]
+        if warning["code"] != "unknown_record_shape"
+    ]
+
+
+def test_pending_shape_warnings_persist_on_every_reader_until_resolved(
+    cli_corpus,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC7, AC11 and the AC14 baseline: empty on a clean corpus, then persistent."""
+    claude_root, codex_day, _antigravity_root = cli_corpus
+    shutil.copy(FIXTURES / "claude_primary.jsonl", claude_root / "clean.jsonl")
+    code, _migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
+    assert code == 0
+
+    code, baseline = _run(monkeypatch, capsys, "index", "--json")
+    assert code == 0, (baseline.out, baseline.err)
+    baseline_payload = json.loads(baseline.out)
+    assert baseline_payload["coverage"]["unknown_shape_records"] == 0
+    assert baseline_payload["coverage"]["unknown_shapes_pending"] == 0
+    assert baseline_payload["coverage"]["unknown_shapes_acknowledged"] == 0
+    assert _shape_warnings(baseline_payload) == []
+    code, clean_status = _run(monkeypatch, capsys, "index", "--status", "--json")
+    assert code == 0
+    assert json.loads(clean_status.out)["unknown_shapes"] == {
+        "pending": [],
+        "acknowledged": [],
+    }
+
+    fixture_records = (
+        (FIXTURES / "codex_modern_primary_145.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    (codex_day / "rollout-ignored.jsonl").write_bytes(
+        fixture_records[0]
+        + fixture_records[3]
+        + _unknown_item(2, "ignored_item_kind")
+        + fixture_records[5]
+    )
+    code, ignored = _run(
+        monkeypatch, capsys, "index", "--ignore-unknown-records", "--json"
+    )
+    assert code == 0, (ignored.out, ignored.err)
+    (codex_day / "rollout-blocked.jsonl").write_bytes(
+        fixture_records[0]
+        + fixture_records[3]
+        + _unknown_item(2, "blocked_item_kind")
+        + fixture_records[5]
+    )
+    code, blocked = _run(monkeypatch, capsys, "index", "--json")
+    assert code == 0, (blocked.out, blocked.err)
+    assert json.loads(blocked.out)["coverage"]["blocked_files"] == 1
+
+    code, unchanged = _run(monkeypatch, capsys, "index", "--json")
+    assert code == 0
+    unchanged_payload = json.loads(unchanged.out)
+    assert unchanged_payload["refresh"]["run_id"] is None
+    by_path = {
+        warning["record_path"]: warning
+        for warning in _shape_warnings(unchanged_payload)
+    }
+    assert set(by_path) == {
+        "response_item/ignored_item_kind",
+        "response_item/blocked_item_kind",
+    }
+    assert by_path["response_item/ignored_item_kind"]["dispositions"] == ["ignored"]
+    assert by_path["response_item/blocked_item_kind"]["dispositions"] == ["blocked"]
+    for warning in by_path.values():
+        assert set(warning) == _SHAPE_WARNING_KEYS
+        assert warning["provider"] == "codex"
+        assert warning["record_count"] == 1
+        assert warning["file_count"] == 1
+        assert warning["first_source_line"] == 3
+        assert warning["keys"] == [
+            "ordinal",
+            "payload",
+            "timestamp",
+            "type",
+            "payload.id",
+            "payload.text",
+            "payload.type",
+        ]
+    assert "cli-decoy-rue" not in json.dumps(unchanged_payload)
+    coverage = unchanged_payload["coverage"]
+    assert coverage["unknown_shape_records"] == 2
+    assert coverage["unknown_shapes_pending"] == 2
+    assert coverage["unknown_shapes_acknowledged"] == 0
+    assert coverage["completeness"] == "partial"
+    assert {key for key, value in coverage.items() if isinstance(value, list)} == {
+        "roots"
+    }
+
+    code, status = _run(monkeypatch, capsys, "index", "--status", "--json")
+    assert code == 0
+    status_payload = json.loads(status.out)
+    assert len(_shape_warnings(status_payload)) == 2
+    assert status_payload["unknown_shapes"]["acknowledged"] == []
+    pending = status_payload["unknown_shapes"]["pending"]
+    assert [entry["record_path"] for entry in pending] == sorted(
+        entry["record_path"] for entry in pending
+    )
+    assert {entry["record_path"] for entry in pending} == set(by_path)
+    assert all(set(entry) >= _SHAPE_WARNING_KEYS - {"code"} for entry in pending)
+
+    code, searched = _run(
+        monkeypatch, capsys, "search", "modern visible", "--literal", "--json"
+    )
+    assert code == 0, (searched.out, searched.err)
+    search_payload = json.loads(searched.out)
+    assert "unknown_shapes" not in search_payload
+    assert {w["record_path"] for w in _shape_warnings(search_payload)} == set(by_path)
+    assert search_payload["coverage"]["unknown_shapes_pending"] == 2
+    assert [result["text"] for result in search_payload["results"]] == [
+        "modern visible user",
+        "modern visible assistant",
+    ] or len(search_payload["results"]) == 2
+
+    code, human = _run(monkeypatch, capsys, "search", "modern visible", "--literal")
+    assert code == 0
+    lines = human.out.splitlines()
+    shape_lines = [line for line in lines if line.startswith("unknown shape ")]
+    assert len(shape_lines) == 2
+    assert lines.index(shape_lines[0]) > max(
+        index for index, line in enumerate(lines) if "ccchat:v1:" in line
+    )
+    assert (
+        "unknown shape codex response_item/blocked_item_kind "
+        "{ordinal, payload, timestamp, type, payload.id, payload.text, "
+        "payload.type}: 1 record in 1 file, first "
+        "2026/10/24/rollout-blocked.jsonl:3, blocked"
+    ) in shape_lines
+    code, human_status = _run(monkeypatch, capsys, "index", "--status")
+    assert code == 0
+    assert (
+        sum(line.startswith("unknown shape ") for line in human_status.out.splitlines())
+        == 2
+    )
+
+
+def test_one_shape_across_files_is_one_warning_with_summed_counts(
+    cli_corpus,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC8: seven records of one shape in five files, one warning, lowest example."""
+    claude_root, codex_day, _antigravity_root = cli_corpus
+    shutil.copy(FIXTURES / "claude_primary.jsonl", claude_root / "clean.jsonl")
+    fixture_records = (
+        (FIXTURES / "codex_modern_primary_145.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    for index, repeats in enumerate((1, 1, 1, 2, 2)):
+        body = fixture_records[0] + fixture_records[3]
+        for ordinal in range(2, 2 + repeats):
+            body += _unknown_item(ordinal)
+        body += fixture_records[5]
+        (codex_day / f"rollout-{index}.jsonl").write_bytes(body)
+    code, _migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
+    assert code == 0
+
+    code, indexed = _run(
+        monkeypatch, capsys, "index", "--ignore-unknown-records", "--json"
+    )
+
+    assert code == 0, (indexed.out, indexed.err)
+    payload = json.loads(indexed.out)
+    [warning] = _shape_warnings(payload)
+    assert warning["record_count"] == 7
+    assert warning["file_count"] == 5
+    assert warning["first_source_file_relative"] == "2026/10/24/rollout-0.jsonl"
+    assert warning["first_source_line"] == 3
+    assert warning["dispositions"] == ["ignored"]
+    assert payload["coverage"]["unknown_shape_records"] == 7
+    assert payload["coverage"]["unknown_shapes_pending"] == 1
+    assert payload["coverage"]["completeness"] == "complete"
+    assert _other_warnings(payload) == []

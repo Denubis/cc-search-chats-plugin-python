@@ -141,6 +141,16 @@ retry is not proof of recovery; indexing must succeed first. Deliberately
 excluded instructions, reasoning, and tool results are expected exclusions.
 They do not require repair or make processing coverage partial.
 
+An `unknown_record_shape` warning (one per distinct pending shape, with
+provider, record path, key names, record and file counts and a first example)
+is a parser-coverage note: the native log contains a record family the
+installed parser does not recognise. With `dispositions` `blocked` the whole
+file is outside the index until a parser release or a flagged index run; with
+`ignored` only that record was omitted. It is not a count of missing
+conversations and does not invalidate a resolved hit. Mention it only when it
+bears on the answer (a miss in a provider whose shapes are blocked) or when the
+user asks about coverage; `index --status` lists the shapes in full.
+
 `coverage.completeness` and failure warnings describe processing limits; retain
 them when they bear on the conclusion instead of labelling every answer “stale
 and partial.” `coverage.pending_tail_files` and `refresh.pending_bytes` describe

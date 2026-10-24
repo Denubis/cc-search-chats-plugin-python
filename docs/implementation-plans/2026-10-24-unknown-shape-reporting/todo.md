@@ -1,15 +1,5 @@
 # Pending work
 
-## Outcome 3: Reporting
-- [ ] Red: AC7, AC8, AC11, AC14-baseline tests; human line format test.
-- [ ] `unknown_shape_summary` aggregate (SQL group by digest).
-- [ ] Coverage scalars, per-shape warnings on every command, status list,
-      human lines.
-- [ ] Skill and command paragraphs; README and CLAUDE.md contracts.
-- [ ] `EXPLAIN (ANALYZE, BUFFERS)` of the aggregate on the laptop database,
-      recorded in the worklog.
-- [ ] Gates green; checkpoint commit.
-
 ## Outcome 4: Acknowledgement file
 - [ ] Red: AC9, AC10, AC12 tests; parser validation tests.
 - [ ] `core/acknowledged_shapes.py` with `tomllib`.

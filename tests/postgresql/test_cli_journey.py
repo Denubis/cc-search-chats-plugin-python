@@ -59,6 +59,9 @@ def _assert_v5_envelope(
         "unrecognized_conversation_records",
         "pending_tail_files",
         "completeness",
+        "unknown_shape_records",
+        "unknown_shapes_pending",
+        "unknown_shapes_acknowledged",
     }
     assert "repositories" not in coverage
     assert "source_watermarks" not in coverage
@@ -180,6 +183,16 @@ def _progress_events(stderr: str) -> list[dict[str, object]]:
 
 def _single_chunks(texts):
     return tuple((SemanticChunk(0, 0, 1, 0, len(text), text),) for text in texts)
+
+
+_MODERN_CODEX_SHAPES = {"turn_context", "world_state", "compacted"}
+
+
+def _fixture_shape_paths(payload: dict[str, object]) -> set[str]:
+    """Return the unknown-shape record paths and require no other warning."""
+    warnings = cast("list[dict[str, object]]", payload["warnings"])
+    assert all(warning["code"] == "unknown_record_shape" for warning in warnings)
+    return {cast("str", warning["record_path"]) for warning in warnings}
 
 
 @pytest.mark.parametrize("json_output", [True, False])
@@ -477,7 +490,15 @@ def test_postgresql_cli_journey_with_events(
     )
     assert code == 0
     quiet_status_payload = json.loads(quiet_status.out)
-    assert quiet_status_payload["warnings"] == []
+    # The modern Codex fixture carries three silent-family shapes; they are
+    # reported on every reader and are the only warnings a quiet status shows.
+    assert _fixture_shape_paths(quiet_status_payload) == _MODERN_CODEX_SHAPES
+    assert quiet_status_payload["coverage"]["unknown_shapes_pending"] == 3
+    assert {
+        entry["record_path"]
+        for entry in quiet_status_payload["unknown_shapes"]["pending"]
+    } == _MODERN_CODEX_SHAPES
+    assert quiet_status_payload["unknown_shapes"]["acknowledged"] == []
     post_skip_generation = quiet_status_payload["refresh"]["corpus_generation"]
     post_skip_build = quiet_status_payload["semantic"]["semantic_build"]
 
@@ -494,7 +515,8 @@ def test_postgresql_cli_journey_with_events(
     assert code == 0, json.loads(exported.out)["error"]
     exported_payload = json.loads(exported.out)
     _assert_v5_envelope(exported_payload, "events")
-    assert exported_payload["warnings"] == []
+    assert _fixture_shape_paths(exported_payload) == _MODERN_CODEX_SHAPES
+    assert "unknown_shapes" not in exported_payload
     assert exported_payload["window"] == {
         "from_utc": "2026-08-11T00:00:00Z",
         "until_utc": "2026-08-12T00:00:00Z",

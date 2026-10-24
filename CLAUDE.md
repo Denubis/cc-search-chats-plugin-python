@@ -81,6 +81,14 @@ They do not use the operator's production database.
   Claude and Codex that value is native; for Antigravity it is derived from
   the first `run_command` `Cwd` in the session and is NULL when none exists,
   so such sessions are found only without `--project`.
+- An unregistered record shape blocks its file by default (ADR 0003). Every
+  command reports each distinct pending shape as an `unknown_record_shape`
+  warning by key-name fingerprint (provider, record path, sorted key names,
+  never values), derived from current rows so it survives unchanged runs.
+  `index --ignore-unknown-records`, or `CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1`
+  in the operator's `index.env`, indexes around such records instead and counts
+  them; identity, payload and admission failures still block. Human output
+  prints one `unknown shape …` line per pending shape after the results.
 - Human search shows local snapshot time with its historical UTC offset and
   elapsed age; routine file counts belong in `index --status`. Source updates
   are expected between index runs. Intentionally excluded sources (non-native
@@ -90,6 +98,10 @@ They do not use the operator's production database.
   bounded metadata scan; `coverage.source_issues` distinguishes parser-update
   retries, temporary failures, and failures needing attention. These are
   corpus-wide file counts, not missing sessions in the current project.
+  `coverage.unknown_shape_records`, `coverage.unknown_shapes_pending` and
+  `coverage.unknown_shapes_acknowledged` are scalars; `index --status` adds
+  the bounded `unknown_shapes.pending` and `unknown_shapes.acknowledged` lists,
+  which search never carries.
 - Ranked `--limit` is 1–200. Literal PostgreSQL reads use the five-second answer
   deadline after one render reserve. A literal deadline before retrieval
   returns the deadline error; a literal deadline after hits were retrieved

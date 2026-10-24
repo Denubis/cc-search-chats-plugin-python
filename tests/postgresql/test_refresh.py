@@ -1974,10 +1974,15 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
     assert failed_coverage["unrecognized_conversation_records"] == 1
     assert failed_coverage["skipped_records"] == 0
     assert failed_coverage["completeness"] == "partial"
-    assert [
-        warning["code"]
-        for warning in cast("list[dict[str, object]]", failed_envelope["warnings"])
-    ] == ["source_refresh_failed"]
+    failed_warnings = cast("list[dict[str, object]]", failed_envelope["warnings"])
+    assert [warning["code"] for warning in failed_warnings] == [
+        "source_refresh_failed",
+        "unknown_record_shape",
+    ]
+    assert failed_warnings[1]["record_path"] == "future_conversation_record"
+    assert failed_warnings[1]["dispositions"] == ["blocked"]
+    assert failed_warnings[1]["first_source_line"] == failure[7] + 1
+    assert "future shape must not disappear" not in json.dumps(failed_warnings)
 
     run_count = next(
         postgres_connection.execute("SELECT count(*) FROM cc_search_chats.refresh_run")

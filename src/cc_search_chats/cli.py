@@ -17,7 +17,7 @@ from math import ceil
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
-from typing import TYPE_CHECKING, Never, TypedDict, cast
+from typing import TYPE_CHECKING, Never, TextIO, TypedDict, cast
 
 import psycopg
 
@@ -86,6 +86,7 @@ from cc_search_chats.storage.postgresql import (
     SearchHit,
     StoredAlias,
     StoredMessage,
+    UnknownShapeReport,
     exhaustive_search_page,
     export_human_message_events,
     index_corpus,
@@ -93,6 +94,7 @@ from cc_search_chats.storage.postgresql import (
     resolve_exact_messages,
     search_messages,
     unindexed_sources,
+    unknown_shape_summary,
 )
 from cc_search_chats.storage.postgresql import (
     context_messages as pg_context_messages,
@@ -883,6 +885,7 @@ def _postgres_coverage(
     roots: list[_RootCoverage],
     diagnostics: Sequence[object],
     metrics: _RefreshMetrics,
+    shapes: Sequence[UnknownShapeReport] = (),
 ) -> dict[str, object]:
     unrecognized_records = sum(
         1
@@ -926,7 +929,46 @@ def _postgres_coverage(
         "pending_tail_files": sum(int(root["pending_files"]) for root in roots),
         "completeness": _coverage_completeness(metrics),
         "source_issues": source_failure_summary(connection),
+        "unknown_shape_records": sum(shape.record_count for shape in shapes),
+        "unknown_shapes_pending": sum(shape.pending for shape in shapes),
+        "unknown_shapes_acknowledged": sum(not shape.pending for shape in shapes),
     }
+
+
+def _unknown_shape_lists(
+    shapes: Sequence[UnknownShapeReport],
+) -> dict[str, list[dict[str, object]]]:
+    """Return the ``index --status`` pending/acknowledged shape lists."""
+    return {
+        "pending": [shape.as_json() for shape in shapes if shape.pending],
+        "acknowledged": [shape.as_json() for shape in shapes if not shape.pending],
+    }
+
+
+def _unknown_shape_line(warning: Mapping[str, object]) -> str:
+    """Render one pending shape in the one-line human form."""
+    keys = ", ".join(str(key) for key in cast("Sequence[object]", warning["keys"]))
+    records = int(cast("int", warning["record_count"]))
+    files = int(cast("int", warning["file_count"]))
+    dispositions = ", ".join(
+        str(value) for value in cast("Sequence[object]", warning["dispositions"])
+    )
+    return (
+        f"unknown shape {warning['provider']} {warning['record_path']} {{{keys}}}: "
+        f"{records} record{'' if records == 1 else 's'} in "
+        f"{files} file{'' if files == 1 else 's'}, "
+        f"first {warning['first_source_file_relative']}:"
+        f"{warning['first_source_line']}, {dispositions}"
+    )
+
+
+def _print_unknown_shape_lines(
+    envelope: Mapping[str, object], *, file: TextIO | None = None
+) -> None:
+    """Print one line per pending unknown shape carried by an envelope."""
+    for warning in cast("Sequence[Mapping[str, object]]", envelope["warnings"]):
+        if warning.get("code") == "unknown_record_shape":
+            print(_unknown_shape_line(warning), file=file)
 
 
 def _postgres_refresh(metrics: _RefreshMetrics) -> dict[str, object]:
@@ -1014,7 +1056,8 @@ def _postgres_envelope(
     refresh_row = _postgres_refresh_row(connection)
     metrics = _refresh_metrics(refresh_row, roots, refresh_result)
     diagnostics = refresh_row[14] or []
-    coverage = _postgres_coverage(connection, roots, diagnostics, metrics)
+    shapes = unknown_shape_summary(connection)
+    coverage = _postgres_coverage(connection, roots, diagnostics, metrics, shapes)
     refresh = _postgres_refresh(metrics)
     semantic = _postgres_semantic(connection)
     timing = _postgres_timing(connection)
@@ -1045,7 +1088,11 @@ def _postgres_envelope(
             timing.made_at.isoformat() if timing.made_at is not None else None
         ),
         "corpus_age_ms": timing.age_ms,
-        "warnings": [*refresh_warnings, *additional_warnings],
+        "warnings": [
+            *refresh_warnings,
+            *(shape.as_warning() for shape in shapes if shape.pending),
+            *additional_warnings,
+        ],
         **payload,
         **_index_state_payload(
             connection,
@@ -1202,6 +1249,7 @@ def _print_human_search(
             f"{result['session_id']} ({result['role']})\n"
             f"  {result['text']}\n  {result['locator']}"
         )
+    _print_unknown_shape_lines(envelope)
 
 
 def _search_identity(
@@ -1668,12 +1716,14 @@ def _postgres_index_status(context: _PostgresContext) -> int:
         completed=completed,
         total=total,
         selected=bool(selected),
+        unknown_shapes=_unknown_shape_lists(unknown_shape_summary(context.connection)),
     )
     if context.args.json:
         print(json.dumps(envelope, sort_keys=True))
     else:
         _print_index_state_header(envelope, details=True)
         print(f"Semantic index: {completed}/{total} passages")
+        _print_unknown_shape_lines(envelope)
     return 0
 
 
@@ -1737,6 +1787,7 @@ def _postgres_index_run(context: _PostgresContext) -> int:
                     f"({warning.get('reason')}): {warning.get('detail')}",
                     file=sys.stderr,
                 )
+        _print_unknown_shape_lines(envelope, file=sys.stderr)
         print(
             f"Indexed {result.message_count} messages from "
             f"{result.source_count} sources into corpus {result.corpus_generation}",

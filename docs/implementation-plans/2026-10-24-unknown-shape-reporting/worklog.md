@@ -135,3 +135,65 @@ Green evidence (2026-10-24, this checkout):
   byte-identical; `tests/test_systemd_units.py` passes within the suite.
 - `cc-search-chats index --help` lists `--ignore-unknown-records` with the
   variable in its help text.
+
+## Outcome 3: Every reader reports pending shapes (2026-10-24)
+
+Changed surfaces:
+
+- New `storage/postgresql/unknown_shapes.py`: `UnknownShapeReport` (shape,
+  record_count, file_count, first root/file/line, dispositions, max parser
+  version; `pending` is any disposition other than `acknowledged`) and
+  `unknown_shape_summary(connection)`: one SQL aggregate over
+  `source_file_current.unknown_shapes` (`jsonb_each`) unioned with
+  `source_failure_current.failure_shape` rows as `blocked`, grouped by the
+  shape JSON value, file count as distinct (root, file), first example ordered
+  by (root, file, line). Exported from the storage package.
+- `cli.py`: `_postgres_envelope` computes the summary once per envelope and
+  appends one `unknown_record_shape` warning per pending shape after the
+  refresh-run warnings; `_postgres_coverage` gains `unknown_shape_records`,
+  `unknown_shapes_pending`, `unknown_shapes_acknowledged`;
+  `_postgres_index_status` adds top-level `unknown_shapes: {pending,
+  acknowledged}`; `_unknown_shape_line` renders the design's one-line form and
+  `_print_unknown_shape_lines` prints it after search results, after
+  `index --status`, and on stderr after an `index` run.
+- Contracts: README JSON contract bullet; CLAUDE.md CLI contract (new bullet
+  after `--project`) and JSON contract (scalars and status lists);
+  `skills/search-chat/SKILL.md` and `commands/search-chat.md` each gain the
+  "parser-coverage note, not missing conversations, mention when it bears on
+  the answer" paragraph.
+- Tests: `tests/postgresql/test_unknown_shapes.py` gains
+  `test_pending_shape_warnings_persist_on_every_reader_until_resolved`
+  (AC14 baseline empty, AC7 persistence across a no-run `index`, AC11 pins:
+  three scalars, `roots` the only list, no `unknown_shapes` on search, lists on
+  status; exact warning key set; no decoy value anywhere in the envelope;
+  human lines after the last result on search, on status) and
+  `test_one_shape_across_files_is_one_warning_with_summed_counts` (AC8: 7
+  records in 5 files, lowest example). `tests/test_cli.py` pins the
+  one-line format. `test_cli_journey.py` superset gains the three scalars and
+  its two `warnings == []` pins now assert exactly the three silent-family
+  shapes the modern Codex fixture carries (`turn_context`, `world_state`,
+  `compacted`) and the status lists. `test_refresh.py`'s appended-shape test
+  now expects the blocked shape's warning beside `source_refresh_failed`.
+
+Red evidence: `KeyError: 'unknown_shape_records'` on the baseline coverage and
+the missing `_unknown_shape_line` formatter.
+
+Deadline probe (design Decision 4): production database (`service=cc_search_chats`,
+schema 11, 4,239 `source_file_current` rows, 0 failure rows) does not yet have
+the migration-12 columns, so a read-only `EXPLAIN (ANALYZE, BUFFERS)` ran the
+same aggregate with `parser_state` standing in for `unknown_shapes` (one
+synthetic entry per row, 258 distinct groups, more than any real shape count)
+and `failure_detail` for `failure_shape`. Result: Sort + GroupAggregate, both
+quicksorts in memory (682 kB and 2,666 kB), `Buffers: shared hit=726 read=19`,
+no temporary blocks, planning 0.9 ms, execution 82.9 ms. The plan's claim that
+`docs/runbooks/postgresql-index-maintenance.md` requires this probe did not
+resolve (no such sentence exists); the probe is recorded here on the design's
+authority instead.
+
+Green evidence (2026-10-24, this checkout):
+
+- `uv run --frozen pytest -q -m postgresql` → 167 passed (after the two
+  intended pin updates above).
+- `uv run --frozen pytest -q -m 'not postgresql'` → 1025 passed.
+- `ruff check`, `ruff format --check`, `ty check`: passed; `complexipy`
+  watermark passed, snapshot unchanged; `vulture` exit 0.

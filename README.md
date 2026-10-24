@@ -221,6 +221,16 @@ command writes one stdout object containing:
   parser (`retry_after_parser_update`), temporary failures (`retryable_failures`),
   and failures needing investigation (`needs_attention`). A parser update makes
   a source eligible for retry; only a subsequent successful index clears it
+- `coverage.unknown_shape_records`, `coverage.unknown_shapes_pending`, and
+  `coverage.unknown_shapes_acknowledged` count native record shapes the parsers
+  do not recognise, derived from current rows. Every command carries one
+  `unknown_record_shape` warning per pending shape (provider, record path,
+  sorted key names, record and file counts, first example coordinates,
+  `dispositions` of `blocked` or `ignored`, parser version); the warning persists
+  across unchanged runs until a parser release registers the shape or the
+  operator acknowledges it. `index --status` additionally lists
+  `unknown_shapes.pending` and `unknown_shapes.acknowledged`; search does not
+  carry that list. Key names only are reported, never values
 - `refresh.corpus_generation`, `semantic.semantic_build`,
   `semantic.corpus_generation`, and their state/progress fields; semantic
   search also reports `semantic.model_load_ms`, `semantic.query_embed_ms`, and

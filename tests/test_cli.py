@@ -2456,3 +2456,25 @@ def test_index_reexec_preserves_the_ignore_unknown_records_flag(
     command = launched[0]
     separator = command.index("--")
     assert command[separator + 3 :] == argv
+
+
+def test_unknown_shape_line_renders_the_one_line_form() -> None:
+    warning = {
+        "code": "unknown_record_shape",
+        "provider": "codex",
+        "record_path": "response_item/additional_tools",
+        "keys": ["id", "role", "tools", "type"],
+        "record_count": 7,
+        "file_count": 5,
+        "first_source_root_id": "root",
+        "first_source_file_relative": "2026/10/23/rollout.jsonl",
+        "first_source_line": 3,
+        "dispositions": ["blocked", "ignored"],
+        "parser_state_version": 7,
+    }
+
+    assert cli_module._unknown_shape_line(warning) == (
+        "unknown shape codex response_item/additional_tools "
+        "{id, role, tools, type}: 7 records in 5 files, "
+        "first 2026/10/23/rollout.jsonl:3, blocked, ignored"
+    )
