@@ -2478,3 +2478,50 @@ def test_unknown_shape_line_renders_the_one_line_form() -> None:
         "{id, role, tools, type}: 7 records in 5 files, "
         "first 2026/10/23/rollout.jsonl:3, blocked, ignored"
     )
+
+
+def test_index_with_invalid_acknowledgement_file_exits_2_before_scope_or_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    argv_log = _install_fake_systemd_run(tmp_path, monkeypatch)
+    _prepare_postgres_index_main(monkeypatch, "--json")
+    config = tmp_path / "xdg" / "cc-search-chats"
+    config.mkdir(parents=True)
+    (config / "acknowledged-shapes.toml").write_text(
+        '[[shape]]\nprovider = "gemini"\nrecord_path = "x"\nkeys = ["a"]\n'
+        'note = "n"\nacknowledged = 2026-10-24\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    with pytest.raises(SystemExit, match="2"):
+        main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "configuration_invalid"
+    assert payload["error"]["code"] == "acknowledged_shapes_invalid"
+    assert "shape[0].provider" in payload["error"]["message"]
+    assert payload["error"]["path"].endswith("cc-search-chats/acknowledged-shapes.toml")
+    assert not argv_log.exists()
+
+
+def test_index_status_never_reads_the_acknowledgement_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_postgres_index_main(monkeypatch, "--status", "--json")
+    config = tmp_path / "xdg" / "cc-search-chats"
+    config.mkdir(parents=True)
+    (config / "acknowledged-shapes.toml").write_text("not toml [", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    reached: list[str] = []
+    monkeypatch.setattr(
+        cli_module, "_handle_postgres", lambda *_args: reached.append("db") or 0
+    )
+
+    with pytest.raises(SystemExit, match="0"):
+        main()
+
+    assert reached == ["db"]

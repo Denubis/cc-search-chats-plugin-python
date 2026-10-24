@@ -56,6 +56,7 @@ from cc_search_chats.storage.postgresql.semantic import (
 if TYPE_CHECKING:
     from enum import StrEnum
 
+    from cc_search_chats.core.acknowledged_shapes import AcknowledgedShape
     from cc_search_chats.core.record_shape import RecordShape
 
 _RETAINED_REFRESH_RUNS = 100
@@ -157,6 +158,77 @@ class _Checkpoint:
 type _ShapeEntries = dict[str, dict[str, object]]
 """Per-file unknown shapes keyed by digest: shape, count, first coordinates."""
 
+type _Acknowledgements = Mapping[str, tuple[str, str]]
+"""Acknowledged shape digests to their (note, ISO date)."""
+
+
+def _acknowledgements(
+    acknowledged_shapes: Sequence[AcknowledgedShape],
+) -> dict[str, tuple[str, str]]:
+    return {
+        entry.shape.digest: (entry.note, entry.acknowledged.isoformat())
+        for entry in acknowledged_shapes
+    }
+
+
+def _apply_acknowledgements(
+    entries: _ShapeEntries, acknowledgements: _Acknowledgements
+) -> None:
+    """Stamp each entry's disposition from the operator file, in place."""
+    for digest, entry in entries.items():
+        acknowledgement = acknowledgements.get(digest)
+        if acknowledgement is None:
+            entry.pop("note", None)
+            entry.pop("acknowledged", None)
+            entry["disposition"] = "ignored"
+        else:
+            entry["disposition"] = "acknowledged"
+            entry["note"], entry["acknowledged"] = acknowledgement
+
+
+def _stamp_current_acknowledgements(
+    connection: psycopg.Connection, acknowledgements: _Acknowledgements
+) -> None:
+    """Re-stamp dispositions on every current checkpoint without reparsing."""
+    digests = list(acknowledgements)
+    connection.execute(
+        """
+        WITH acknowledged AS (
+            SELECT * FROM unnest(%s::text[], %s::text[], %s::text[])
+                AS value(digest, note, acknowledged)
+        ),
+        rebuilt AS (
+            SELECT source.source_root_id, source.source_file_relative,
+                   jsonb_object_agg(
+                       entry.key,
+                       CASE WHEN acknowledged.digest IS NOT NULL
+                            THEN entry.value || jsonb_build_object(
+                                'disposition', 'acknowledged',
+                                'note', acknowledged.note,
+                                'acknowledged', acknowledged.acknowledged)
+                            ELSE (entry.value - 'note' - 'acknowledged')
+                                 || jsonb_build_object('disposition', 'ignored')
+                       END
+                   ) AS unknown_shapes
+            FROM cc_search_chats.source_file_current AS source
+            CROSS JOIN LATERAL jsonb_each(source.unknown_shapes) AS entry
+            LEFT JOIN acknowledged ON acknowledged.digest = entry.key
+            GROUP BY source.source_root_id, source.source_file_relative
+        )
+        UPDATE cc_search_chats.source_file_current AS source
+        SET unknown_shapes = rebuilt.unknown_shapes
+        FROM rebuilt
+        WHERE (source.source_root_id, source.source_file_relative) =
+              (rebuilt.source_root_id, rebuilt.source_file_relative)
+          AND source.unknown_shapes IS DISTINCT FROM rebuilt.unknown_shapes
+        """,
+        (
+            digests,
+            [acknowledgements[digest][0] for digest in digests],
+            [acknowledgements[digest][1] for digest in digests],
+        ),
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class _ObservedSource:
@@ -183,6 +255,7 @@ class _SourcePlan:
     prior_skipped_record_count: int
     prior_unknown_shapes: Mapping[str, object] = field(default_factory=dict)
     ignore_unknown_records: bool = False
+    acknowledgements: _Acknowledgements = field(default_factory=dict)
 
     @property
     def adapter(self) -> ProviderAdapter:
@@ -1506,11 +1579,13 @@ def _parse_and_stage_source(
                 None,
                 0,
                 ignore_unknown_records=plan.ignore_unknown_records,
+                acknowledgements=plan.acknowledgements,
             ),
         )
     final_size = _verified_final_size(observed)
     unknown_shapes = _shape_entries(plan.prior_unknown_shapes)
     _merge_shape_entries(unknown_shapes, parsed.unknown_shapes)
+    _apply_acknowledgements(unknown_shapes, plan.acknowledgements)
     advanced, pending = _stage_source_checkpoint(
         connection,
         plan,
@@ -2467,6 +2542,7 @@ def refresh_native_sources(
     progress: ProgressCallback | None = None,
     force_retry: bool = False,
     ignore_unknown_records: bool = False,
+    acknowledged_shapes: Sequence[AcknowledgedShape] = (),
     _candidate_publisher: Callable[..., int] | None = None,
     _require_publication: bool = False,
 ) -> RefreshResult:
@@ -2497,8 +2573,13 @@ def refresh_native_sources(
             )
         )
         blocked_keys = {value.key for value in blocked_observations}
+        acknowledgements = _acknowledgements(acknowledged_shapes)
         plans = tuple(
-            dataclasses.replace(plan, ignore_unknown_records=ignore_unknown_records)
+            dataclasses.replace(
+                plan,
+                ignore_unknown_records=ignore_unknown_records,
+                acknowledgements=acknowledgements,
+            )
             for value in observed
             if value.key not in blocked_keys
             and (plan := _plan_source(value, checkpoints.get(value.key))) is not None
@@ -2518,6 +2599,7 @@ def refresh_native_sources(
                 discovered_keys,
                 complete_roots,
             )
+            _stamp_current_acknowledgements(connection, acknowledgements)
         current_revision, current_messages = _current_result_values(connection)
         if (
             not plans
@@ -2803,6 +2885,7 @@ def index_corpus(
     batch_size: int = 4,
     force_retry: bool = False,
     ignore_unknown_records: bool = False,
+    acknowledged_shapes: Sequence[AcknowledgedShape] = (),
 ) -> CorpusIndexResult:
     """Prepare and jointly publish one coherent literal and semantic corpus."""
     require_current_schema(connection)
@@ -2903,6 +2986,7 @@ def index_corpus(
         progress=progress,
         force_retry=force_retry,
         ignore_unknown_records=ignore_unknown_records,
+        acknowledged_shapes=acknowledged_shapes,
         _candidate_publisher=publish_candidate,
         _require_publication=selected_before is None,
     )

@@ -1,13 +1,5 @@
 # Pending work
 
-## Outcome 4: Acknowledgement file
-- [ ] Red: AC9, AC10, AC12 tests; parser validation tests.
-- [ ] `core/acknowledged_shapes.py` with `tomllib`.
-- [ ] Index-time load before session/scope; exit 2 on invalid; stamping and
-      revert in refresh; reader exclusion.
-- [ ] `docs/examples/acknowledged-shapes.toml`; runbook section; pointer.
-- [ ] Gates green; checkpoint commit.
-
 ## Outcome 5: Decisions, contracts, release metadata
 - [ ] ADR 0009 and register entry; ADR 0003 pointer; Antigravity row note.
 - [ ] Reconcile CLAUDE.md, README, skill, command, runbooks, architecture.

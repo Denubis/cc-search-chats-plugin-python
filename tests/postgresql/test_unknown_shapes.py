@@ -341,3 +341,188 @@ def test_one_shape_across_files_is_one_warning_with_summed_counts(
     assert payload["coverage"]["unknown_shapes_pending"] == 1
     assert payload["coverage"]["completeness"] == "complete"
     assert _other_warnings(payload) == []
+
+
+_ACK_KEYS = [
+    "ordinal",
+    "payload",
+    "timestamp",
+    "type",
+    "payload.id",
+    "payload.text",
+    "payload.type",
+]
+
+
+def _acknowledgement(record_path: str, keys: list[str]) -> str:
+    quoted = ", ".join(f'"{key}"' for key in keys)
+    return (
+        "[[shape]]\n"
+        'provider = "codex"\n'
+        f'record_path = "{record_path}"\n'
+        f"keys = [{quoted}]\n"
+        'note = "synthetic acknowledgement"\n'
+        "acknowledged = 2026-10-24\n"
+    )
+
+
+@pytest.fixture
+def acknowledgement_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    config = tmp_path / "xdg" / "cc-search-chats"
+    config.mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    return config / "acknowledged-shapes.toml"
+
+
+def test_acknowledged_shape_stops_warning_but_stays_counted(
+    cli_corpus,
+    acknowledgement_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC9: acknowledge, re-warn on an extra key, revert on removal."""
+    claude_root, codex_day, _antigravity_root = cli_corpus
+    shutil.copy(FIXTURES / "claude_primary.jsonl", claude_root / "clean.jsonl")
+    fixture_records = (
+        (FIXTURES / "codex_modern_primary_145.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    (codex_day / "rollout-ack.jsonl").write_bytes(
+        fixture_records[0]
+        + fixture_records[3]
+        + _unknown_item(2, "ack_item_kind")
+        + fixture_records[5]
+    )
+    code, _migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
+    assert code == 0
+    code, first = _run(
+        monkeypatch, capsys, "index", "--ignore-unknown-records", "--json"
+    )
+    assert code == 0, (first.out, first.err)
+    assert json.loads(first.out)["coverage"]["unknown_shapes_pending"] == 1
+
+    acknowledgement_file.write_text(
+        _acknowledgement("response_item/ack_item_kind", _ACK_KEYS), encoding="utf-8"
+    )
+    code, acknowledged = _run(monkeypatch, capsys, "index", "--json")
+    assert code == 0, (acknowledged.out, acknowledged.err)
+    acknowledged_payload = json.loads(acknowledged.out)
+    assert acknowledged_payload["refresh"]["run_id"] is None
+    assert _shape_warnings(acknowledged_payload) == []
+    coverage = acknowledged_payload["coverage"]
+    assert coverage["unknown_shape_records"] == 1
+    assert coverage["unknown_shapes_pending"] == 0
+    assert coverage["unknown_shapes_acknowledged"] == 1
+    code, status = _run(monkeypatch, capsys, "index", "--status", "--json")
+    assert code == 0
+    status_payload = json.loads(status.out)
+    assert status_payload["unknown_shapes"]["pending"] == []
+    [entry] = status_payload["unknown_shapes"]["acknowledged"]
+    assert entry["record_path"] == "response_item/ack_item_kind"
+    assert entry["dispositions"] == ["acknowledged"]
+    assert entry["note"] == "synthetic acknowledgement"
+    assert entry["acknowledged"] == "2026-10-24"
+    assert entry["record_count"] == 1
+    code, searched = _run(
+        monkeypatch, capsys, "search", "modern visible", "--literal", "--json"
+    )
+    assert code == 0
+    assert _shape_warnings(json.loads(searched.out)) == []
+    code, human = _run(monkeypatch, capsys, "index", "--status")
+    assert code == 0
+    assert "unknown shape " not in human.out
+
+    extended = {
+        "timestamp": "2026-08-11T03:00:02Z",
+        "type": "response_item",
+        "ordinal": 2,
+        "payload": {
+            "type": "ack_item_kind",
+            "id": "fi_extended",
+            "text": "cli-decoy-rue",
+            "extra": True,
+        },
+    }
+    (codex_day / "rollout-extended.jsonl").write_bytes(
+        fixture_records[0]
+        + fixture_records[3]
+        + json.dumps(extended, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+        + fixture_records[5]
+    )
+    code, extended_run = _run(
+        monkeypatch, capsys, "index", "--ignore-unknown-records", "--json"
+    )
+    assert code == 0, (extended_run.out, extended_run.err)
+    extended_payload = json.loads(extended_run.out)
+    [warning] = _shape_warnings(extended_payload)
+    assert warning["record_path"] == "response_item/ack_item_kind"
+    assert "payload.extra" in warning["keys"]
+    assert extended_payload["coverage"]["unknown_shapes_pending"] == 1
+    assert extended_payload["coverage"]["unknown_shapes_acknowledged"] == 1
+    assert extended_payload["coverage"]["unknown_shape_records"] == 2
+
+    acknowledgement_file.unlink()
+    code, reverted = _run(monkeypatch, capsys, "index", "--json")
+    assert code == 0, (reverted.out, reverted.err)
+    reverted_payload = json.loads(reverted.out)
+    assert reverted_payload["refresh"]["run_id"] is None
+    assert len(_shape_warnings(reverted_payload)) == 2
+    assert reverted_payload["coverage"]["unknown_shapes_acknowledged"] == 0
+    code, status = _run(monkeypatch, capsys, "index", "--status", "--json")
+    assert code == 0
+    pending = json.loads(status.out)["unknown_shapes"]["pending"]
+    assert len(pending) == 2
+    assert all("note" not in entry for entry in pending)
+
+
+def test_readers_never_open_the_acknowledgement_file(
+    cli_corpus,
+    acknowledgement_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC12 and AC10: readers succeed with an unreadable file; index fails closed."""
+    claude_root, codex_day, _antigravity_root = cli_corpus
+    shutil.copy(FIXTURES / "claude_primary.jsonl", claude_root / "clean.jsonl")
+    _codex_source_with_unknown_item(codex_day, "rollout-unknown.jsonl")
+    code, _migrated = _run(monkeypatch, capsys, "index", "--migrate", "--json")
+    assert code == 0
+    code, indexed = _run(
+        monkeypatch, capsys, "index", "--ignore-unknown-records", "--json"
+    )
+    assert code == 0, (indexed.out, indexed.err)
+    acknowledgement_file.write_text(
+        _acknowledgement("response_item/future_item_kind", _ACK_KEYS), encoding="utf-8"
+    )
+    acknowledgement_file.chmod(0)
+    try:
+        code, searched = _run(
+            monkeypatch, capsys, "search", "modern visible", "--literal", "--json"
+        )
+        assert code == 0, (searched.out, searched.err)
+        locator = json.loads(searched.out)["results"][0]["locator"]
+        for arguments in (
+            ("extract", "codex-modern-primary", "--provider", "codex", "--json"),
+            ("resolve", locator, "--json"),
+            (
+                "events",
+                "--from",
+                "2026-08-11T00:00:00Z",
+                "--until",
+                "2026-08-12T00:00:00Z",
+                "--json",
+            ),
+            ("index", "--status", "--json"),
+        ):
+            code, output = _run(monkeypatch, capsys, *arguments)
+            assert code == 0, (arguments, output.out, output.err)
+
+        code, refused = _run(monkeypatch, capsys, "index", "--json")
+        assert code == 2, (refused.out, refused.err)
+        refused_payload = json.loads(refused.out)
+        assert refused_payload["status"] == "configuration_invalid"
+        assert refused_payload["error"]["code"] == "acknowledged_shapes_invalid"
+    finally:
+        acknowledgement_file.chmod(0o600)

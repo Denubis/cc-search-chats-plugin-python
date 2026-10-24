@@ -1,0 +1,29 @@
+# Example only. The live file is operator-owned and lives at
+# $XDG_CONFIG_HOME/cc-search-chats/acknowledged-shapes.toml
+# (default ~/.config/cc-search-chats/acknowledged-shapes.toml); keep it in
+# your own git so both machines agree after a pull. The project never ships a
+# live list. See docs/runbooks/postgresql-index-maintenance.md,
+# "Acknowledge an unknown shape".
+#
+# Each [[shape]] names one unknown record shape exactly as `index --status`
+# reports it: provider, record_path, and the full sorted key list, which is the
+# unit's own key names followed by the `payload.`-prefixed key names of its
+# nested payload. Matching is exact: an added or removed key is a new shape
+# and warns again. Every field is required; unknown fields fail the run.
+
+[[shape]]
+provider = "codex"
+record_path = "response_item/additional_tools"
+keys = [
+  "metadata",
+  "ordinal",
+  "payload",
+  "timestamp",
+  "type",
+  "payload.id",
+  "payload.role",
+  "payload.tools",
+  "payload.type",
+]
+note = "Codex 0.164.0 developer-role tool definitions; no prose (illustration)"
+acknowledged = 2026-10-24

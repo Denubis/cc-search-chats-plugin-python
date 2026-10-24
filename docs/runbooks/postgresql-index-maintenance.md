@@ -66,7 +66,7 @@ Only after explicit production-migration authority, use the exact installed
 entrypoint. Migration is a separate command so a failed migration cannot be
 obscured by indexing output:
 
-First run the selected-pair inspection query in §5 and record that both statuses
+First run the selected-pair inspection query in §6 and record that both statuses
 are `complete`. If either is not, migration 10 clears the selection and the
 following `cc-search-chats index` republishes it. Do not run `index --migrate`
 while an index run is active on another host sharing the database; same-host
@@ -144,7 +144,48 @@ literal answer with named `literal_fallback` degradation if its query-time
 model/helper is unavailable; status must not claim the failed candidate is
 current.
 
-## 5. Recovery
+## 5. Acknowledge an unknown shape
+
+Every reader reports each unregistered native record shape as an
+`unknown_record_shape` warning until a parser release registers it or the
+operator acknowledges it (ADR 0009). Acknowledging says "I have looked at this
+one and do not care"; it stops the warning while keeping the records counted.
+
+The file is operator-owned, read only by `index`, and lives at
+`$XDG_CONFIG_HOME/cc-search-chats/acknowledged-shapes.toml` (default
+`~/.config/cc-search-chats/acknowledged-shapes.toml`). Keep it in your own git
+and pull it on the other machine; the project ships only the format and
+`docs/examples/acknowledged-shapes.toml`. Absent is valid and acknowledges
+nothing.
+
+1. Read the shape from `cc-search-chats index --status --json`
+   (`unknown_shapes.pending[]`: `provider`, `record_path`, `keys`, counts and
+   a first example) or from the one-line human form.
+2. Append one `[[shape]]` table with that exact `provider`, `record_path` and
+   `keys` list, a `note`, and an `acknowledged` date. Matching is exact on the
+   three fields; an added or removed key is a different shape and warns again
+   until acknowledged on its own.
+3. Run `cc-search-chats index`. The run stamps `acknowledged` on every current
+   occurrence without reparsing, so an unchanged corpus needs no new
+   generation. Search and status stop warning for it; it stays in
+   `coverage.unknown_shape_records` and in `unknown_shapes.acknowledged` with
+   its note and date. On the other machine, pull the file and run `index`.
+4. Removing an entry reverts its occurrences to `ignored` on the next run and
+   it warns again.
+
+Failure behaviour: a file that is not valid TOML, an entry missing a field or
+carrying an unknown one, an unknown provider, an empty or unsorted `keys`
+list, a non-date `acknowledged`, a duplicate shape, or an unreadable file makes
+`index` exit 2 with `configuration_invalid` and a message naming the entry and
+field, before the systemd scope is created and before any database write. The
+nightly timer fails the same way until the file is fixed; `index --status`,
+`search` and the other readers never open the file and keep reporting the
+previous state. Blocked shapes (`dispositions` contains `blocked`) cannot be
+acknowledged: a blocked file is outside the index until a parser release or a
+flagged run (`index --ignore-unknown-records`, or
+`CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1` in `index.env`).
+
+## 6. Recovery
 
 - **Migration checksum mismatch:** installed code and recorded history disagree.
   Restore the exact matching candidate or add a new migration; never edit
@@ -203,7 +244,7 @@ current CLI has no supported path to perform that rebuild. Do not edit
 `embedding_profile` by hand; schedule and review the rebuild mechanism as a
 separate change before changing the pinned model.
 
-## 6. Legacy prune gate
+## 7. Legacy prune gate
 
 Legacy relations are quarantine, not query state. There is intentionally no
 ordinary CLI prune flag. The reviewed library boundary is:
@@ -232,7 +273,7 @@ the prune path.
 The production invocation must be written/reviewed only after prune authority;
 this runbook deliberately does not make the destructive API pasteable.
 
-## 7. Post-prune proof
+## 8. Post-prune proof
 
 Record removed relations and remaining recovery. Repeat current message, alias,
 chunk, vector, generation, foreign-key, semantic-join, relation-size,

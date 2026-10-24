@@ -22,6 +22,11 @@ from typing import TYPE_CHECKING, Never, TextIO, TypedDict, cast
 import psycopg
 
 from cc_search_chats import __version__
+from cc_search_chats.core.acknowledged_shapes import (
+    AcknowledgedShapesError,
+    acknowledged_shapes_path,
+    load_acknowledged_shapes,
+)
 from cc_search_chats.core.discovery import (
     decode_project_path,
     encode_project_path,
@@ -1762,6 +1767,7 @@ def _postgres_index_run(context: _PostgresContext) -> int:
             ignore_unknown_records=_index_ignore_unknown_records(
                 context.args, os.environ
             ),
+            acknowledged_shapes=context.args.acknowledged_shapes,
         )
     progress.complete(result)
     envelope = context.finish(
@@ -2894,7 +2900,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show semantic indexing checkpoint without doing work",
     )
-    index_parser.set_defaults(func=_handle_index)
+    index_parser.set_defaults(func=_handle_index, acknowledged_shapes=())
 
     # context
     context_parser = subparsers.add_parser(
@@ -3010,11 +3016,21 @@ def _postgres_admission_name(args: argparse.Namespace) -> str | None:
     return "read"
 
 
+def _index_run_requested(args: argparse.Namespace) -> bool:
+    return args.command == "index" and not args.status and not args.migrate
+
+
 def _dispatch_postgres(
     args: argparse.Namespace,
     progress_stream: _ProgressStream,
 ) -> int:
     read_scope = _postgres_read_scope(args)
+    if _index_run_requested(args):
+        # Only the builder reads the operator file, and it does so before the
+        # systemd scope and before any database write; readers never open it.
+        args.acknowledged_shapes = load_acknowledged_shapes(
+            acknowledged_shapes_path(os.environ, home=Path.home())
+        )
     _contain_semantic_index(args)
     admission_name = _postgres_admission_name(args)
     with read_scope:
@@ -3091,6 +3107,20 @@ def _run_postgres_cli(args: argparse.Namespace) -> Never:
     progress_stream = _ProgressStream(args)
     try:
         sys.exit(_dispatch_postgres(args, progress_stream))
+    except AcknowledgedShapesError as error:
+        _exit_with_error(
+            args,
+            progress_stream,
+            "configuration_invalid",
+            {
+                "code": "acknowledged_shapes_invalid",
+                "phase": "configuration",
+                "message": error.detail,
+                "path": str(error.path),
+            },
+            2,
+            human_message=f"acknowledged shapes file rejected: {error}",
+        )
     except SystemdScopeUnavailable as error:
         _exit_with_error(
             args,

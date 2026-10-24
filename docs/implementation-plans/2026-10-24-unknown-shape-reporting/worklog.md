@@ -197,3 +197,69 @@ Green evidence (2026-10-24, this checkout):
 - `uv run --frozen pytest -q -m 'not postgresql'` → 1025 passed.
 - `ruff check`, `ruff format --check`, `ty check`: passed; `complexipy`
   watermark passed, snapshot unchanged; `vulture` exit 0.
+
+## Outcome 4: Operator acknowledgement file (2026-10-24)
+
+Changed surfaces:
+
+- New `core/acknowledged_shapes.py`: `acknowledged_shapes_path` (honours
+  `XDG_CONFIG_HOME`, empty value falls back to `~/.config`),
+  `parse_acknowledged_shapes` via `tomllib` with closed validation naming
+  `shape[i].field` (only `[[shape]]` at top level; required fields provider,
+  record_path, keys, note, acknowledged; unknown fields, unknown provider,
+  empty/non-string/unsorted keys via `RecordShape`'s own rule, non-date
+  `acknowledged`, duplicates all fail), `load_acknowledged_shapes` (absent →
+  empty; unreadable → fails closed), `AcknowledgedShapesError` carrying the
+  path.
+- `cli.py`: `_dispatch_postgres` loads the file only for an `index` run (not
+  `--status`/`--migrate`), before the containment re-exec and before any
+  connection, onto `args.acknowledged_shapes` (argparse default `()` so direct
+  callers of `_handle_postgres` agree); `AcknowledgedShapesError` exits 2 with
+  status `configuration_invalid`, code `acknowledged_shapes_invalid`, the
+  message and path; `_postgres_index_run` passes the set to `index_corpus`.
+- `refresh.py`: `index_corpus`/`refresh_native_sources(acknowledged_shapes=)`;
+  `_stamp_current_acknowledgements` runs one UPDATE over current checkpoints
+  at the start of every run (inside the roots transaction, so an unchanged
+  corpus needs no generation), stamping matching digests `acknowledged` with
+  note and date and reverting everything else to `ignored` with those fields
+  removed, writing only rows whose map actually changes;
+  `_apply_acknowledgements` stamps a file's merged map before its checkpoint
+  is staged. Blocked failure rows are never stamped.
+- `unknown_shapes.py`: summary carries `note` and `acknowledged`
+  (`max()` over entries); `as_json` includes them only for non-pending shapes,
+  so warnings keep their exact key set.
+- Docs: `docs/examples/acknowledged-shapes.toml` (example only, full
+  fingerprint keys); runbook section "5. Acknowledge an unknown shape" in
+  `postgresql-index-maintenance.md` (later sections renumbered, the one `§5`
+  cross-reference to the selected-pair query updated to `§6`); pointer from
+  `laptop-deployment.md`'s configuration paragraph.
+- Tests: `tests/test_acknowledged_shapes.py` (17: valid parse, empty/absent,
+  load, unreadable, twelve malformed cases naming the entry, XDG path);
+  `tests/test_cli.py` exit-2 path with no scope created and no database call,
+  and `index --status` never reading a broken file;
+  `tests/postgresql/test_unknown_shapes.py` AC9 lifecycle
+  (`test_acknowledged_shape_stops_warning_but_stays_counted`: no run created,
+  warning gone, pending 0 / acknowledged 1 / records 1, status entry with note
+  and date, human status quiet, extra-key shape re-warns as distinct, removal
+  reverts and drops notes) and AC12/AC10
+  (`test_readers_never_open_the_acknowledgement_file`: 000-mode file; search,
+  extract, resolve, events and `index --status` exit 0; `index` exits 2).
+
+Red evidence: parser tests failed at collection (module absent); the CLI
+tests failed on the missing gate; the PostgreSQL lifecycle test failed because
+the warning persisted after acknowledgement and `index` exited 0 on the
+unreadable file.
+
+A full-suite run then exposed one regression: `test_composed_index_holds_the_database_queue_through_embedding`
+calls `_handle_postgres` directly with parsed args, so `args.acknowledged_shapes`
+was missing and the index thread died before embedding. Fixed by the argparse
+default; the test passes again.
+
+Green evidence (2026-10-24, this checkout):
+
+- `uv run --frozen pytest -q -m postgresql` → 169 passed.
+- `uv run --frozen pytest -q -m 'not postgresql'` → 1044 passed
+  (`tests/test_cli.py` alone: 111 passed after the fix).
+- `ruff check`, `ruff format --check`, `ty check`: passed; `complexipy`
+  watermark passed, snapshot unchanged; `vulture` exit 0; `pre-commit
+  validate-config` ok.

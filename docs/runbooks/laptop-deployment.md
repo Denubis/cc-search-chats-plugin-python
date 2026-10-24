@@ -189,7 +189,10 @@ run index around unregistered record shapes instead of blocking whole files
 record is counted and reported by shape, and a flagged run retries files that an
 earlier run blocked on such a shape. This is operator policy, not a packaged
 default: the unit ships without it, and identity, payload and admission
-failures still block with it set.
+failures still block with it set. The operator's acknowledgement file for
+shapes already looked at lives beside it as `acknowledged-shapes.toml`; its
+format and lifecycle are in `docs/runbooks/postgresql-index-maintenance.md`,
+"Acknowledge an unknown shape".
 
 ## Clean install or rebuild
 

@@ -30,6 +30,8 @@ class UnknownShapeReport:
     first_source_line: int
     dispositions: tuple[str, ...]
     parser_state_version: int
+    note: str | None = None
+    acknowledged: str | None = None
 
     @property
     def pending(self) -> bool:
@@ -51,6 +53,11 @@ class UnknownShapeReport:
             "first_source_line": self.first_source_line,
             "dispositions": list(self.dispositions),
             "parser_state_version": self.parser_state_version,
+            **(
+                {"note": self.note, "acknowledged": self.acknowledged}
+                if not self.pending
+                else {}
+            ),
         }
 
     def as_warning(self) -> dict[str, object]:
@@ -66,7 +73,9 @@ WITH per_file AS (
            source.source_file_relative,
            (entry.value ->> 'first_line')::bigint AS first_line,
            entry.value ->> 'disposition' AS disposition,
-           source.parser_state_version
+           source.parser_state_version,
+           entry.value ->> 'note' AS note,
+           entry.value ->> 'acknowledged' AS acknowledged
     FROM cc_search_chats.source_file_current AS source
     CROSS JOIN LATERAL jsonb_each(source.unknown_shapes) AS entry
     UNION ALL
@@ -76,7 +85,9 @@ WITH per_file AS (
            failure.source_file_relative,
            failure.failure_source_line,
            'blocked',
-           failure.parser_state_version
+           failure.parser_state_version,
+           NULL,
+           NULL
     FROM cc_search_chats.source_failure_current AS failure
     WHERE failure.failure_shape IS NOT NULL
 )
@@ -90,7 +101,9 @@ SELECT shape,
        (array_agg(first_line
                   ORDER BY source_root_id, source_file_relative, first_line))[1],
        array_agg(DISTINCT disposition ORDER BY disposition),
-       max(parser_state_version)
+       max(parser_state_version),
+       max(note),
+       max(acknowledged)
 FROM per_file
 GROUP BY shape
 ORDER BY shape ->> 'provider', shape ->> 'record_path', shape::text
@@ -111,6 +124,8 @@ def unknown_shape_summary(
             first_source_line=int(first_line),
             dispositions=tuple(dispositions),
             parser_state_version=int(parser_state_version),
+            note=note,
+            acknowledged=acknowledged,
         )
         for (
             shape,
@@ -121,5 +136,7 @@ def unknown_shape_summary(
             first_line,
             dispositions,
             parser_state_version,
+            note,
+            acknowledged,
         ) in connection.execute(_SUMMARY_SQL)
     )
