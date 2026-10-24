@@ -1,16 +1,5 @@
 # Pending work
 
-## Outcome 2: Ignore mode
-- [ ] Red: AC3, AC4, AC5 PostgreSQL tests; CLI flag/env tests (AC13).
-- [ ] `index --ignore-unknown-records` and
-      `CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS`; plumb to `index_corpus`,
-      `refresh_native_sources`, `_SourcePlan`.
-- [ ] `_parse_batch` and `_stage_parsed_batch` ignore-mode behaviour;
-      `ignored_unknown_record_count` on the run.
-- [ ] Prove the unit is byte-identical; `--help` text; runbook `index.env`
-      paragraph.
-- [ ] Gates green; checkpoint commit.
-
 ## Outcome 3: Reporting
 - [ ] Red: AC7, AC8, AC11, AC14-baseline tests; human line format test.
 - [ ] `unknown_shape_summary` aggregate (SQL group by digest).

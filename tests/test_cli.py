@@ -2413,3 +2413,46 @@ class TestVerboseFlag:
         except SystemExit:
             pass
         assert "--verbose" in stdout_buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("argv", "environ", "expected"),
+    [
+        (["index"], {}, False),
+        (["index", "--ignore-unknown-records"], {}, True),
+        (["index"], {"CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS": "1"}, True),
+        (["index"], {"CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS": "0"}, False),
+        (["index"], {"CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS": ""}, False),
+        (
+            ["index", "--ignore-unknown-records"],
+            {"CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS": "0"},
+            True,
+        ),
+    ],
+)
+def test_index_ignore_unknown_records_resolves_from_flag_or_variable(
+    argv: list[str], environ: dict[str, str], *, expected: bool
+) -> None:
+    args = build_parser().parse_args(argv)
+
+    assert cli_module._index_ignore_unknown_records(args, environ) is expected
+
+
+def test_index_reexec_preserves_the_ignore_unknown_records_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_systemd_run(tmp_path, monkeypatch)
+    argv = ["cc-search-chats", "index", "--ignore-unknown-records"]
+    args = build_parser().parse_args(argv[1:])
+    monkeypatch.setattr(sys, "argv", argv)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(
+        "os.execvp", lambda _executable, command: launched.append(command)
+    )
+
+    _contain_semantic_index(args)
+
+    command = launched[0]
+    separator = command.index("--")
+    assert command[separator + 3 :] == argv

@@ -3410,3 +3410,253 @@ def test_composed_index_waits_for_the_shared_index_owner(
         assert reported_wait
         assert still_pending
         assert pending.result(timeout=6).embedding_count == 0
+
+
+_IGNORE_DECOYS = (
+    "ignore-decoy-string-teasel",
+    "ignore-decoy-nested-yarrow",
+    "ignore-decoy-list-sedge",
+)
+
+
+def _codex_unknown_item_record(ordinal: int) -> bytes:
+    record = {
+        "timestamp": "2026-08-11T03:00:02Z",
+        "type": "response_item",
+        "ordinal": ordinal,
+        "payload": {
+            "type": "future_item_kind",
+            "id": "fi_synthetic",
+            "text": _IGNORE_DECOYS[0],
+            "nested": {"content": _IGNORE_DECOYS[1]},
+            "parts": [{"text": _IGNORE_DECOYS[2]}],
+        },
+    }
+    return json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def _assert_nothing_stored_from(connection: psycopg.Connection, decoys) -> None:
+    stored = [
+        text
+        for (text,) in connection.execute(
+            "SELECT prose_content FROM cc_search_chats.message_current"
+        )
+    ]
+    modes = [(agents, tools) for agents in (False, True) for tools in (False, True)]
+    for decoy in decoys:
+        assert not any(decoy in text for text in stored), decoy
+        for agents, tools in modes:
+            assert (
+                _search_messages(
+                    connection, decoy, include_agents=agents, include_tools=tools
+                )
+                == ()
+            ), decoy
+            assert (
+                exhaustive_search_page(
+                    connection, decoy, include_agents=agents, include_tools=tools
+                ).hits
+                == ()
+            ), decoy
+
+
+def test_ignore_mode_indexes_around_an_unknown_response_item(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    """AC3: with the flag, prose on both sides is indexed and the record is counted."""
+    codex_root = tmp_path / "codex"
+    day = codex_root / "2026" / "10" / "24"
+    day.mkdir(parents=True)
+    fixture_records = (
+        (FIXTURES / "codex_modern_primary_145.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    source = day / "rollout-ignored.jsonl"
+    source.write_bytes(
+        fixture_records[0]
+        + fixture_records[3]
+        + _codex_unknown_item_record(2)
+        + fixture_records[5]
+    )
+    root = _source_root(Provider.CODEX, codex_root)
+
+    blocked = inspect_native_sources(postgres_connection, source_roots=(root,))
+    assert blocked.blocked_source_count == 1
+
+    result = refresh_native_sources(
+        postgres_connection, source_roots=(root,), ignore_unknown_records=True
+    )
+
+    assert result.blocked_source_count == 0
+    assert result.failed_source_count == 0
+    assert result.ignored_unknown_record_count == 1
+    coverage = _postgres_envelope(postgres_connection, "index", refresh_result=result)[
+        "coverage"
+    ]
+    assert isinstance(coverage, dict)
+    assert coverage["completeness"] == "complete"
+    assert coverage["blocked_files"] == 0
+    modes = [(agents, tools) for agents in (False, True) for tools in (False, True)]
+    for agents, tools in modes:
+        assert {
+            hit.text
+            for hit in _search_messages(
+                postgres_connection,
+                "modern visible",
+                include_agents=agents,
+                include_tools=tools,
+            )
+        } == {"modern visible user", "modern visible assistant"}
+    _assert_nothing_stored_from(postgres_connection, _IGNORE_DECOYS)
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.physical_alias_current "
+                "WHERE record_ordinal = 2"
+            )
+        )[0]
+        == 0
+    )
+    (unknown_shapes,) = next(
+        postgres_connection.execute(
+            "SELECT unknown_shapes FROM cc_search_chats.source_file_current"
+        )
+    )
+    [entry] = unknown_shapes.values()
+    assert entry["count"] == 1
+    assert entry["disposition"] == "ignored"
+    assert entry["first_ordinal"] == 2
+    assert entry["shape"]["record_path"] == "response_item/future_item_kind"
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT ignored_unknown_record_count FROM cc_search_chats.refresh_run "
+                "ORDER BY run_id DESC LIMIT 1"
+            )
+        )[0]
+        == 1
+    )
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.source_failure_current"
+            )
+        )[0]
+        == 0
+    )
+
+
+def test_ignore_mode_keeps_non_shape_failures_blocking(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    """AC4: identity and payload failures are not record shapes and still block."""
+    codex_root = tmp_path / "codex"
+    day = codex_root / "2026" / "10" / "24"
+    day.mkdir(parents=True)
+    fixture_records = (
+        (FIXTURES / "codex_modern_primary_145.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    identity_less_meta = {
+        "timestamp": "2026-08-11T03:00:00Z",
+        "type": "session_meta",
+        "payload": {"cwd": "/synthetic/repository"},
+    }
+    (day / "rollout-no-identity.jsonl").write_bytes(
+        json.dumps(identity_less_meta, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+        + fixture_records[3]
+    )
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    (claude_root / "no-uuid.jsonl").write_bytes(
+        json.dumps(
+            {"type": "user", "message": {"role": "user", "content": "no uuid here"}},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    roots = (
+        _source_root(Provider.CLAUDE, claude_root),
+        _source_root(Provider.CODEX, codex_root),
+    )
+
+    result = inspect_native_sources(
+        postgres_connection, source_roots=roots, ignore_unknown_records=True
+    )
+
+    assert result.blocked_source_count == 2
+    assert result.ignored_unknown_record_count == 0
+    assert {
+        code
+        for (code,) in postgres_connection.execute(
+            "SELECT failure_code FROM cc_search_chats.source_failure_current"
+        )
+    } == {"unsupported_session_identity", "missing_message_uuid"}
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.message_current"
+            )
+        )[0]
+        == 0
+    )
+
+
+def test_ignore_mode_batch_boundary_drops_only_the_unknown_ordinal(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC5: an unknown item ending a batch yields no alias and pairing still crosses."""
+    codex_root = tmp_path / "codex"
+    day = codex_root / "2026" / "10" / "24"
+    day.mkdir(parents=True)
+    fixture_records = (
+        (FIXTURES / "codex_modern_primary_145.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    # ordinals: 0 meta | 1 user response_item | 2 unknown || 3 user event | 4 assistant
+    source = day / "rollout-boundary.jsonl"
+    source.write_bytes(
+        fixture_records[0]
+        + fixture_records[3]
+        + _codex_unknown_item_record(2)
+        + fixture_records[4]
+        + fixture_records[5]
+    )
+    real_reader = refresh_module.read_bounded_jsonl
+
+    def three_record_batches(*args, **kwargs):
+        kwargs["max_records_per_batch"] = 3
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(refresh_module, "read_bounded_jsonl", three_record_batches)
+    root = _source_root(Provider.CODEX, codex_root)
+
+    result = refresh_native_sources(
+        postgres_connection, source_roots=(root,), ignore_unknown_records=True
+    )
+
+    assert result.blocked_source_count == 0
+    assert result.ignored_unknown_record_count == 1
+    aliases = {
+        logical_message_id: sorted(ordinals)
+        for logical_message_id, ordinals in (
+            (row[0], row[1])
+            for row in postgres_connection.execute(
+                """
+                SELECT logical_message_id, array_agg(record_ordinal)
+                FROM cc_search_chats.physical_alias_current
+                GROUP BY logical_message_id
+                """
+            )
+        )
+    }
+    assert sorted(aliases.values()) == [[1, 3], [4]]
+    _assert_nothing_stored_from(postgres_connection, _IGNORE_DECOYS)

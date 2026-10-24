@@ -75,3 +75,63 @@ Green evidence (2026-10-24, this checkout):
 - `ruff check`, `ruff format --check`, `ty check`: all passed.
 - `complexipy --failed --plain`: snapshot watermark passed, snapshot unchanged.
 - `vulture`: exit 0. `pre-commit validate-config`: ok.
+
+## Outcome 2: Ignore mode indexes around unknown shapes (2026-10-24)
+
+Changed surfaces:
+
+- `cli.py`: `index --ignore-unknown-records`; `_index_ignore_unknown_records(args,
+  environ)` enables the mode from the flag or
+  `CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1`; `_postgres_index_run` passes it to
+  `index_corpus`. The containment re-exec needed no change (it forwards
+  `sys.argv` and the environment), proven by
+  `test_index_reexec_preserves_the_ignore_unknown_records_flag`.
+- `refresh.py`: `index_corpus` / `refresh_native_sources` accept
+  `ignore_unknown_records`; `_SourcePlan.ignore_unknown_records` and
+  `blocking_codes` (unsupported minus unknown-shape codes when on);
+  `_parse_batch` raises only for blocking codes; `_unknown_shape_entries`
+  counts every shape code outside the blocking set and returns the ordinals to
+  omit (blocking shape codes except `unknown_content_block`, whose message keeps
+  its recognised blocks); omitted ordinals join the skipped set before staging;
+  `_StagedBatch` / `_StagedSource` replace the positional tuples;
+  `refresh_run.ignored_unknown_record_count` is written by both publishers and
+  the no-publication branch; `RefreshResult` / `CorpusIndexResult` carry
+  `ignored_unknown_record_count`. Adopted default beyond the plan text: a flagged
+  run retries a file whose recorded failure code is an unknown-shape code
+  without `--force-retry` (`_failed_observation_blocks`), because otherwise the
+  nightly timer with the variable set would never pick up files blocked before
+  the flag was turned on; non-shape failures keep their block.
+- `docs/runbooks/laptop-deployment.md`: `index.env` paragraph gains the variable
+  as operator policy, not a packaged default.
+- Tests: `test_refresh.py` AC3 (`test_ignore_mode_indexes_around_an_unknown_response_item`,
+  all `--agents`/`--tools` modes plus exhaustive, no alias at the unknown
+  ordinal, checkpoint entry, run count, no failure row), AC4
+  (`test_ignore_mode_keeps_non_shape_failures_blocking`: Codex identity-less
+  `session_meta` and Claude missing uuid both block under the flag), AC5
+  (`test_ignore_mode_batch_boundary_drops_only_the_unknown_ordinal`: reader
+  wrapped to three-record batches, user message aliases `[1, 3]` pair across
+  the boundary, assistant `[4]`, no ordinal 2); new
+  `tests/postgresql/test_unknown_shapes.py` AC13 through `main()` for both
+  routes (default run blocks, flagged run indexes, run row count 1, no decoy
+  stored); `tests/test_cli.py` resolution table (six cases) and re-exec argv.
+
+Red evidence: the CLI resolution and re-exec tests failed on the missing helper
+and flag (7 failed); the PostgreSQL tests failed on
+`index_corpus() got an unexpected keyword argument 'ignore_unknown_records'`.
+Two test-construction defects were found and fixed on the way to green: the
+CLI test's only source was the blocked file, so a fresh database had no corpus
+to publish (pre-existing behaviour, `coherent corpus publication did not select
+a build`), fixed by seeding a clean Claude file; and the AC3 test's second run
+exposed that a flagged run did not retry an already-blocked file, which led to
+the adopted default above.
+
+Green evidence (2026-10-24, this checkout):
+
+- `uv run --frozen pytest -q -m postgresql` → 165 passed.
+- `uv run --frozen pytest -q -m 'not postgresql'` → 1024 passed.
+- `ruff check`, `ruff format --check`, `ty check`: passed; `complexipy`
+  watermark passed with the snapshot unchanged; `vulture` exit 0.
+- `git diff --exit-code 59bbbe2 -- src/cc_search_chats/systemd/` → unit
+  byte-identical; `tests/test_systemd_units.py` passes within the suite.
+- `cc-search-chats index --help` lists `--ignore-unknown-records` with the
+  variable in its help text.

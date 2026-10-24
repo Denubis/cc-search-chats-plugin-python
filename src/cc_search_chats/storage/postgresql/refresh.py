@@ -1,5 +1,6 @@
 """Incrementally refresh native Claude and Codex sources into PostgreSQL."""
 
+import dataclasses
 import hashlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -53,6 +54,8 @@ from cc_search_chats.storage.postgresql.semantic import (
 )
 
 if TYPE_CHECKING:
+    from enum import StrEnum
+
     from cc_search_chats.core.record_shape import RecordShape
 
 _RETAINED_REFRESH_RUNS = 100
@@ -91,6 +94,7 @@ class RefreshResult:
     blocked_source_count: int = 0
     transient_failure_source_count: int = 0
     run_id: int | None = None
+    ignored_unknown_record_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +118,7 @@ class CorpusIndexResult:
     blocked_source_count: int
     transient_failure_source_count: int
     run_id: int | None
+    ignored_unknown_record_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,10 +182,19 @@ class _SourcePlan:
     prior_state: object
     prior_skipped_record_count: int
     prior_unknown_shapes: Mapping[str, object] = field(default_factory=dict)
+    ignore_unknown_records: bool = False
 
     @property
     def adapter(self) -> ProviderAdapter:
         return provider_adapter(self.observed.root.provider)
+
+    @property
+    def blocking_codes(self) -> frozenset[StrEnum]:
+        """Codes that abort this source: all unsupported, minus shapes when ignoring."""
+        adapter = self.adapter
+        if self.ignore_unknown_records:
+            return adapter.unsupported_codes - adapter.unknown_shape_codes
+        return adapter.unsupported_codes
 
 
 @dataclass(frozen=True, slots=True)
@@ -660,10 +674,17 @@ def _failed_observation_blocks(
     failure: _FailedObservation | None,
     *,
     force_retry: bool,
+    ignore_unknown_records: bool = False,
 ) -> bool:
     if force_retry or not _failed_observation_matches(observed, failure):
         return False
     if failure is None:
+        return False
+    if ignore_unknown_records and failure.failure_code in {
+        code.value
+        for code in provider_adapter(observed.root.provider).unknown_shape_codes
+    }:
+        # A flagged run can index around the shape that blocked this file.
         return False
     return failure.failure_class == "deterministic" or not failure.retry_eligible
 
@@ -871,11 +892,12 @@ def _parse_batch(
         )
     except TypeError as error:
         raise _SourceRefreshError(str(error)) from error
+    blocking = plan.blocking_codes
     unsupported = next(
         (
             diagnostic
             for diagnostic in parsed.diagnostics
-            if diagnostic.code in adapter.unsupported_codes
+            if diagnostic.code in blocking
         ),
         None,
     )
@@ -932,11 +954,25 @@ def _shape_entries(value: Mapping[str, object]) -> _ShapeEntries:
     return entries
 
 
-def _unknown_shape_entries(plan: _SourcePlan, parsed: ParseResult) -> _ShapeEntries:
-    """Count each silent-family unknown shape met in one parsed batch."""
+_CONTENT_BLOCK_CODE = "unknown_content_block"
+"""The one ignored shape code whose message keeps its recognised blocks."""
+
+
+def _unknown_shape_entries(
+    plan: _SourcePlan, parsed: ParseResult
+) -> tuple[_ShapeEntries, frozenset[int]]:
+    """Count unknown shapes met in one batch; return the ordinals ignore mode omits.
+
+    The silent family (shape codes outside ``unsupported_codes``) is counted in
+    both modes. Under ignore mode the blocking shape codes are counted too, and
+    every such record except an unknown content block has its ordinal dropped
+    from staging so nothing it carried is persisted.
+    """
     adapter = plan.adapter
-    counted = adapter.unknown_shape_codes - adapter.unsupported_codes
+    counted = adapter.unknown_shape_codes - plan.blocking_codes
+    omitted = counted & adapter.unsupported_codes
     entries: _ShapeEntries = {}
+    ignored_ordinals: set[int] = set()
     for diagnostic in parsed.diagnostics:
         if diagnostic.code not in counted or diagnostic.shape is None:
             continue
@@ -961,7 +997,9 @@ def _unknown_shape_entries(plan: _SourcePlan, parsed: ParseResult) -> _ShapeEntr
                 }
             },
         )
-    return entries
+        if diagnostic.code in omitted and diagnostic.code.value != _CONTENT_BLOCK_CODE:
+            ignored_ordinals.add(diagnostic.record_ordinal)
+    return entries, frozenset(ignored_ordinals)
 
 
 def _skipped_record_diagnostics(
@@ -1157,7 +1195,7 @@ def _stage_index_artifact(
     connection: psycopg.Connection,
     plan: _SourcePlan,
     artifact: SourceDiagnostic,
-) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
+) -> _StagedSource:
     """Exclude a known non-native artifact or fail its source inspection."""
     if artifact.code not in {
         SourceDiagnosticCode.NON_NATIVE_AGY,
@@ -1191,7 +1229,7 @@ def _stage_index_artifact(
         skipped_record_count=0,
         unknown_shapes={},
     )
-    return advanced, pending, 0, ()
+    return _StagedSource(advanced, pending, 0, ())
 
 
 @dataclass(frozen=True, slots=True)
@@ -1203,6 +1241,7 @@ class _ParsedSource:
     skipped: tuple[dict[str, object], ...]
     repaired: tuple[dict[str, object], ...]
     unknown_shapes: _ShapeEntries
+    ignored_record_count: int
     attempted_bytes: int
     cwd_established: bool
 
@@ -1219,6 +1258,16 @@ class _StagedBatch:
     skipped: tuple[dict[str, object], ...]
     repaired: tuple[dict[str, object], ...]
     unknown_shapes: _ShapeEntries
+    ignored_ordinals: frozenset[int]
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedSource:
+    advanced: bool
+    pending_bytes: int
+    attempted_bytes: int
+    diagnostics: tuple[dict[str, object], ...]
+    ignored_record_count: int = 0
 
 
 def _read_source_batch(
@@ -1298,12 +1347,15 @@ def _stage_parsed_batch(
     skipped_ordinals = frozenset(
         required_integer(diagnostic, "record_ordinal") for diagnostic in skips
     )
+    unknown_shapes, ignored_ordinals = _unknown_shape_entries(plan, parsed)
     _stage_messages(
         connection,
         plan,
-        _messages_without_skipped_records(parsed.messages, skipped_ordinals),
+        _messages_without_skipped_records(
+            parsed.messages, skipped_ordinals | ignored_ordinals
+        ),
     )
-    return _StagedBatch(parsed, skips, repairs, _unknown_shape_entries(plan, parsed))
+    return _StagedBatch(parsed, skips, repairs, unknown_shapes, ignored_ordinals)
 
 
 def _stamp_staged_cwd(
@@ -1337,6 +1389,7 @@ def _parse_source_batches(
     skipped: list[dict[str, object]] = []
     repaired: list[dict[str, object]] = []
     unknown_shapes: _ShapeEntries = {}
+    ignored_record_count = 0
     cwd_established = False
     if observed.size == offset and state is None:
         state = plan.adapter.initial_state()
@@ -1354,6 +1407,7 @@ def _parse_source_batches(
         skipped.extend(staged.skipped)
         repaired.extend(staged.repaired)
         _merge_shape_entries(unknown_shapes, staged.unknown_shapes)
+        ignored_record_count += len(staged.ignored_ordinals)
         next_offset = batch.next_source_byte_offset
         ordinal = batch.next_record_ordinal
         source_line = batch.next_source_line
@@ -1376,6 +1430,7 @@ def _parse_source_batches(
         skipped=tuple(skipped),
         repaired=tuple(repaired),
         unknown_shapes=unknown_shapes,
+        ignored_record_count=ignored_record_count,
         attempted_bytes=max(0, offset - plan.start_byte_offset),
         cwd_established=cwd_established,
     )
@@ -1402,7 +1457,7 @@ def _verified_final_size(observed: _ObservedSource) -> int:
 
 def _stage_excluded_source(
     connection: psycopg.Connection, plan: _SourcePlan, excluded: _ExcludedSource
-) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
+) -> _StagedSource:
     """Checkpoint an excluded source at full size so it never reads as pending."""
     code = excluded.decision.code
     advanced, pending = _stage_source_checkpoint(
@@ -1420,12 +1475,12 @@ def _stage_excluded_source(
         skipped_record_count=0,
         unknown_shapes={},
     )
-    return advanced, pending, excluded.attempted_bytes, ()
+    return _StagedSource(advanced, pending, excluded.attempted_bytes, ())
 
 
 def _parse_and_stage_source(
     connection: psycopg.Connection, plan: _SourcePlan
-) -> tuple[bool, int, int, tuple[dict[str, object], ...]]:
+) -> _StagedSource:
     observed = plan.observed
     adapter = plan.adapter
     artifact = (
@@ -1441,7 +1496,17 @@ def _parse_and_stage_source(
         # tail that first establishes cwd reparses the source from byte zero.
         _clear_staged_source(connection, plan)
         return _parse_and_stage_source(
-            connection, _SourcePlan(observed, "replace", 0, 0, 1, None, 0)
+            connection,
+            _SourcePlan(
+                observed,
+                "replace",
+                0,
+                0,
+                1,
+                None,
+                0,
+                ignore_unknown_records=plan.ignore_unknown_records,
+            ),
         )
     final_size = _verified_final_size(observed)
     unknown_shapes = _shape_entries(plan.prior_unknown_shapes)
@@ -1458,11 +1523,12 @@ def _parse_and_stage_source(
         skipped_record_count=(plan.prior_skipped_record_count + len(parsed.skipped)),
         unknown_shapes=unknown_shapes,
     )
-    return (
+    return _StagedSource(
         advanced,
         pending,
         parsed.attempted_bytes,
         (*parsed.skipped, *parsed.repaired),
+        parsed.ignored_record_count,
     )
 
 
@@ -1770,6 +1836,7 @@ def _publish_coherent_candidate(
     attempted_content_bytes: int,
     blocked_source_count: int,
     transient_failure_source_count: int,
+    ignored_unknown_record_count: int,
     diagnostics: tuple[dict[str, object], ...],
 ) -> None:
     """Publish the literal delta and prepared semantic build in one transaction."""
@@ -2048,6 +2115,7 @@ def _publish_coherent_candidate(
                 attempted_content_bytes = %s,
                 blocked_source_count = %s,
                 transient_failure_source_count = %s,
+                ignored_unknown_record_count = %s,
                 diagnostics = %s, phase = 'done', heartbeat_at = now(),
                 completed_units = total_units
             WHERE run_id = %s
@@ -2064,6 +2132,7 @@ def _publish_coherent_candidate(
                 attempted_content_bytes,
                 blocked_source_count,
                 transient_failure_source_count,
+                ignored_unknown_record_count,
                 Jsonb(list(diagnostics)),
                 run_id,
             ),
@@ -2123,6 +2192,7 @@ def _record_literal_candidate(
     attempted_content_bytes: int,
     blocked_source_count: int,
     transient_failure_source_count: int,
+    ignored_unknown_record_count: int,
     diagnostics: tuple[dict[str, object], ...],
 ) -> int:
     """Complete a literal diagnostic without mutating selected corpus state."""
@@ -2146,6 +2216,7 @@ def _record_literal_candidate(
             attempted_content_bytes = %s,
             blocked_source_count = %s,
             transient_failure_source_count = %s,
+            ignored_unknown_record_count = %s,
             diagnostics = %s || jsonb_build_array(jsonb_build_object(
                 'code', 'literal_candidate_not_published',
                 'detail', 'run composed index to publish a searchable corpus'
@@ -2165,6 +2236,7 @@ def _record_literal_candidate(
             attempted_content_bytes,
             blocked_source_count,
             transient_failure_source_count,
+            ignored_unknown_record_count,
             Jsonb(list(diagnostics)),
             run_id,
         ),
@@ -2394,6 +2466,7 @@ def refresh_native_sources(
     codex_root: Path | None = None,
     progress: ProgressCallback | None = None,
     force_retry: bool = False,
+    ignore_unknown_records: bool = False,
     _candidate_publisher: Callable[..., int] | None = None,
     _require_publication: bool = False,
 ) -> RefreshResult:
@@ -2420,11 +2493,12 @@ def refresh_native_sources(
                 value,
                 failed_observations.get(value.key),
                 force_retry=force_retry,
+                ignore_unknown_records=ignore_unknown_records,
             )
         )
         blocked_keys = {value.key for value in blocked_observations}
         plans = tuple(
-            plan
+            dataclasses.replace(plan, ignore_unknown_records=ignore_unknown_records)
             for value in observed
             if value.key not in blocked_keys
             and (plan := _plan_source(value, checkpoints.get(value.key))) is not None
@@ -2483,6 +2557,7 @@ def refresh_native_sources(
         advanced_source_count = 0
         pending_bytes = 0
         attempted_content_bytes = 0
+        ignored_unknown_record_count = 0
         blocked_source_count = sum(
             failed_observations[value.key].failure_class == "deterministic"
             for value in blocked_observations
@@ -2515,12 +2590,7 @@ def refresh_native_sources(
             )
             for plan in plans:
                 try:
-                    (
-                        advanced,
-                        source_pending,
-                        source_attempted_bytes,
-                        source_skipped_diagnostics,
-                    ) = _parse_and_stage_source(connection, plan)
+                    staged = _parse_and_stage_source(connection, plan)
                 except _SourceRefreshError as error:
                     _clear_staged_source(connection, plan)
                     attempted_content_bytes += error.attempted_content_bytes
@@ -2554,10 +2624,11 @@ def refresh_native_sources(
                         }
                     )
                 else:
-                    attempted_content_bytes += source_attempted_bytes
-                    advanced_source_count += int(advanced)
-                    pending_bytes += source_pending
-                    diagnostics.extend(source_skipped_diagnostics)
+                    attempted_content_bytes += staged.attempted_bytes
+                    advanced_source_count += int(staged.advanced)
+                    pending_bytes += staged.pending_bytes
+                    ignored_unknown_record_count += staged.ignored_record_count
+                    diagnostics.extend(staged.diagnostics)
                 completed += 1
                 _update_run_progress(
                     connection,
@@ -2610,6 +2681,7 @@ def refresh_native_sources(
                     attempted_content_bytes=attempted_content_bytes,
                     blocked_source_count=blocked_source_count,
                     transient_failure_source_count=(transient_failure_source_count),
+                    ignored_unknown_record_count=ignored_unknown_record_count,
                     diagnostics=tuple(diagnostics),
                 )
             else:
@@ -2624,6 +2696,7 @@ def refresh_native_sources(
                         attempted_content_bytes = %s,
                         blocked_source_count = %s,
                         transient_failure_source_count = %s,
+                        ignored_unknown_record_count = %s,
                         diagnostics = %s, phase = 'done', heartbeat_at = now(),
                         completed_units = total_units
                     WHERE run_id = %s
@@ -2635,6 +2708,7 @@ def refresh_native_sources(
                         attempted_content_bytes,
                         blocked_source_count,
                         transient_failure_source_count,
+                        ignored_unknown_record_count,
                         Jsonb(diagnostics),
                         run_id,
                     ),
@@ -2657,6 +2731,7 @@ def refresh_native_sources(
                 blocked_source_count=blocked_source_count,
                 transient_failure_source_count=transient_failure_source_count,
                 run_id=run_id,
+                ignored_unknown_record_count=ignored_unknown_record_count,
             )
         except Exception as error:
             _record_run_failure(
@@ -2727,6 +2802,7 @@ def index_corpus(
     embedding_progress: Callable[[int, int], None] | None = None,
     batch_size: int = 4,
     force_retry: bool = False,
+    ignore_unknown_records: bool = False,
 ) -> CorpusIndexResult:
     """Prepare and jointly publish one coherent literal and semantic corpus."""
     require_current_schema(connection)
@@ -2747,6 +2823,7 @@ def index_corpus(
         attempted_content_bytes: int,
         blocked_source_count: int,
         transient_failure_source_count: int,
+        ignored_unknown_record_count: int,
         diagnostics: tuple[dict[str, object], ...],
     ) -> int:
         nonlocal prepared
@@ -2784,6 +2861,7 @@ def index_corpus(
                 attempted_content_bytes=attempted_content_bytes,
                 blocked_source_count=blocked_source_count,
                 transient_failure_source_count=transient_failure_source_count,
+                ignored_unknown_record_count=ignored_unknown_record_count,
                 diagnostics=diagnostics,
             )
         except Exception as error:
@@ -2824,6 +2902,7 @@ def index_corpus(
         codex_root=codex_root,
         progress=progress,
         force_retry=force_retry,
+        ignore_unknown_records=ignore_unknown_records,
         _candidate_publisher=publish_candidate,
         _require_publication=selected_before is None,
     )
@@ -2859,4 +2938,5 @@ def index_corpus(
         blocked_source_count=refresh.blocked_source_count,
         transient_failure_source_count=refresh.transient_failure_source_count,
         run_id=refresh.run_id,
+        ignored_unknown_record_count=refresh.ignored_unknown_record_count,
     )

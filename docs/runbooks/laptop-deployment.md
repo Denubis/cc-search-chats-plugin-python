@@ -183,6 +183,14 @@ Optional source-root configuration belongs in
 and retain the operator's existing cache environment; the service deliberately
 supplies neither credentials nor cache overrides.
 
+`CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1` in that same file makes the nightly
+run index around unregistered record shapes instead of blocking whole files
+(the same as `cc-search-chats index --ignore-unknown-records`). Each omitted
+record is counted and reported by shape, and a flagged run retries files that an
+earlier run blocked on such a shape. This is operator policy, not a packaged
+default: the unit ships without it, and identity, payload and admission
+failures still block with it set.
+
 ## Clean install or rebuild
 
 This route may destroy an existing PostgreSQL search projection. If that
