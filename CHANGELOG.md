@@ -1,5 +1,19 @@
 # Changelog
 
+## cc-search-chats 2.4.3
+
+**Fixed:**
+- Codex CLI 0.164.0 writes `additional_tools` response items: developer-role
+  tool definitions grouped into namespaces, carrying `id`, `role` and `tools`.
+  They hold no visible conversation, so under ADR 0003 they are now excluded
+  inter-agent metadata, as `tool_search_output` is, rather than unknown
+  response items. They are never persisted or searchable in any mode and create
+  no messages or tool rows. Files containing them, including subagent sessions,
+  no longer fail closed. Other unaudited shapes still fail closed.
+- The Codex parser-state version advances to 6 to retry unchanged blocked
+  files on the next index run. Codex sources reparse once; unchanged embeddings
+  are reused.
+
 ## cc-search-chats 2.4.2
 
 **Fixed:**

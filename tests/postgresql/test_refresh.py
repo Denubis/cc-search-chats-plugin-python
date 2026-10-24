@@ -30,6 +30,7 @@ from cc_search_chats.semantic import SemanticChunk
 from cc_search_chats.storage.postgresql import (
     RefreshProgress,
     exhaustive_search_page,
+    extract_session,
     hybrid_search,
     index_corpus,
     migrate,
@@ -776,7 +777,7 @@ def test_native_record_policy_parser_state_versions() -> None:
         for adapter in registry.provider_adapters()
     } == {
         Provider.CLAUDE: 8,
-        Provider.CODEX: 5,
+        Provider.CODEX: 6,
         Provider.ANTIGRAVITY: 2,
     }
 
@@ -1380,6 +1381,173 @@ def test_codex_metadata_parser_bump_recovers_unchanged_blocked_source(
             """
         )
     ) == (_parser_state_version(Provider.CODEX), len(original_bytes))
+
+
+_ADDITIONAL_TOOLS_DECOYS = (
+    "tools-namespace-decoy-sorrel",
+    "tools-function-decoy-clover",
+    "tools-description-decoy-nettle",
+    "tools-parameter-decoy-plantain",
+    "tools-custom-decoy-dock",
+    "tools-grammar-decoy-vervain",
+)
+
+
+def _codex_additional_tools_record() -> dict[str, object]:
+    """Developer tool definitions in the observed Codex 0.164.0 envelope and keys."""
+    return {
+        "timestamp": "2026-08-11T03:00:02Z",
+        "type": "response_item",
+        "ordinal": 2,
+        "metadata": {"client_authored": False, "mcp_attribution": {"status": "none"}},
+        "payload": {
+            "type": "additional_tools",
+            "id": "at_synthetic",
+            "role": "developer",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "tools-namespace-decoy-sorrel",
+                    "description": "",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "tools-function-decoy-clover",
+                            "description": "tools-description-decoy-nettle",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "tools-parameter-decoy-plantain": {"type": "string"}
+                                },
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                            "strict": False,
+                        },
+                        {
+                            "type": "custom",
+                            "name": "tools-custom-decoy-dock",
+                            "description": "",
+                            "format": {
+                                "type": "grammar",
+                                "syntax": "lark",
+                                "definition": "tools-grammar-decoy-vervain",
+                            },
+                        },
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def test_codex_additional_tools_source_blocked_at_parser_5_recovers_unsearchable(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_root = tmp_path / "codex"
+    day = codex_root / "2026" / "10" / "23"
+    day.mkdir(parents=True)
+    source = day / "rollout-additional-tools.jsonl"
+    fixture_records = (
+        (FIXTURES / "codex_modern_primary_145.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    original_bytes = (
+        fixture_records[0]
+        + fixture_records[3]
+        + json.dumps(_codex_additional_tools_record()).encode("utf-8")
+        + b"\n"
+        + fixture_records[5]
+    )
+    source.write_bytes(original_bytes)
+    original_stat = source.stat()
+    root = _source_root(Provider.CODEX, codex_root)
+    with monkeypatch.context() as released_parser:
+        # cc-search-chats 2.4.2: Codex parser-state version 5 without the shape.
+        _set_parser_state_version(released_parser, Provider.CODEX, 5)
+        released_parser.delitem(
+            codex_module._INTER_AGENT_RESPONSE_KEYSETS,
+            "additional_tools",
+            raising=False,
+        )
+        blocked = inspect_native_sources(postgres_connection, source_roots=(root,))
+    assert blocked.blocked_source_count == 1
+    assert next(
+        postgres_connection.execute(
+            "SELECT failure_code, failure_source_line, parser_state_version "
+            "FROM cc_search_chats.source_failure_current"
+        )
+    ) == ("unknown_response_item", 3, 5)
+
+    retried = refresh_native_sources(postgres_connection, source_roots=(root,))
+
+    assert source.read_bytes() == original_bytes
+    current_stat = source.stat()
+    assert (current_stat.st_ino, current_stat.st_size, current_stat.st_mtime_ns) == (
+        original_stat.st_ino,
+        original_stat.st_size,
+        original_stat.st_mtime_ns,
+    )
+    assert retried.attempted_content_bytes == len(original_bytes)
+    coverage = _postgres_envelope(postgres_connection, "index", refresh_result=retried)[
+        "coverage"
+    ]
+    assert isinstance(coverage, dict)
+    assert coverage["completeness"] == "complete"
+    assert coverage["blocked_files"] == 0
+    assert coverage["source_issues"] == {
+        "retry_after_parser_update": 0,
+        "retryable_failures": 0,
+        "needs_attention": 0,
+    }
+    assert [
+        (message.role, message.content_class, message.text)
+        for message in extract_session(
+            postgres_connection, "codex-modern-primary", provider="codex"
+        )
+    ] == [
+        ("user", "prose", "modern visible user"),
+        ("assistant", "prose", "modern visible assistant"),
+    ]
+    stored = [
+        text
+        for (text,) in postgres_connection.execute(
+            "SELECT prose_content FROM cc_search_chats.message_current"
+        )
+    ]
+    assert any("modern visible" in text for text in stored)
+    modes = [(agents, tools) for agents in (False, True) for tools in (False, True)]
+    for agents, tools in modes:
+        assert _search_messages(
+            postgres_connection,
+            "modern visible",
+            include_agents=agents,
+            include_tools=tools,
+        )
+    for decoy in _ADDITIONAL_TOOLS_DECOYS:
+        assert not any(decoy in text for text in stored), decoy
+        for agents, tools in modes:
+            assert (
+                _search_messages(
+                    postgres_connection,
+                    decoy,
+                    include_agents=agents,
+                    include_tools=tools,
+                )
+                == ()
+            ), decoy
+            assert (
+                exhaustive_search_page(
+                    postgres_connection,
+                    decoy,
+                    include_agents=agents,
+                    include_tools=tools,
+                ).hits
+                == ()
+            ), decoy
 
 
 def test_unreadable_changed_source_retains_committed_rows_and_checkpoint(

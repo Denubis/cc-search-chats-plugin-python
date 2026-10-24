@@ -1097,6 +1097,19 @@ class TestCodexSchemaFamilies:
                 "tools": [],
             },
             {
+                "type": "additional_tools",
+                "id": "item",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "namespace",
+                        "description": "",
+                        "tools": [],
+                    }
+                ],
+            },
+            {
                 "type": "web_search_call",
                 "action": {},
                 "status": "complete",

@@ -428,6 +428,9 @@ _INTER_AGENT_RESPONSE_KEYSETS["tool_search_output"] = {
     ),
     frozenset({"type", "call_id", "execution", "status", "tools"}),
 }
+_INTER_AGENT_RESPONSE_KEYSETS["additional_tools"] = {
+    frozenset({"type", "id", "role", "tools"})
+}
 
 
 class CodexDiagnosticCode(StrEnum):
