@@ -15,6 +15,7 @@ from cc_search_chats.core.identity import (
     SubmittedBy,
     format_locator,
 )
+from cc_search_chats.core.record_shape import RecordShape
 from cc_search_chats.providers.antigravity import (
     SCOPE_START,
     AdmissionOutcome,
@@ -524,3 +525,64 @@ class TestDerivedWorkingDirectory:
         assert second.next_state == first.next_state or (
             second.next_state.cwd == first.next_state.cwd
         )
+
+
+_SHAPE_SENTINEL = "shape-value-decoy-" + "z" * 120
+
+
+class TestAntigravityUnknownShapeFingerprints:
+    def test_unknown_record_pair_carries_key_names_only(self) -> None:
+        parsed = parse_antigravity_session(
+            envelopes(
+                user_input("hello"),
+                record(
+                    "MODEL",
+                    "HOLOGRAM",
+                    "2026-10-03T09:15:01Z",
+                    frames=[_SHAPE_SENTINEL],
+                    nested={"deep": _SHAPE_SENTINEL},
+                ),
+            ),
+            context=CONTEXT,
+        )
+
+        [diagnostic] = [
+            value
+            for value in parsed.diagnostics
+            if value.code is AntigravityDiagnosticCode.UNKNOWN_RECORD_PAIR
+        ]
+        assert diagnostic.shape == RecordShape(
+            provider="antigravity",
+            record_path="MODEL/HOLOGRAM",
+            keys=(
+                "created_at",
+                "frames",
+                "nested",
+                "source",
+                "status",
+                "step_index",
+                "type",
+            ),
+        )
+        assert _SHAPE_SENTINEL not in diagnostic.shape.canonical
+        assert "deep" not in diagnostic.shape.canonical
+
+    def test_non_object_record_has_a_non_object_shape(self) -> None:
+        parsed = parse_antigravity_session(
+            envelopes(user_input("hello"), [1, 2, 3]), context=CONTEXT
+        )
+
+        [diagnostic] = [
+            value
+            for value in parsed.diagnostics
+            if value.code is AntigravityDiagnosticCode.UNKNOWN_RECORD_PAIR
+        ]
+        assert diagnostic.shape == RecordShape("antigravity", "non_object", ())
+
+    def test_recognised_records_carry_no_shape(self) -> None:
+        parsed = parse_antigravity_session(
+            fixture_envelopes("october_human"), context=CONTEXT
+        )
+
+        assert parsed.messages
+        assert all(diagnostic.shape is None for diagnostic in parsed.diagnostics)

@@ -28,6 +28,11 @@ from cc_search_chats.core.identity import (
     is_unicode_scalar_text,
     repair_unstorable_text,
 )
+from cc_search_chats.core.record_shape import (
+    RecordShape,
+    path_segment,
+    record_shape,
+)
 
 if TYPE_CHECKING:
     from cc_search_chats.providers.source_discovery import (
@@ -91,6 +96,7 @@ class AntigravityDiagnostic:
     record_ordinal: int
     source_line: int
     source_byte_offset: int
+    shape: RecordShape | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +162,10 @@ def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
 
 
 def _diagnostic(
-    code: AntigravityDiagnosticCode, envelope: RecordEnvelope, detail: str
+    code: AntigravityDiagnosticCode,
+    envelope: RecordEnvelope,
+    detail: str,
+    shape: RecordShape | None = None,
 ) -> AntigravityDiagnostic:
     return AntigravityDiagnostic(
         code=code,
@@ -164,7 +173,22 @@ def _diagnostic(
         record_ordinal=envelope.record_ordinal,
         source_line=envelope.source_line,
         source_byte_offset=envelope.source_byte_offset,
+        shape=shape,
     )
+
+
+def _rejected_shape(
+    code: AntigravityDiagnosticCode, payload: object
+) -> RecordShape | None:
+    """Fingerprint an unregistered record pair; other rejections carry none."""
+    if code is not AntigravityDiagnosticCode.UNKNOWN_RECORD_PAIR:
+        return None
+    if not _is_json_object(payload):
+        return record_shape(Provider.ANTIGRAVITY.value, "non_object", None)
+    record_path = (
+        f"{path_segment(payload.get('source'))}/{path_segment(payload.get('type'))}"
+    )
+    return record_shape(Provider.ANTIGRAVITY.value, record_path, payload)
 
 
 def _common_shape(payload: object) -> tuple[str, str, str]:
@@ -569,7 +593,12 @@ def parse_antigravity_session(
             projection = _project_record(record)
         except _RecordRejectedError as rejected:
             diagnostics.append(
-                _diagnostic(rejected.code, record.envelope, rejected.detail)
+                _diagnostic(
+                    rejected.code,
+                    record.envelope,
+                    rejected.detail,
+                    _rejected_shape(rejected.code, record.payload),
+                )
             )
             continue
         diagnostics.extend(projection.diagnostics)

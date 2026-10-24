@@ -50,13 +50,13 @@ by `core.identity.Provider` and the provider registry.
 | Relation | Cardinality/key | Visibility and retention |
 |---|---|---|
 | `source_root_current` | one per provider/resolved configured path | current configured roots only |
-| `source_file_current` | one per root/relative file | current metadata, complete-record watermark, parser state, status |
+| `source_file_current` | one per root/relative file | current metadata, complete-record watermark, parser state, status, skipped-record count, per-file `unknown_shapes` map (migration 12) |
 | `message_current` | one per provider/session/logical message/content class | current canonical visible content and generated FTS vector |
 | `physical_alias_current` | one per real root/file/record/content-class occurrence | exact coordinates/digest; cascades with message |
 | `corpus_state` | singleton | selects one completed coherent corpus generation |
 | `corpus_generation` | one small row per changed candidate | counts, watermarks, selected semantic build, terminal state; no message copies |
-| `refresh_run` | one per attempted changed refresh | progress/diagnostics; terminal rows retained to newest 100 |
-| `source_failure_current` | zero or one per current source | deterministic fingerprint or transient retry boundary without advancing the successful checkpoint |
+| `refresh_run` | one per attempted changed refresh | progress/diagnostics and `ignored_unknown_record_count`; terminal rows retained to newest 100 |
+| `source_failure_current` | zero or one per current source | deterministic fingerprint or transient retry boundary without advancing the successful checkpoint; `failure_shape` names the unknown record shape that blocked it, else NULL (migration 12) |
 | `embedding_profile` | one per embedding/chunker contract | model snapshot, prefixes, pooling, dimensions, normalization, attention, token budgets |
 | `semantic_chunk_current` | one per current message/profile/chunk ordinal | source digest, token/character bounds, passage and prefixed-input digest |
 | `embedding_value` | one per profile/prefixed-input digest | reusable `vector(1024)`; unreachable rows reclaimed after publication |
@@ -155,6 +155,21 @@ coordinate/code, and attempted bytes separately from the last successful
 checkpoint. The same observation is a metadata-only blocked source on later
 refreshes. Transient I/O failures retain retry-after/backoff; manual force retry
 and changed observations invalidate the relevant boundary.
+
+Unknown record shapes are recorded by key-name fingerprint
+(`core/record_shape.py`: provider, record path, sorted envelope key names, then
+`payload.`-prefixed nested key names; never a value). A parse diagnostic whose
+code is in the adapter's `unknown_shape_codes` carries that shape. When such a
+diagnostic blocks a source, the failure row stores it as `failure_shape`. When
+it does not block (the codes in `unknown_shape_codes` but not in
+`unsupported_codes`: Codex `unknown_metadata_shape` and `unknown_compaction`,
+Claude `invalid_compact_boundary`), the record is counted into the file's
+`unknown_shapes` map, keyed by shape digest, with its count, first ordinal,
+line and byte offset, and a disposition. The map is rebuilt from byte zero on a
+full reparse and merged on an append, exactly as `skipped_record_count` is, so
+file removal, replacement or reparse cannot leave a stale count. Corpus-wide
+shape reporting is derived from these two columns; no separate shape table is
+maintained.
 
 One session advisory owner serializes corpus work. `index`, invoked
 intentionally by a person, an agent, or the nightly timer, is the only builder

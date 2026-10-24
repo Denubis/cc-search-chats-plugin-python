@@ -776,8 +776,8 @@ def test_native_record_policy_parser_state_versions() -> None:
         adapter.provider: adapter.parser_state_version
         for adapter in registry.provider_adapters()
     } == {
-        Provider.CLAUDE: 8,
-        Provider.CODEX: 6,
+        Provider.CLAUDE: 9,
+        Provider.CODEX: 7,
         Provider.ANTIGRAVITY: 2,
     }
 
@@ -1481,6 +1481,25 @@ def test_codex_additional_tools_source_blocked_at_parser_5_recovers_unsearchable
             "FROM cc_search_chats.source_failure_current"
         )
     ) == ("unknown_response_item", 3, 5)
+    assert next(
+        postgres_connection.execute(
+            "SELECT failure_shape FROM cc_search_chats.source_failure_current"
+        )
+    )[0] == {
+        "provider": "codex",
+        "record_path": "response_item/additional_tools",
+        "keys": [
+            "metadata",
+            "ordinal",
+            "payload",
+            "timestamp",
+            "type",
+            "payload.id",
+            "payload.role",
+            "payload.tools",
+            "payload.type",
+        ],
+    }
 
     retried = refresh_native_sources(postgres_connection, source_roots=(root,))
 
@@ -1754,6 +1773,115 @@ def test_source_stat_failure_cannot_be_mistaken_for_deletion(
         == checkpoint
     )
     assert len(search_messages(postgres_connection, "visible primary user")) == 1
+
+
+def _codex_turn_context_record(payload: dict[str, object]) -> bytes:
+    record = {
+        "timestamp": "2026-08-11T03:00:01Z",
+        "type": "turn_context",
+        "ordinal": 1,
+        "payload": payload,
+    }
+    return json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def test_silent_unknown_metadata_shape_is_counted_without_blocking(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    """AC6, default mode: the silent family indexes and is counted per file."""
+    codex_root = tmp_path / "codex"
+    day = codex_root / "2026" / "10" / "24"
+    day.mkdir(parents=True)
+    fixture_records = (
+        (FIXTURES / "codex_modern_primary_145.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    unknown_source = day / "rollout-unknown-turn-context.jsonl"
+    unknown_source.write_bytes(
+        fixture_records[0]
+        + fixture_records[3]
+        + _codex_turn_context_record(
+            {"cwd": "/synthetic/repository", "approval_policy": "never"}
+        )
+        + fixture_records[5]
+    )
+    recognised_source = day / "rollout-recognised-turn-context.jsonl"
+    recognised_meta = json.loads(fixture_records[0])
+    recognised_meta["payload"]["session_id"] = "codex-recognised-turn"
+    recognised_meta["payload"]["id"] = "codex-recognised-turn"
+    recognised_source.write_bytes(
+        json.dumps(recognised_meta, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+        + _codex_turn_context_record(
+            {
+                "approval_policy": "never",
+                "cwd": "/synthetic/repository",
+                "model": "synthetic-model",
+                "sandbox_policy": {},
+                "summary": "synthetic summary",
+                "root_turn_id": "turn-decoy-bramble",
+            }
+        )
+        + fixture_records[3]
+    )
+    root = _source_root(Provider.CODEX, codex_root)
+
+    result = refresh_native_sources(postgres_connection, source_roots=(root,))
+
+    assert result.blocked_source_count == 0
+    assert result.failed_source_count == 0
+    coverage = _postgres_envelope(postgres_connection, "index", refresh_result=result)[
+        "coverage"
+    ]
+    assert isinstance(coverage, dict)
+    assert coverage["completeness"] == "complete"
+    assert [
+        (message.role, message.text)
+        for message in extract_session(
+            postgres_connection, "codex-modern-primary", provider="codex"
+        )
+    ] == [
+        ("user", "modern visible user"),
+        ("assistant", "modern visible assistant"),
+    ]
+    rows = dict(
+        postgres_connection.execute(
+            "SELECT source_file_relative, unknown_shapes "
+            "FROM cc_search_chats.source_file_current"
+        )
+    )
+    assert rows["2026/10/24/rollout-recognised-turn-context.jsonl"] == {}
+    [(digest, entry)] = rows["2026/10/24/rollout-unknown-turn-context.jsonl"].items()
+    assert len(digest) == 64
+    assert entry == {
+        "shape": {
+            "provider": "codex",
+            "record_path": "turn_context",
+            "keys": [
+                "ordinal",
+                "payload",
+                "timestamp",
+                "type",
+                "payload.approval_policy",
+                "payload.cwd",
+            ],
+        },
+        "count": 1,
+        "first_ordinal": 2,
+        "first_line": 3,
+        "first_byte_offset": len(fixture_records[0]) + len(fixture_records[3]),
+        "disposition": "ignored",
+    }
+    assert (
+        next(
+            postgres_connection.execute(
+                "SELECT count(*) FROM cc_search_chats.source_failure_current"
+            )
+        )[0]
+        == 0
+    )
 
 
 def test_unsupported_appended_shape_does_not_advance_checkpoint(

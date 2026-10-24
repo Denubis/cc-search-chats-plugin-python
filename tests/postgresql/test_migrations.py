@@ -299,6 +299,7 @@ def test_migration_ledger_is_idempotent_and_rejects_changed_bytes(
         (9, "drop_auto_refresh_state_schema.sql", 64),
         (10, "coherent_selection_guard_schema.sql", 64),
         (11, "provider_antigravity_schema.sql", 64),
+        (12, "unknown_shape_schema.sql", 64),
     )
     assert next(
         postgres_connection.execute(
@@ -325,7 +326,7 @@ def test_pending_migrations_is_read_only_and_reports_the_packaged_suffix(
     assert tuple(
         migration.version
         for migration in migrations.pending_migrations(postgres_connection)
-    ) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+    ) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
     assert (
         next(postgres_connection.execute("SELECT to_regnamespace('cc_search_chats')"))[
             0
@@ -360,7 +361,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
     monkeypatch.setattr(
         migrations,
         "_MIGRATIONS",
-        (*migrations._MIGRATIONS, migrations.Migration(12, "missing-migration.sql")),
+        (*migrations._MIGRATIONS, migrations.Migration(13, "missing-migration.sql")),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -370,7 +371,7 @@ def test_interrupted_later_migration_does_not_advance_the_ledger(
         postgres_connection.execute(
             "SELECT version FROM cc_search_chats.schema_migration ORDER BY version"
         )
-    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,))
+    ) == ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,))
 
 
 def test_migration_9_drops_only_the_retired_auto_refresh_state(
@@ -516,7 +517,7 @@ def test_migration_11_replaces_provider_checks_whatever_their_names(
     assert tuple(
         migration.version
         for migration in migrations.pending_migrations(postgres_connection)
-    ) == (11,)
+    ) == (11, 12)
     migrations.apply_migrations(postgres_connection)
 
     for table in _PROVIDER_CHECK_TABLES:
@@ -611,6 +612,7 @@ def _upgrade_seeded_v6_schema(
         9,
         10,
         11,
+        12,
     )
     migrations.apply_migrations(connection)
 

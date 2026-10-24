@@ -14,6 +14,7 @@ from cc_search_chats.core.identity import (
     SessionKind,
     SubmittedBy,
 )
+from cc_search_chats.core.record_shape import RecordShape
 from cc_search_chats.providers.codex import (
     CodexDiagnosticCode,
     CodexParserState,
@@ -2687,3 +2688,161 @@ def test_known_excluded_message_blocks_are_reasoning_diagnostics(
     assert [diagnostic.code for diagnostic in result.diagnostics] == [
         CodexDiagnosticCode.EXCLUDED_REASONING
     ]
+
+
+_SHAPE_SENTINEL = "shape-value-decoy-" + "z" * 120
+
+
+def _shape_json(diagnostic) -> str:
+    assert diagnostic.shape is not None
+    return diagnostic.shape.canonical
+
+
+class TestCodexUnknownShapeFingerprints:
+    def test_unknown_response_item_carries_key_names_only(self) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:00Z",
+                        "type": "response_item",
+                        "ordinal": 4,
+                        "payload": {
+                            "type": "mystery_item",
+                            "id": _SHAPE_SENTINEL,
+                            "nested": {"deep": _SHAPE_SENTINEL, "list": [1, 2]},
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="shape-session"),
+            prior_state=established_unknown_session("shape-session"),
+        )
+
+        [diagnostic] = result.diagnostics
+        assert diagnostic.code is CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM
+        assert diagnostic.shape == RecordShape(
+            provider="codex",
+            record_path="response_item/mystery_item",
+            keys=(
+                "ordinal",
+                "payload",
+                "timestamp",
+                "type",
+                "payload.id",
+                "payload.nested",
+                "payload.type",
+            ),
+        )
+        assert _SHAPE_SENTINEL not in _shape_json(diagnostic)
+        assert "deep" not in _shape_json(diagnostic)
+
+    @pytest.mark.parametrize(
+        ("record", "code", "record_path"),
+        [
+            (
+                {"timestamp": "2026-08-11T09:00:00Z", "type": "mystery_outer", "x": 1},
+                CodexDiagnosticCode.UNKNOWN_OUTER_TYPE,
+                "mystery_outer",
+            ),
+            (
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "mystery_event", "value": _SHAPE_SENTINEL},
+                },
+                CodexDiagnosticCode.UNKNOWN_EVENT,
+                "event_msg/mystery_event",
+            ),
+            (
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "turn_context",
+                    "payload": {"cwd": _SHAPE_SENTINEL},
+                },
+                CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
+                "turn_context",
+            ),
+            (
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "compacted",
+                    "payload": {"future": _SHAPE_SENTINEL},
+                },
+                CodexDiagnosticCode.UNKNOWN_COMPACTION,
+                "compacted",
+            ),
+            (
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "tool", "content": []},
+                },
+                CodexDiagnosticCode.UNKNOWN_ROLE,
+                "response_item/message",
+            ),
+        ],
+    )
+    def test_every_unknown_shape_code_names_its_record_path(
+        self,
+        record: dict[str, object],
+        code: CodexDiagnosticCode,
+        record_path: str,
+    ) -> None:
+        result = parse_codex_session(
+            (envelope(record),),
+            context=CodexSessionContext(source_session_id="shape-session"),
+            prior_state=established_unknown_session("shape-session"),
+        )
+
+        [diagnostic] = result.diagnostics
+        assert diagnostic.code is code
+        assert diagnostic.shape is not None
+        assert diagnostic.shape.provider == "codex"
+        assert diagnostic.shape.record_path == record_path
+        assert _SHAPE_SENTINEL not in _shape_json(diagnostic)
+
+    def test_unknown_content_block_shape_is_the_block(self) -> None:
+        result = parse_codex_session(
+            (
+                envelope(
+                    {
+                        "timestamp": "2026-08-11T09:00:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "hologram", "frames": [_SHAPE_SENTINEL]}
+                            ],
+                        },
+                    }
+                ),
+            ),
+            context=CodexSessionContext(source_session_id="shape-session"),
+            prior_state=established_unknown_session("shape-session"),
+        )
+
+        [diagnostic] = result.diagnostics
+        assert diagnostic.code is CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK
+        assert diagnostic.shape == RecordShape(
+            provider="codex",
+            record_path="response_item/message/content/hologram",
+            keys=("frames", "type"),
+        )
+
+    def test_recognised_records_carry_no_shape(self) -> None:
+        result = parse_fixture(
+            "codex_modern_primary_145.jsonl", session_id="codex-modern-primary"
+        )
+
+        assert result.messages
+        assert all(
+            diagnostic.shape is None
+            for diagnostic in result.diagnostics
+            if diagnostic.code
+            not in {
+                CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
+                CodexDiagnosticCode.UNKNOWN_COMPACTION,
+            }
+        )

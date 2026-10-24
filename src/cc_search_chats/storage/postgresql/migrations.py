@@ -31,6 +31,7 @@ _MIGRATIONS = (
     Migration(9, "drop_auto_refresh_state_schema.sql"),
     Migration(10, "coherent_selection_guard_schema.sql"),
     Migration(11, "provider_antigravity_schema.sql"),
+    Migration(12, "unknown_shape_schema.sql"),
 )
 
 

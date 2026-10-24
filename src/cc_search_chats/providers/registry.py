@@ -68,6 +68,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from enum import StrEnum
 
+    from cc_search_chats.core.record_shape import RecordShape
+
 
 class ParseDiagnostic(Protocol):
     """One provider parse outcome with optional physical coordinates."""
@@ -86,6 +88,9 @@ class ParseDiagnostic(Protocol):
 
     @property
     def source_byte_offset(self) -> int | None: ...
+
+    @property
+    def shape(self) -> RecordShape | None: ...
 
 
 class ParseResult(Protocol):
@@ -532,6 +537,7 @@ class ProviderAdapter:
     scan_unsupported_codes: frozenset[StrEnum]
     skippable_codes: frozenset[StrEnum]
     repaired_codes: frozenset[StrEnum]
+    unknown_shape_codes: frozenset[StrEnum]
     inspect_artifacts: bool
     admission: Callable[[bytes], AdmissionDecision] | None
     raw_record_matches: Callable[[NativeLocator, RecordEnvelope], bool]
@@ -629,7 +635,7 @@ _CLAUDE = ProviderAdapter(
     default_roots=_claude_default_roots,
     discover=discover_claude_sources,
     locator_key_kinds=permitted_locator_key_kinds(Provider.CLAUDE),
-    parser_state_version=8,
+    parser_state_version=9,
     initial_state=ClaudeParserState,
     serialize_state=_serialize_claude_state,
     deserialize_state=_deserialize_claude_state,
@@ -665,6 +671,14 @@ _CLAUDE = ProviderAdapter(
         }
     ),
     repaired_codes=frozenset({ClaudeDiagnosticCode.REPAIRED_UNICODE}),
+    unknown_shape_codes=frozenset(
+        {
+            ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD,
+            ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
+            ClaudeDiagnosticCode.UNKNOWN_ROLE,
+            ClaudeDiagnosticCode.INVALID_COMPACT_BOUNDARY,
+        }
+    ),
     inspect_artifacts=True,
     admission=None,
     raw_record_matches=_claude_record_matches,
@@ -681,7 +695,7 @@ _CODEX = ProviderAdapter(
     default_roots=_codex_default_roots,
     discover=discover_codex_sources,
     locator_key_kinds=permitted_locator_key_kinds(Provider.CODEX),
-    parser_state_version=6,
+    parser_state_version=7,
     initial_state=CodexParserState,
     serialize_state=_serialize_codex_state,
     deserialize_state=_deserialize_codex_state,
@@ -721,6 +735,17 @@ _CODEX = ProviderAdapter(
         }
     ),
     repaired_codes=frozenset({CodexDiagnosticCode.REPAIRED_UNICODE}),
+    unknown_shape_codes=frozenset(
+        {
+            CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM,
+            CodexDiagnosticCode.UNKNOWN_EVENT,
+            CodexDiagnosticCode.UNKNOWN_OUTER_TYPE,
+            CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
+            CodexDiagnosticCode.UNKNOWN_COMPACTION,
+            CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
+            CodexDiagnosticCode.UNKNOWN_ROLE,
+        }
+    ),
     inspect_artifacts=True,
     admission=None,
     raw_record_matches=_codex_record_matches,
@@ -776,6 +801,7 @@ _ANTIGRAVITY = ProviderAdapter(
             AntigravityDiagnosticCode.TRUNCATED_PROSE,
         }
     ),
+    unknown_shape_codes=frozenset({AntigravityDiagnosticCode.UNKNOWN_RECORD_PAIR}),
     inspect_artifacts=False,
     admission=admit_antigravity_session,
     raw_record_matches=_ordinal_record_matches,

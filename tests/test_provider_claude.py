@@ -15,6 +15,7 @@ from cc_search_chats.core.identity import (
     SessionKind,
     SubmittedBy,
 )
+from cc_search_chats.core.record_shape import RecordShape
 from cc_search_chats.providers.claude import (
     ClaudeDiagnosticCode,
     ClaudeParserState,
@@ -1447,3 +1448,116 @@ def test_arbitrary_unrecognized_content_never_becomes_searchable(
     assert [diagnostic.code for diagnostic in result.diagnostics] == [
         ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK
     ]
+
+
+_SHAPE_SENTINEL = "shape-value-decoy-" + "z" * 120
+
+
+class TestClaudeUnknownShapeFingerprints:
+    def test_unknown_conversation_record_carries_key_names_only(self) -> None:
+        result = parse_claude_session(
+            (
+                envelope(
+                    {
+                        "type": "future_conversation_record",
+                        "uuid": _SHAPE_SENTINEL,
+                        "message": {
+                            "role": "assistant",
+                            "content": _SHAPE_SENTINEL,
+                            "nested": {"deep": _SHAPE_SENTINEL},
+                        },
+                    }
+                ),
+            ),
+            context=ClaudeSessionContext(source_session_id="shape-session"),
+        )
+
+        [diagnostic] = result.diagnostics
+        assert diagnostic.code is ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD
+        assert diagnostic.shape == RecordShape(
+            provider="claude",
+            record_path="future_conversation_record",
+            keys=(
+                "message",
+                "type",
+                "uuid",
+                "payload.content",
+                "payload.nested",
+                "payload.role",
+            ),
+        )
+        assert _SHAPE_SENTINEL not in diagnostic.shape.canonical
+        assert "deep" not in diagnostic.shape.canonical
+
+    @pytest.mark.parametrize(
+        ("record", "code", "record_path", "keys"),
+        [
+            (
+                {
+                    "type": "user",
+                    "uuid": "role-shape",
+                    "message": {"role": "tool", "content": _SHAPE_SENTINEL},
+                },
+                ClaudeDiagnosticCode.UNKNOWN_ROLE,
+                "user",
+                ("message", "type", "uuid", "payload.content", "payload.role"),
+            ),
+            (
+                {
+                    "type": "assistant",
+                    "uuid": "block-shape",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "hologram", "frames": [_SHAPE_SENTINEL]}],
+                    },
+                },
+                ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
+                "assistant/content/hologram",
+                ("frames", "type"),
+            ),
+            (
+                {
+                    "type": "system",
+                    "subtype": "compact_boundary",
+                    "uuid": "boundary-shape",
+                    "compactMetadata": {"trigger": 7, "preTokens": _SHAPE_SENTINEL},
+                },
+                ClaudeDiagnosticCode.INVALID_COMPACT_BOUNDARY,
+                "system/compact_boundary",
+                (
+                    "compactMetadata",
+                    "subtype",
+                    "type",
+                    "uuid",
+                    "payload.preTokens",
+                    "payload.trigger",
+                ),
+            ),
+        ],
+    )
+    def test_every_unknown_shape_code_names_its_record_path(
+        self,
+        record: dict[str, object],
+        code: ClaudeDiagnosticCode,
+        record_path: str,
+        keys: tuple[str, ...],
+    ) -> None:
+        result = parse_claude_session(
+            (envelope(record),),
+            context=ClaudeSessionContext(source_session_id="shape-session"),
+        )
+
+        [diagnostic] = result.diagnostics
+        assert diagnostic.code is code
+        assert diagnostic.shape == RecordShape("claude", record_path, keys)
+        assert _SHAPE_SENTINEL not in diagnostic.shape.canonical
+
+    def test_recognised_records_carry_no_shape(self) -> None:
+        result = parse_fixture(
+            "claude_primary.jsonl",
+            session_id="claude-session-primary",
+            source_file_relative=Path("project/claude-session-primary.jsonl"),
+        )
+
+        assert result.messages
+        assert all(diagnostic.shape is None for diagnostic in result.diagnostics)

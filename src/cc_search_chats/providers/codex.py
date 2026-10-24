@@ -30,6 +30,11 @@ from cc_search_chats.core.identity import (
     is_unicode_scalar_text,
     repair_unstorable_text,
 )
+from cc_search_chats.core.record_shape import (
+    RecordShape,
+    path_segment,
+    record_shape,
+)
 from cc_search_chats.providers.source_discovery import (
     RecordEnvelope,
     SourceDiagnostic,
@@ -466,6 +471,7 @@ class CodexDiagnostic:
     record_ordinal: int | None
     source_line: int | None
     source_byte_offset: int | None
+    shape: RecordShape | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,7 +591,10 @@ def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
 
 
 def _diagnostic(
-    code: CodexDiagnosticCode, envelope: RecordEnvelope, detail: str
+    code: CodexDiagnosticCode,
+    envelope: RecordEnvelope,
+    detail: str,
+    shape: RecordShape | None = None,
 ) -> CodexDiagnostic:
     """Attach a named Codex outcome to Task 2 source coordinates."""
     return CodexDiagnostic(
@@ -594,6 +603,27 @@ def _diagnostic(
         record_ordinal=envelope.record_ordinal,
         source_line=envelope.source_line,
         source_byte_offset=envelope.source_byte_offset,
+        shape=shape,
+    )
+
+
+def _record_shape(record: _DecodedRecord, record_path: str) -> RecordShape:
+    """Fingerprint one outer record and its ``payload`` object by key names."""
+    payload = record.payload.get("payload")
+    return record_shape(
+        Provider.CODEX.value,
+        record_path,
+        record.payload,
+        payload if _is_json_object(payload) else None,
+    )
+
+
+def _block_shape(block: object, block_type: object) -> RecordShape:
+    """Fingerprint one message content block by its own key names."""
+    return record_shape(
+        Provider.CODEX.value,
+        f"response_item/message/content/{path_segment(block_type)}",
+        block if _is_json_object(block) else None,
     )
 
 
@@ -630,6 +660,7 @@ def _decode_records(
                     CodexDiagnosticCode.UNKNOWN_OUTER_TYPE,
                     envelope,
                     "top-level JSON value is not an object",
+                    record_shape(Provider.CODEX.value, "non_object", None),
                 )
             )
             continue
@@ -1038,6 +1069,7 @@ def _extract_message_text_block(
                     CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
                     envelope,
                     "message content block is not an object",
+                    _block_shape(block, None),
                 ),
             ),
         )
@@ -1080,6 +1112,7 @@ def _extract_message_text_block(
                     CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
                     envelope,
                     f"unrecognized or role-incompatible message block: {block_type!r}",
+                    _block_shape(block, block_type),
                 ),
             ),
         )
@@ -1114,17 +1147,20 @@ def _extract_message_text_block(
 
 
 def _message_content(
-    content: object,
+    payload: dict[str, object],
     role: str,
-    envelope: RecordEnvelope,
+    record: _DecodedRecord,
 ) -> tuple[str | None, tuple[CodexDiagnostic, ...]]:
     """Extract only role-compatible visible Codex message blocks."""
+    content = payload.get("content")
+    envelope = record.envelope
     if not isinstance(content, list):
         return None, (
             _diagnostic(
                 CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
                 envelope,
                 "message content is not a block list",
+                _record_shape(record, "response_item/message"),
             ),
         )
     if not content:
@@ -1213,6 +1249,7 @@ def _parse_tool_call_item(
                 CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM,
                 record.envelope,
                 "tool call lacks a recognized name/input shape",
+                _record_shape(record, f"response_item/{path_segment(item_type)}"),
             ),
         )
     messages = tuple(
@@ -1343,11 +1380,10 @@ def _parse_response_item(
                     CodexDiagnosticCode.UNKNOWN_ROLE,
                     record.envelope,
                     f"unrecognized Codex message role: {role!r}",
+                    _record_shape(record, "response_item/message"),
                 ),
             )
-        text, diagnostics = _message_content(
-            payload.get("content"), role, record.envelope
-        )
+        text, diagnostics = _message_content(payload, role, record)
         if text is None:
             return (), diagnostics
         native_id = _locator_safe_id(payload.get("id"))
@@ -1391,6 +1427,7 @@ def _parse_response_item(
             CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM,
             record.envelope,
             f"unrecognized response_item payload type: {item_type!r}",
+            _record_shape(record, f"response_item/{path_segment(item_type)}"),
         ),
     )
 
@@ -1427,6 +1464,7 @@ def _parse_event(
             CodexDiagnosticCode.UNKNOWN_EVENT,
             record.envelope,
             f"unrecognized event_msg payload type: {event_type!r}",
+            _record_shape(record, f"event_msg/{path_segment(event_type)}"),
         )
     if role == "user" and _is_injected_user_element(message):
         return None, _diagnostic(
@@ -1612,15 +1650,17 @@ def _token_usage_record_shape(record: _DecodedRecord) -> bool:
 def _excluded_outer_metadata_diagnostic(record: _DecodedRecord) -> CodexDiagnostic:
     """Classify audited outer metadata while retaining its prior failure policy."""
     if record.payload.get("type") == "token_usage_record":
-        recognized = _token_usage_record_shape(record)
+        if _token_usage_record_shape(record):
+            return _diagnostic(
+                CodexDiagnosticCode.EXCLUDED_METADATA,
+                record.envelope,
+                "token accounting is deliberately non-searchable",
+            )
         return _diagnostic(
-            CodexDiagnosticCode.EXCLUDED_METADATA
-            if recognized
-            else CodexDiagnosticCode.UNKNOWN_OUTER_TYPE,
+            CodexDiagnosticCode.UNKNOWN_OUTER_TYPE,
             record.envelope,
-            "token accounting is deliberately non-searchable"
-            if recognized
-            else "token_usage_record does not match an audited metadata shape",
+            "token_usage_record does not match an audited metadata shape",
+            _record_shape(record, "token_usage_record"),
         )
     if _inter_agent_metadata_shape(record):
         return _diagnostic(
@@ -1632,6 +1672,7 @@ def _excluded_outer_metadata_diagnostic(record: _DecodedRecord) -> CodexDiagnost
         CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
         record.envelope,
         "inter-agent metadata does not match an audited shape",
+        _record_shape(record, "inter_agent_communication_metadata"),
     )
 
 
@@ -1777,6 +1818,7 @@ def parse_codex_session(
                         CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
                         record.envelope,
                         "turn_context does not match an audited metadata shape",
+                        _record_shape(record, "turn_context"),
                     )
                 )
         elif outer_type == "world_state":
@@ -1786,6 +1828,7 @@ def parse_codex_session(
                         CodexDiagnosticCode.UNKNOWN_METADATA_SHAPE,
                         record.envelope,
                         "world_state does not match an audited metadata shape",
+                        _record_shape(record, "world_state"),
                     )
                 )
         elif outer_type == "response_item":
@@ -1823,6 +1866,7 @@ def parse_codex_session(
                         CodexDiagnosticCode.UNKNOWN_COMPACTION,
                         record.envelope,
                         "compacted record does not match an audited boundary shape",
+                        _record_shape(record, "compacted"),
                     )
                 )
             elif record.envelope.source_digest in seen_compaction_digests:
@@ -1845,6 +1889,7 @@ def parse_codex_session(
                     CodexDiagnosticCode.UNKNOWN_OUTER_TYPE,
                     record.envelope,
                     f"unrecognized Codex outer record type: {outer_type!r}",
+                    _record_shape(record, path_segment(outer_type)),
                 )
             )
 

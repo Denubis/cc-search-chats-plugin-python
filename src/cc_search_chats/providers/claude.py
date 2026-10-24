@@ -22,6 +22,11 @@ from cc_search_chats.core.identity import (
     is_unicode_scalar_text,
     repair_unstorable_text,
 )
+from cc_search_chats.core.record_shape import (
+    RecordShape,
+    path_segment,
+    record_shape,
+)
 from cc_search_chats.providers.source_discovery import RecordEnvelope
 
 if TYPE_CHECKING:
@@ -66,6 +71,7 @@ class ClaudeDiagnostic:
     record_ordinal: int
     source_line: int
     source_byte_offset: int
+    shape: RecordShape | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -749,7 +755,10 @@ def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
 
 
 def _diagnostic(
-    code: ClaudeDiagnosticCode, envelope: RecordEnvelope, detail: str
+    code: ClaudeDiagnosticCode,
+    envelope: RecordEnvelope,
+    detail: str,
+    shape: RecordShape | None = None,
 ) -> ClaudeDiagnostic:
     """Attach a named Claude outcome to Task 2 source coordinates."""
     return ClaudeDiagnostic(
@@ -758,6 +767,27 @@ def _diagnostic(
         record_ordinal=envelope.record_ordinal,
         source_line=envelope.source_line,
         source_byte_offset=envelope.source_byte_offset,
+        shape=shape,
+    )
+
+
+def _record_shape(payload: dict[str, object], nested_key: str) -> RecordShape:
+    """Fingerprint one record and its nested object (``message`` or metadata)."""
+    nested = payload.get(nested_key)
+    return record_shape(
+        Provider.CLAUDE.value,
+        path_segment(payload.get("type")),
+        payload,
+        nested if _is_json_object(nested) else None,
+    )
+
+
+def _block_shape(record_type: str, block: object, block_type: object) -> RecordShape:
+    """Fingerprint one content block by its own key names."""
+    return record_shape(
+        Provider.CLAUDE.value,
+        f"{record_type}/content/{path_segment(block_type)}",
+        block if _is_json_object(block) else None,
     )
 
 
@@ -794,6 +824,7 @@ def _decode_records(
                     ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD,
                     envelope,
                     "top-level JSON value is not an object",
+                    record_shape(Provider.CLAUDE.value, "non_object", None),
                 )
             )
             continue
@@ -984,6 +1015,7 @@ def _extract_text_block(
     envelope: RecordEnvelope,
     *,
     user_content: bool,
+    record_type: str,
 ) -> tuple[str | None, bool, bool, list[ClaudeDiagnostic]]:
     """Return one visible text block and its repair/filter state."""
     text = block.get("text")
@@ -997,6 +1029,7 @@ def _extract_text_block(
                     ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
                     envelope,
                     "text block lacks string text",
+                    _block_shape(record_type, block, "text"),
                 )
             ],
         )
@@ -1034,7 +1067,7 @@ def _extract_text_block(
 
 
 def _extract_tool_use_block(
-    block: dict[str, object], envelope: RecordEnvelope
+    block: dict[str, object], envelope: RecordEnvelope, *, record_type: str
 ) -> tuple[list[tuple[ContentClass, str]], list[ClaudeDiagnostic]]:
     """Return searchable name/input rows for one Claude tool invocation."""
     name = block.get("name")
@@ -1044,6 +1077,7 @@ def _extract_tool_use_block(
                 ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
                 envelope,
                 "tool_use block lacks a nonempty name",
+                _block_shape(record_type, block, "tool_use"),
             )
         ]
     rendered_input = _stringify_tool_value(block["input"]) if "input" in block else None
@@ -1079,9 +1113,14 @@ def _extract_tool_use_block(
 
 
 def _excluded_content_block_diagnostic(
-    block: dict[str, object], block_type: str, envelope: RecordEnvelope
+    block: dict[str, object],
+    block_type: str,
+    envelope: RecordEnvelope,
+    *,
+    record_type: str,
 ) -> ClaudeDiagnostic:
     """Name a ruled exclusion or an unrecognized Claude content block."""
+    shape: RecordShape | None = None
     if block_type == "tool_result":
         code = ClaudeDiagnosticCode.EXCLUDED_TOOL_RESULT
         detail = "tool result content is deliberately non-searchable"
@@ -1119,11 +1158,16 @@ def _excluded_content_block_diagnostic(
     else:
         code = ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK
         detail = f"unrecognized Claude content block: {block_type}"
-    return _diagnostic(code, envelope, detail)
+        shape = _block_shape(record_type, block, block_type)
+    return _diagnostic(code, envelope, detail, shape)
 
 
 def _extract_content(
-    content: object, envelope: RecordEnvelope, *, user_content: bool = False
+    content: object,
+    envelope: RecordEnvelope,
+    *,
+    user_content: bool = False,
+    record_type: str,
 ) -> tuple[list[tuple[ContentClass, str]], list[ClaudeDiagnostic]]:
     """Classify searchable blocks and name every excluded/unknown shape."""
     if isinstance(content, str):
@@ -1134,6 +1178,7 @@ def _extract_content(
                 ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
                 envelope,
                 "message content is neither a string nor a block list",
+                record_shape(Provider.CLAUDE.value, f"{record_type}/content", None),
             )
         ]
     if not content:
@@ -1157,13 +1202,14 @@ def _extract_content(
                     ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
                     envelope,
                     "content block is not a typed object",
+                    _block_shape(record_type, block, None),
                 )
             )
             continue
         block_type = block["type"]
         if block_type == "text":
             text, invalid, removed, text_diagnostics = _extract_text_block(
-                block, envelope, user_content=user_content
+                block, envelope, user_content=user_content, record_type=record_type
             )
             diagnostics.extend(text_diagnostics)
             invalid_prose = invalid_prose or invalid
@@ -1171,12 +1217,16 @@ def _extract_content(
             if text is not None:
                 prose.append(text)
         elif block_type == "tool_use":
-            tool_rows, tool_diagnostics = _extract_tool_use_block(block, envelope)
+            tool_rows, tool_diagnostics = _extract_tool_use_block(
+                block, envelope, record_type=record_type
+            )
             rows.extend(tool_rows)
             diagnostics.extend(tool_diagnostics)
         else:
             diagnostics.append(
-                _excluded_content_block_diagnostic(block, block_type, envelope)
+                _excluded_content_block_diagnostic(
+                    block, block_type, envelope, record_type=record_type
+                )
             )
     if prose and not invalid_prose:
         if not any(prose):
@@ -1258,11 +1308,18 @@ def _parse_boundary(
     """Parse one allowlisted compact boundary without speculative coercion."""
     payload = record.payload
     metadata = payload.get("compactMetadata")
+    shape = record_shape(
+        Provider.CLAUDE.value,
+        "system/compact_boundary",
+        payload,
+        metadata if _is_json_object(metadata) else None,
+    )
     if not _is_json_object(metadata):
         return None, _diagnostic(
             ClaudeDiagnosticCode.INVALID_COMPACT_BOUNDARY,
             record.envelope,
             "compact_boundary lacks object compactMetadata",
+            shape,
         )
     trigger = metadata.get("trigger")
     token_count = metadata.get("preTokens")
@@ -1279,6 +1336,7 @@ def _parse_boundary(
             ClaudeDiagnosticCode.INVALID_COMPACT_BOUNDARY,
             record.envelope,
             "compact_boundary metadata or UUID is not canonical",
+            shape,
         )
     timestamp = payload.get("timestamp")
     alias = _physical_alias(record.envelope, context.source_session_id, message_uuid)
@@ -1332,6 +1390,7 @@ def parse_claude_session(
                 payload["text"],
                 record.envelope,
                 user_content=payload.get("role") == "user",
+                record_type=path_segment(record_type),
             )
             diagnostics.extend(content_diagnostics)
             message_uuid = _message_uuid(payload)
@@ -1397,6 +1456,7 @@ def parse_claude_session(
                     ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD,
                     record.envelope,
                     f"unrecognized Claude record type: {record_type!r}",
+                    _record_shape(payload, "message"),
                 )
             )
             continue
@@ -1439,6 +1499,7 @@ def parse_claude_session(
                     ClaudeDiagnosticCode.UNKNOWN_ROLE,
                     record.envelope,
                     f"unrecognized or contradictory message role: {role!r}",
+                    _record_shape(payload, "message"),
                 )
             )
             continue
@@ -1453,7 +1514,10 @@ def parse_claude_session(
             )
             continue
         content_rows, content_diagnostics = _extract_content(
-            message.get("content"), record.envelope, user_content=role == "user"
+            message.get("content"),
+            record.envelope,
+            user_content=role == "user",
+            record_type=role,
         )
         diagnostics.extend(content_diagnostics)
         alias = _physical_alias(

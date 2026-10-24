@@ -3,8 +3,9 @@
 import hashlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import psycopg
 from psycopg import sql
@@ -50,6 +51,9 @@ from cc_search_chats.storage.postgresql.semantic import (
     Chunker,
     prepare_candidate_semantics,
 )
+
+if TYPE_CHECKING:
+    from cc_search_chats.core.record_shape import RecordShape
 
 _RETAINED_REFRESH_RUNS = 100
 _WAIT_HEARTBEAT_SECONDS = 5.0
@@ -142,6 +146,11 @@ class _Checkpoint:
     parser_state: object
     source_status: str
     skipped_record_count: int
+    unknown_shapes: Mapping[str, object]
+
+
+type _ShapeEntries = dict[str, dict[str, object]]
+"""Per-file unknown shapes keyed by digest: shape, count, first coordinates."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +176,7 @@ class _SourcePlan:
     next_source_line: int
     prior_state: object
     prior_skipped_record_count: int
+    prior_unknown_shapes: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def adapter(self) -> ProviderAdapter:
@@ -205,6 +215,7 @@ class _SourceRefreshError(RuntimeError):
         source_line: int | None = None,
         source_byte_offset: int | None = None,
         attempted_content_bytes: int = 0,
+        shape: RecordShape | None = None,
     ) -> None:
         super().__init__(detail)
         self.code = code
@@ -213,6 +224,7 @@ class _SourceRefreshError(RuntimeError):
         self.source_line = source_line
         self.source_byte_offset = source_byte_offset
         self.attempted_content_bytes = attempted_content_bytes
+        self.shape = shape
 
 
 def source_failure_summary(connection: psycopg.Connection) -> dict[str, int]:
@@ -415,6 +427,7 @@ def _load_checkpoints(
             parser_state=state,
             source_status=status,
             skipped_record_count=skipped_record_count,
+            unknown_shapes=unknown_shapes,
         )
         for (
             source_root,
@@ -430,12 +443,14 @@ def _load_checkpoints(
             state,
             status,
             skipped_record_count,
+            unknown_shapes,
         ) in connection.execute(
             """
             SELECT source_root_id, source_file_relative, file_device, file_inode,
                    observed_size, observed_mtime_ns, complete_byte_offset,
                    next_record_ordinal, next_source_line, parser_state_version,
-                   parser_state, source_status, skipped_record_count
+                   parser_state, source_status, skipped_record_count,
+                   unknown_shapes
             FROM cc_search_chats.source_file_current
             """
         )
@@ -616,6 +631,7 @@ def _plan_source(
                 next_source_line=checkpoint.next_source_line,
                 prior_state=prior_state,
                 prior_skipped_record_count=checkpoint.skipped_record_count,
+                prior_unknown_shapes=checkpoint.unknown_shapes,
             )
     return _SourcePlan(observed, "replace", 0, 0, 1, None, 0)
 
@@ -713,6 +729,7 @@ def _create_stage_tables(connection: psycopg.Connection) -> None:
             source_status text NOT NULL,
             pending_bytes bigint NOT NULL,
             skipped_record_count bigint NOT NULL,
+            unknown_shapes jsonb NOT NULL,
             advanced boolean NOT NULL,
             PRIMARY KEY (source_root_id, source_file_relative)
         ) ON COMMIT PRESERVE ROWS
@@ -871,8 +888,80 @@ def _parse_batch(
             record_ordinal=unsupported.record_ordinal,
             source_line=unsupported.source_line,
             source_byte_offset=unsupported.source_byte_offset,
+            shape=unsupported.shape,
         )
     return parsed
+
+
+def _merge_shape_entries(base: _ShapeEntries, addition: _ShapeEntries) -> None:
+    """Fold shape counts into ``base`` in place, keeping the earliest example."""
+    for digest, entry in addition.items():
+        existing = base.get(digest)
+        if existing is None:
+            base[digest] = dict(entry)
+            continue
+        existing["count"] = _shape_entry_int(existing, "count") + _shape_entry_int(
+            entry, "count"
+        )
+        if _shape_entry_int(entry, "first_ordinal") < _shape_entry_int(
+            existing, "first_ordinal"
+        ):
+            for key in ("first_ordinal", "first_line", "first_byte_offset"):
+                existing[key] = entry[key]
+
+
+def _shape_entry_int(entry: Mapping[str, object], key: str) -> int:
+    """Read one persisted integer field of a shape entry."""
+    value = entry.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(  # noqa: TRY004  # persisted-state ValueError contract
+            f"unknown shape entry {key} must be an integer"
+        )
+    return value
+
+
+def _shape_entries(value: Mapping[str, object]) -> _ShapeEntries:
+    """Copy a persisted per-file shape map into mutable entry dictionaries."""
+    entries: _ShapeEntries = {}
+    for digest, entry in value.items():
+        if not isinstance(entry, dict):
+            raise ValueError(  # noqa: TRY004  # persisted-state ValueError contract
+                "unknown shape entry must be an object"
+            )
+        entries[digest] = dict(entry)
+    return entries
+
+
+def _unknown_shape_entries(plan: _SourcePlan, parsed: ParseResult) -> _ShapeEntries:
+    """Count each silent-family unknown shape met in one parsed batch."""
+    adapter = plan.adapter
+    counted = adapter.unknown_shape_codes - adapter.unsupported_codes
+    entries: _ShapeEntries = {}
+    for diagnostic in parsed.diagnostics:
+        if diagnostic.code not in counted or diagnostic.shape is None:
+            continue
+        if (
+            diagnostic.record_ordinal is None
+            or diagnostic.source_line is None
+            or diagnostic.source_byte_offset is None
+        ):
+            raise _SourceRefreshError(
+                f"unknown shape {diagnostic.code.value} lacks source coordinates"
+            )
+        _merge_shape_entries(
+            entries,
+            {
+                diagnostic.shape.digest: {
+                    "shape": diagnostic.shape.as_json(),
+                    "count": 1,
+                    "first_ordinal": diagnostic.record_ordinal,
+                    "first_line": diagnostic.source_line,
+                    "first_byte_offset": diagnostic.source_byte_offset,
+                    "disposition": "ignored",
+                }
+            },
+        )
+    return entries
 
 
 def _skipped_record_diagnostics(
@@ -999,6 +1088,7 @@ def _stage_source_checkpoint(
     source_status: str,
     final_size: int,
     skipped_record_count: int,
+    unknown_shapes: Mapping[str, object],
 ) -> tuple[bool, int]:
     observed = plan.observed
     advanced = final_size > observed.size
@@ -1010,10 +1100,10 @@ def _stage_source_checkpoint(
             file_device, file_inode, observed_size, observed_mtime_ns,
             complete_byte_offset, next_record_ordinal, next_source_line,
             parser_state_version, parser_state, source_status, pending_bytes,
-            skipped_record_count, advanced
+            skipped_record_count, unknown_shapes, advanced
         ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s
+            %s, %s
         )
         ON CONFLICT (source_root_id, source_file_relative) DO UPDATE SET
             disposition = EXCLUDED.disposition,
@@ -1029,6 +1119,7 @@ def _stage_source_checkpoint(
             source_status = EXCLUDED.source_status,
             pending_bytes = EXCLUDED.pending_bytes,
             skipped_record_count = EXCLUDED.skipped_record_count,
+            unknown_shapes = EXCLUDED.unknown_shapes,
             advanced = EXCLUDED.advanced
         """,
         (
@@ -1047,6 +1138,7 @@ def _stage_source_checkpoint(
             source_status,
             pending_bytes,
             skipped_record_count,
+            Jsonb(dict(unknown_shapes)),
             advanced,
         ),
     )
@@ -1097,6 +1189,7 @@ def _stage_index_artifact(
         source_status="excluded",
         final_size=plan.observed.size,
         skipped_record_count=0,
+        unknown_shapes={},
     )
     return advanced, pending, 0, ()
 
@@ -1109,6 +1202,7 @@ class _ParsedSource:
     state: object
     skipped: tuple[dict[str, object], ...]
     repaired: tuple[dict[str, object], ...]
+    unknown_shapes: _ShapeEntries
     attempted_bytes: int
     cwd_established: bool
 
@@ -1117,6 +1211,14 @@ class _ParsedSource:
 class _ExcludedSource:
     decision: AdmissionDecision
     attempted_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedBatch:
+    parsed: ParseResult
+    skipped: tuple[dict[str, object], ...]
+    repaired: tuple[dict[str, object], ...]
+    unknown_shapes: _ShapeEntries
 
 
 def _read_source_batch(
@@ -1182,7 +1284,7 @@ def _stage_parsed_batch(
     plan: _SourcePlan,
     batch: BoundedReadResult,
     state: object,
-) -> tuple[ParseResult, tuple[dict[str, object], ...], tuple[dict[str, object], ...]]:
+) -> _StagedBatch:
     try:
         parsed = _parse_batch(plan, batch.envelopes, batch.diagnostics, state)
     except _SourceRefreshError as error:
@@ -1201,7 +1303,7 @@ def _stage_parsed_batch(
         plan,
         _messages_without_skipped_records(parsed.messages, skipped_ordinals),
     )
-    return parsed, skips, repairs
+    return _StagedBatch(parsed, skips, repairs, _unknown_shape_entries(plan, parsed))
 
 
 def _stamp_staged_cwd(
@@ -1234,6 +1336,7 @@ def _parse_source_batches(
     state: object = plan.prior_state
     skipped: list[dict[str, object]] = []
     repaired: list[dict[str, object]] = []
+    unknown_shapes: _ShapeEntries = {}
     cwd_established = False
     if observed.size == offset and state is None:
         state = plan.adapter.initial_state()
@@ -1244,11 +1347,13 @@ def _parse_source_batches(
         excluded = _admission_decision(plan, batch) if offset == 0 else None
         if excluded is not None:
             return _ExcludedSource(excluded, batch.next_source_byte_offset)
-        parsed, skips, repairs = _stage_parsed_batch(connection, plan, batch, state)
+        staged = _stage_parsed_batch(connection, plan, batch, state)
+        parsed = staged.parsed
         state = parsed.next_state
         cwd_established = cwd_established or plan.adapter.cwd_established(parsed)
-        skipped.extend(skips)
-        repaired.extend(repairs)
+        skipped.extend(staged.skipped)
+        repaired.extend(staged.repaired)
+        _merge_shape_entries(unknown_shapes, staged.unknown_shapes)
         next_offset = batch.next_source_byte_offset
         ordinal = batch.next_record_ordinal
         source_line = batch.next_source_line
@@ -1270,6 +1375,7 @@ def _parse_source_batches(
         state=state,
         skipped=tuple(skipped),
         repaired=tuple(repaired),
+        unknown_shapes=unknown_shapes,
         attempted_bytes=max(0, offset - plan.start_byte_offset),
         cwd_established=cwd_established,
     )
@@ -1312,6 +1418,7 @@ def _stage_excluded_source(
         source_status="excluded",
         final_size=plan.observed.size,
         skipped_record_count=0,
+        unknown_shapes={},
     )
     return advanced, pending, excluded.attempted_bytes, ()
 
@@ -1337,6 +1444,8 @@ def _parse_and_stage_source(
             connection, _SourcePlan(observed, "replace", 0, 0, 1, None, 0)
         )
     final_size = _verified_final_size(observed)
+    unknown_shapes = _shape_entries(plan.prior_unknown_shapes)
+    _merge_shape_entries(unknown_shapes, parsed.unknown_shapes)
     advanced, pending = _stage_source_checkpoint(
         connection,
         plan,
@@ -1347,6 +1456,7 @@ def _parse_and_stage_source(
         source_status="indexed",
         final_size=final_size,
         skipped_record_count=(plan.prior_skipped_record_count + len(parsed.skipped)),
+        unknown_shapes=unknown_shapes,
     )
     return (
         advanced,
@@ -1415,14 +1525,14 @@ def _record_failed_observation(
             failure_source_line, failure_source_byte_offset,
             failure_code, failure_detail, failure_class,
             attempted_content_bytes, consecutive_failures,
-            retry_after, last_run_id
+            retry_after, last_run_id, failure_shape
         ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
             %s, %s,
             CASE WHEN %s = 'transient'
                  THEN now() + make_interval(secs => %s)
                  ELSE NULL END,
-            %s
+            %s, %s
         )
         ON CONFLICT (source_root_id, source_file_relative) DO UPDATE SET
             provider = EXCLUDED.provider,
@@ -1445,7 +1555,8 @@ def _record_failed_observation(
             END,
             last_failed_at = now(),
             retry_after = EXCLUDED.retry_after,
-            last_run_id = EXCLUDED.last_run_id
+            last_run_id = EXCLUDED.last_run_id,
+            failure_shape = EXCLUDED.failure_shape
         """,
         (
             observed.root.source_root_id,
@@ -1467,6 +1578,7 @@ def _record_failed_observation(
             error.failure_class,
             retry_seconds,
             run_id,
+            Jsonb(error.shape.as_json()) if error.shape is not None else None,
             same_failure,
         ),
     )
@@ -1726,13 +1838,13 @@ def _publish_coherent_candidate(
                 observed_size, observed_mtime_ns, complete_byte_offset,
                 next_record_ordinal, next_source_line, parser_state_version,
                 parser_state, source_status, pending_bytes, skipped_record_count,
-                updated_corpus_generation
+                unknown_shapes, updated_corpus_generation
             )
             SELECT source_root_id, source_file_relative, file_device, file_inode,
                    observed_size, observed_mtime_ns, complete_byte_offset,
                    next_record_ordinal, next_source_line, parser_state_version,
                    parser_state, source_status, pending_bytes,
-                   skipped_record_count, %s
+                   skipped_record_count, unknown_shapes, %s
             FROM pg_temp.refresh_stage_source
             ON CONFLICT (source_root_id, source_file_relative) DO UPDATE SET
                 file_device = EXCLUDED.file_device,
@@ -1747,6 +1859,7 @@ def _publish_coherent_candidate(
                 source_status = EXCLUDED.source_status,
                 pending_bytes = EXCLUDED.pending_bytes,
                 skipped_record_count = EXCLUDED.skipped_record_count,
+                unknown_shapes = EXCLUDED.unknown_shapes,
                 updated_corpus_generation =
                     EXCLUDED.updated_corpus_generation
             """,
