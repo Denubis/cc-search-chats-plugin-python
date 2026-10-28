@@ -10,7 +10,7 @@ deadline exceeded the application's 64 MB transaction-local temporary-file
 limit. The shipped query joined every eligible chunk to message prose and then
 used a full-set window sort to choose each message's best chunk. The measured
 failure and candidate-first probes are recorded in Prompt 15 and
-`codex-prompts/context/15-explain-probes.out`.
+its explain-probes output in the prompt-exchange directory.
 
 Pgvector's `<#>` operator returns negative inner product, so exact highest-inner-
 product retrieval orders that value ascending. A bounded query also needs a

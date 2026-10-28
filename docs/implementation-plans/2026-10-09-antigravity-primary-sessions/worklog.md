@@ -10,7 +10,7 @@ exact evidence. Append in order; never move pending work here early.
   CLI 2.3.6; the documented grep fallback printed `1` for each UUID in
   `~/.claude/projects/-home-brian-people-Brian-cc-search-chats-plugin-python/42102a00-89eb-4f30-ad4e-e12c7a65e697.jsonl`.
 - Working tree clean on `main` at `27b637bbdd3cb99972132d533c3ce614906e95b2`;
-  unrelated worktree `.worktrees/message-attribution` present.
+  unrelated message-attribution worktree present.
 - Read-only survey of `~/.gemini/antigravity-cli/brain` (metadata plus first
   records and key sets only): 237 directories, 228 `transcript_full.jsonl`,
   eight October sessions (seven `USER_EXPLICIT`/`USER_INPUT`, one
@@ -23,7 +23,7 @@ exact evidence. Append in order; never move pending work here early.
 ## Before the first edit (2026-10-09)
 
 - `git status` clean on `main` at `27b637bbdd3cb99972132d533c3ce614906e95b2`
-  apart from the untracked plan directory; `.worktrees/message-attribution`
+  apart from the untracked plan directory; the message-attribution worktree
   at `c724344` untouched.
 - Baseline at `27b637b`: `uv run --frozen pytest -q -m 'not postgresql'` →
   875 passed, 148 deselected; `uv run --frozen pytest -q -m postgresql` →
@@ -340,7 +340,7 @@ preserving upgrade.
   `rendered` and `renderedRole`. Neither keyset is in
   `providers/claude.py`; the deterministic `unknown_conversation_record`
   failure is the designed response. `needs_attention` fell from 98 to 5; the
-  five are new. Ticket raised in `.notes/project_open-questions.md`; not in
+  five are new. Ticket raised in the open-questions ticket file; not in
   this plan's scope.
 - Five design-authority locators now return `resolved` through the installed
   CLI; design status flipped to Accepted.
@@ -365,7 +365,7 @@ gates clean. Installed from that commit, indexed (run published generation
 107, semantic build 92): `needs_attention 0`, `blocked 0`,
 `completeness complete`, Antigravity unchanged at 7 indexed / 221 excluded.
 Timer re-enabled; Claude plugin updated to 2.4.1; Codex plugin re-added.
-Decision recorded in `.notes/decisions/2026-10-10-claude-2-1-295-record-shapes.md`.
+Decision recorded in `docs/decisions/0010-claude-2-1-295-record-shapes.md`.
 
 ## Follow-up: Antigravity error messages and Claude Code 2.1.288–2.1.302 record shapes (2026-10-21)
 

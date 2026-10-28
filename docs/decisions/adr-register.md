@@ -16,3 +16,4 @@ ruling.
 | [0007](0007-back-up-only-before-a-schema-migration.md) | Back up the database only before a schema migration | Accepted | 2026-09-20 |
 | [0008](0008-index-recent-primary-antigravity-sessions.md) | Index recent primary Antigravity sessions under a new design | Accepted | 2026-10-08 |
 | [0009](0009-unknown-shape-reporting.md) | Report every unknown record shape; ignore under a flag; acknowledge by file | Accepted | 2026-10-24 |
+| [0010](0010-claude-2-1-295-record-shapes.md) | Admit Claude Code 2.1.295 record shapes immediately (moved from the notes directory on 2026-10-26) | Answered | 2026-10-10 |
