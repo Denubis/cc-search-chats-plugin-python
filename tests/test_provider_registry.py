@@ -14,7 +14,7 @@ from cc_search_chats.providers.registry import (
 )
 
 RECORD_POLICY_PARSER_STATE_VERSIONS = {
-    Provider.CLAUDE: 9,
+    Provider.CLAUDE: 10,
     Provider.CODEX: 7,
     Provider.ANTIGRAVITY: 2,
 }

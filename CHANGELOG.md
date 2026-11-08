@@ -1,5 +1,25 @@
 # Changelog
 
+## cc-search-chats 2.5.1
+
+**Fixed:**
+- Claude Code writes a `tools-used` row when it compacts a session, carrying
+  `sessionId` and `tools`, the names of the tools used before the summary. It
+  is now excluded metadata rather than an unknown record, so the sessions that
+  hold it, including ones still being written, no longer fail closed. Its tool
+  names create no messages or tool rows and are not searchable in any mode.
+- Further Claude metadata shapes are now excluded rather than unknown:
+  `session-owner` rows (`accountUuid`, `organizationUuid`), `dev-mods` rows
+  (`folder`), `queue-operation` rows carrying `reason` without `content`, and
+  attachment rows that combine already-audited keys (`agentId` with
+  `renderedInHumanTurn`, `renderedRole` and `slug`; `renderedBesideToolResult`
+  with `renderedRole` alone; `agentName`, `session_id`, `slug` and `teamName`
+  with `renderedRole`, with or without `renderedBesideToolResult`). Other
+  unaudited shapes still fail closed.
+- The Claude parser-state version advances to 10 to retry unchanged blocked
+  files on the next index run. Claude sources reparse once; unchanged
+  embeddings are reused.
+
 ## cc-search-chats 2.5.0
 
 **Added:**

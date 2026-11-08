@@ -409,6 +409,25 @@ class TestClaudeRecognizedShapes:
                 "session_id",
                 "teamName",
             },
+            {"agentId", "rendered", "renderedInHumanTurn", "renderedRole", "slug"},
+            {"rendered", "renderedBesideToolResult", "renderedRole"},
+            {
+                "agentName",
+                "rendered",
+                "renderedRole",
+                "session_id",
+                "slug",
+                "teamName",
+            },
+            {
+                "agentName",
+                "rendered",
+                "renderedBesideToolResult",
+                "renderedRole",
+                "session_id",
+                "slug",
+                "teamName",
+            },
         ],
         ids=lambda extras: "+".join(sorted(extras)),
     )
@@ -538,6 +557,16 @@ class TestClaudeRecognizedShapes:
             ("api-request-blob", {"type", "hash", "message", "sessionId"}),
             ("api-request-blob", {"type", "agentId", "hash", "message", "sessionId"}),
             ("relocated", {"type", "relocatedCwd", "sessionId"}),
+            ("tools-used", {"type", "sessionId", "tools"}),
+            (
+                "session-owner",
+                {"type", "accountUuid", "organizationUuid", "sessionId"},
+            ),
+            ("dev-mods", {"type", "folder", "sessionId"}),
+            (
+                "queue-operation",
+                {"type", "operation", "reason", "sessionId", "timestamp"},
+            ),
             ("launched", {"type"}),
             ("started", {"type", "agentId", "key", "label", "phase"}),
             (
@@ -635,6 +664,48 @@ class TestClaudeRecognizedShapes:
 
         assert result.messages == ()
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EXCLUDED_METADATA
+        ]
+
+    def test_compaction_tools_used_record_leaves_the_conversation_searchable(
+        self, tmp_path: Path
+    ) -> None:
+        def visible(role: str, uuid: str, text: str) -> dict[str, object]:
+            return {
+                "type": role,
+                "uuid": uuid,
+                "sessionId": "session",
+                "timestamp": "2026-11-08T00:00:00Z",
+                "isSidechain": False,
+                "message": {"role": role, "content": text},
+            }
+
+        records = (
+            visible("user", "before-compaction", "prose before the summary"),
+            {
+                "type": "tools-used",
+                "sessionId": "session",
+                "tools": ["SyntheticToolSentinel", "OtherToolSentinel"],
+            },
+            visible("assistant", "after-compaction", "prose after the summary"),
+        )
+        path = tmp_path / "session.jsonl"
+        path.write_text("".join(json.dumps(item) + "\n" for item in records))
+        read = read_bounded_jsonl(
+            path,
+            source_file_relative=Path("project/session.jsonl"),
+            target_size=path.stat().st_size,
+        )
+
+        result = parse_claude_session(
+            read.envelopes, context=ClaudeSessionContext(source_session_id="session")
+        )
+
+        assert [message.text for message in result.messages] == [
+            "prose before the summary",
+            "prose after the summary",
+        ]
+        assert [d.code for d in result.diagnostics if d.record_ordinal == 1] == [
             ClaudeDiagnosticCode.EXCLUDED_METADATA
         ]
 

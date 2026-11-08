@@ -729,6 +729,31 @@ _CLAUDE_METADATA_KEYSETS["api-request-blob"] = {
 _CLAUDE_METADATA_KEYSETS["relocated"] = {
     frozenset({"type", "relocatedCwd", "sessionId"})
 }
+_CLAUDE_METADATA_KEYSETS["tools-used"] = {frozenset({"type", "sessionId", "tools"})}
+_CLAUDE_METADATA_KEYSETS["session-owner"] = {
+    frozenset({"type", "accountUuid", "organizationUuid", "sessionId"})
+}
+_CLAUDE_METADATA_KEYSETS["dev-mods"] = {frozenset({"type", "folder", "sessionId"})}
+_CLAUDE_METADATA_KEYSETS["queue-operation"].add(
+    frozenset({"type", "operation", "reason", "sessionId", "timestamp"})
+)
+_CLAUDE_METADATA_KEYSETS["attachment"].update(
+    _ATTACHMENT_BASE_KEYS | frozenset(extras)
+    for extras in (
+        {"agentId", "rendered", "renderedInHumanTurn", "renderedRole", "slug"},
+        {"rendered", "renderedBesideToolResult", "renderedRole"},
+        {"agentName", "rendered", "renderedRole", "session_id", "slug", "teamName"},
+        {
+            "agentName",
+            "rendered",
+            "renderedBesideToolResult",
+            "renderedRole",
+            "session_id",
+            "slug",
+            "teamName",
+        },
+    )
+)
 
 
 def _is_known_metadata_record(payload: dict[str, object]) -> bool:
