@@ -667,8 +667,71 @@ class TestClaudeRecognizedShapes:
             ClaudeDiagnosticCode.EXCLUDED_METADATA
         ]
 
-    def test_compaction_tools_used_record_leaves_the_conversation_searchable(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("record_type", "extras"),
+        [
+            pytest.param(
+                "tools-used",
+                {"tools": ["SyntheticToolSentinel", "OtherToolSentinel"]},
+                id="tools-used",
+            ),
+            pytest.param(
+                "attachment",
+                {
+                    "agentName": "worker",
+                    "teamName": "team",
+                    "rendered": [{"content": "injected notification"}],
+                    "renderedInHumanTurn": [
+                        {"content": "injected human-turn notification"}
+                    ],
+                    "renderedRole": "system",
+                    "session_id": "session",
+                    "slug": "slug",
+                },
+                id="queued-command-team-human-turn",
+            ),
+            pytest.param(
+                "attachment",
+                {
+                    "agentName": "worker",
+                    "teamName": "team",
+                    "attachment": {
+                        "type": "hook_additional_context",
+                        "content": ["injected hook context"],
+                        "hookName": "synthetic-hook",
+                        "toolUseID": "synthetic-tool",
+                        "hookEvent": "synthetic-event",
+                    },
+                    "rendered": [{"content": "injected hook context"}],
+                    "renderedRole": "user",
+                    "slug": "slug",
+                },
+                id="hook-context-team",
+            ),
+            pytest.param(
+                "attachment",
+                {
+                    "rendered": [{"content": "injected notification"}],
+                    "renderedInHumanTurn": [
+                        {"content": "injected human-turn notification"}
+                    ],
+                    "renderedRole": "system",
+                },
+                id="queued-command-human-turn",
+            ),
+            pytest.param(
+                "queue-operation",
+                {
+                    "operation": "remove",
+                    "commandUuid": "synthetic-command",
+                    "timestamp": "2026-11-08T00:00:00Z",
+                },
+                id="queue-remove-command",
+            ),
+        ],
+    )
+    def test_observed_metadata_records_leave_the_conversation_searchable(
+        self, record_type: str, extras: dict[str, object], tmp_path: Path
     ) -> None:
         def visible(role: str, uuid: str, text: str) -> dict[str, object]:
             return {
@@ -680,13 +743,14 @@ class TestClaudeRecognizedShapes:
                 "message": {"role": role, "content": text},
             }
 
+        metadata = (
+            self._attachment_with(extras)
+            if record_type == "attachment"
+            else {"type": record_type, "sessionId": "session", **extras}
+        )
         records = (
             visible("user", "before-compaction", "prose before the summary"),
-            {
-                "type": "tools-used",
-                "sessionId": "session",
-                "tools": ["SyntheticToolSentinel", "OtherToolSentinel"],
-            },
+            metadata,
             visible("assistant", "after-compaction", "prose after the summary"),
         )
         path = tmp_path / "session.jsonl"
@@ -708,6 +772,8 @@ class TestClaudeRecognizedShapes:
         assert [d.code for d in result.diagnostics if d.record_ordinal == 1] == [
             ClaudeDiagnosticCode.EXCLUDED_METADATA
         ]
+        assert result.boundaries == ()
+        assert result.next_state == ClaudeParserState()
 
     def test_non_text_tool_result_is_explicitly_excluded(self) -> None:
         result = parse_claude_session(

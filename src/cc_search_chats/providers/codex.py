@@ -1319,6 +1319,20 @@ def _ghost_snapshot_shape(payload: dict[str, object]) -> bool:
     )
 
 
+def _response_item_metadata_detail(payload: dict[str, object]) -> str | None:
+    """Classify audited non-conversation response metadata."""
+    if _ghost_snapshot_shape(payload):
+        return "ghost snapshot is deliberately non-searchable"
+    reasoning = payload.get("reasoning")
+    if (
+        payload.get("type") == "configuration_update"
+        and _is_json_object(reasoning)
+        and isinstance(reasoning.get("effort"), str)
+    ):
+        return "configuration update is deliberately non-searchable"
+    return None
+
+
 def _parse_response_item(
     record: _DecodedRecord,
     *,
@@ -1338,12 +1352,13 @@ def _parse_response_item(
             ),
         )
     item_type = payload.get("type")
-    if _ghost_snapshot_shape(payload):
+    metadata_detail = _response_item_metadata_detail(payload)
+    if metadata_detail is not None:
         return (), (
             _diagnostic(
                 CodexDiagnosticCode.EXCLUDED_METADATA,
                 record.envelope,
-                "ghost snapshot is deliberately non-searchable",
+                metadata_detail,
             ),
         )
     if item_type == "reasoning":

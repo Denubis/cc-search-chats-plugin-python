@@ -195,6 +195,8 @@ def laptop_metadata_record(kind: str) -> dict[str, object]:
             "turn_token_usage": dict(usage),
             "thread_token_usage": dict(usage),
         }
+    elif kind == "configuration_update":
+        payload = {"type": "configuration_update", "reasoning": {"effort": "xhigh"}}
     else:
         payload = {
             "type": "ghost_snapshot",
@@ -205,12 +207,20 @@ def laptop_metadata_record(kind: str) -> dict[str, object]:
                 "preexisting_untracked_dirs": ["synthetic-private-dir"],
             },
         }
-    return {
-        "type": "response_item" if kind == "ghost_snapshot" else kind,
+    record: dict[str, object] = {
+        "type": "token_usage_record"
+        if kind == "token_usage_record"
+        else "response_item",
         "timestamp": "2026-09-06T09:00:00Z",
         "ordinal": 17,
         "payload": payload,
     }
+    if kind == "configuration_update":
+        record["metadata"] = {
+            "client_authored": True,
+            "harness_authored_configuration": True,
+        }
+    return record
 
 
 class TestCodexLaptopMetadata:
@@ -278,7 +288,9 @@ class TestCodexLaptopMetadata:
             CodexDiagnosticCode.EXCLUDED_NON_TEXT_CONTENT
         ]
 
-    @pytest.mark.parametrize("kind", ["token_usage_record", "ghost_snapshot"])
+    @pytest.mark.parametrize(
+        "kind", ["token_usage_record", "ghost_snapshot", "configuration_update"]
+    )
     @pytest.mark.parametrize("added_metadata", [False, True])
     def test_audited_metadata_is_excluded_beside_visible_prose(
         self, kind: str, added_metadata: bool
@@ -364,6 +376,8 @@ class TestCodexLaptopMetadata:
             ("ghost_snapshot", ("payload", "ghost_commit"), "not an object"),
             ("ghost_snapshot", ("payload", "ghost_commit", "id"), None),
             ("ghost_snapshot", ("payload", "ghost_commit", "parent"), []),
+            ("configuration_update", ("payload", "reasoning"), []),
+            ("configuration_update", ("payload", "reasoning", "effort"), None),
             (
                 "ghost_snapshot",
                 ("payload", "ghost_commit", "preexisting_untracked_files"),
@@ -395,7 +409,7 @@ class TestCodexLaptopMetadata:
         assert result.messages == ()
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
             CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM
-            if kind == "ghost_snapshot"
+            if kind != "token_usage_record"
             else CodexDiagnosticCode.UNKNOWN_OUTER_TYPE
         ]
 
@@ -431,6 +445,8 @@ class TestCodexLaptopMetadata:
                 )
             ),
             ("ghost_snapshot", ("payload", "ghost_commit")),
+            ("configuration_update", ("payload", "reasoning")),
+            ("configuration_update", ("payload", "reasoning", "effort")),
             *(
                 ("ghost_snapshot", ("payload", "ghost_commit", field))
                 for field in (
@@ -461,11 +477,13 @@ class TestCodexLaptopMetadata:
         assert result.messages == ()
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
             CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM
-            if kind == "ghost_snapshot"
+            if kind != "token_usage_record"
             else CodexDiagnosticCode.UNKNOWN_OUTER_TYPE
         ]
 
-    @pytest.mark.parametrize("kind", ["token_usage_record", "ghost_snapshot"])
+    @pytest.mark.parametrize(
+        "kind", ["token_usage_record", "ghost_snapshot", "configuration_update"]
+    )
     @pytest.mark.parametrize("defect", ["conversation", "unregistered"])
     def test_conversation_impostors_and_unregistered_metadata_remain_unknown(
         self, kind: str, defect: str
@@ -479,7 +497,7 @@ class TestCodexLaptopMetadata:
                 "role": "user",
                 "content": [{"type": "input_text", "text": "must not disappear"}],
             }
-        elif kind == "ghost_snapshot":
+        elif kind != "token_usage_record":
             payload["type"] = "future_snapshot"
         else:
             record["type"] = "future_usage_record"
@@ -492,7 +510,7 @@ class TestCodexLaptopMetadata:
         assert result.messages == ()
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
             CodexDiagnosticCode.UNKNOWN_RESPONSE_ITEM
-            if kind == "ghost_snapshot"
+            if kind != "token_usage_record"
             else CodexDiagnosticCode.UNKNOWN_OUTER_TYPE
         ]
 

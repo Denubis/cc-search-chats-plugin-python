@@ -485,6 +485,7 @@ _CLAUDE_METADATA_KEYSETS = {
     "queue-operation": {
         frozenset({"type", "content", "operation", "sessionId", "timestamp"}),
         frozenset({"type", "content", "operation", "reason", "sessionId", "timestamp"}),
+        frozenset({"type", "commandUuid", "operation", "sessionId", "timestamp"}),
         frozenset(
             {
                 "type",
@@ -742,7 +743,18 @@ _CLAUDE_METADATA_KEYSETS["attachment"].update(
     for extras in (
         {"agentId", "rendered", "renderedInHumanTurn", "renderedRole", "slug"},
         {"rendered", "renderedBesideToolResult", "renderedRole"},
+        {"rendered", "renderedInHumanTurn", "renderedRole"},
+        {"agentName", "rendered", "renderedRole", "slug", "teamName"},
         {"agentName", "rendered", "renderedRole", "session_id", "slug", "teamName"},
+        {
+            "agentName",
+            "rendered",
+            "renderedInHumanTurn",
+            "renderedRole",
+            "session_id",
+            "slug",
+            "teamName",
+        },
         {
             "agentName",
             "rendered",

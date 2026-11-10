@@ -1,5 +1,20 @@
 # Changelog
 
+## cc-search-chats 2.5.2
+
+**Fixed:**
+- Codex `configuration_update` response items carrying a `reasoning.effort`
+  setting are now excluded metadata, so they no longer block their sessions.
+  They create no searchable messages or tool rows.
+- Claude queued-command and hook-context attachments now admit three observed
+  combinations of `renderedInHumanTurn`, `renderedRole`, `agentName`,
+  `teamName`, `session_id` and `slug`. Queue-removal records carrying
+  `commandUuid` without `content` are also excluded metadata. The injected
+  attachment text and queue metadata remain unsearchable.
+- The Claude parser-state version advances to 11 and Codex to 8 so unchanged
+  blocked files retry on the next index run. Both providers reparse once;
+  unchanged embeddings are reused.
+
 ## cc-search-chats 2.5.1
 
 **Fixed:**

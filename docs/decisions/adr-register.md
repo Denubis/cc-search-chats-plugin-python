@@ -1,7 +1,7 @@
 # ADR register
 
 Index of architecture decision records for cc-search-chats. Each record lives in
-this directory as `NNNN-<slug>.md`. A record stays `Proposed` until the human
+this directory as `NNNN-<slug>.md` or `YYYY-MM-DD-<initials>-<slug>.md`. A record stays `Proposed` until the human
 rules on it, at which point it becomes `Accepted` and carries the date of the
 ruling.
 
@@ -17,3 +17,4 @@ ruling.
 | [0008](0008-index-recent-primary-antigravity-sessions.md) | Index recent primary Antigravity sessions under a new design | Accepted | 2026-10-08 |
 | [0009](0009-unknown-shape-reporting.md) | Report every unknown record shape; ignore under a flag; acknowledge by file | Accepted | 2026-10-24 |
 | [0010](0010-claude-2-1-295-record-shapes.md) | Admit Claude Code 2.1.295 record shapes immediately (moved from the notes directory on 2026-10-26) | Answered | 2026-10-10 |
+| [2026-11-10-bbs-commit-parser-repair](2026-11-10-bbs-commit-parser-repair.md) | Commit the prepared 2.5.2 parser repair locally | Accepted | 2026-11-10 |

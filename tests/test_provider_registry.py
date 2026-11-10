@@ -14,8 +14,8 @@ from cc_search_chats.providers.registry import (
 )
 
 RECORD_POLICY_PARSER_STATE_VERSIONS = {
-    Provider.CLAUDE: 10,
-    Provider.CODEX: 7,
+    Provider.CLAUDE: 11,
+    Provider.CODEX: 8,
     Provider.ANTIGRAVITY: 2,
 }
 REGISTERED = list(Provider)
