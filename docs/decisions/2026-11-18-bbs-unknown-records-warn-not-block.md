@@ -45,8 +45,28 @@ push it. Installation remains a separate action.
 
 **Original-message resolver:**
 `ccchat:v1:claude:df736ff6-7aff-45a9-9d02-b9a279a93026:uuid:5091de64-0f26-4236-85e5-26db7fa2ccaa`,
-same native source, line 761, timestamp `2026-11-18T02:09:54.231Z`; not
-checked with `cc-search-chats resolve` at commit time.
+same native source, line 761, timestamp `2026-11-18T02:09:54.231Z`;
+`cc-search-chats resolve` returned `status: resolved` on 2026-11-18. The
+commit is `e5fc996aa2a64a42ea9648b09597f7b10dca83a5`.
+
+## Install authorisation
+
+**Question answered:** May I install chat-search 2.5.3 on this computer now and run the index pass that follows it?
+
+**Human answer (verbatim):** "yes"
+
+**Decision:** Install cc-search-chats 2.5.3 from
+`e5fc996aa2a64a42ea9648b09597f7b10dca83a5` by the preserving-upgrade route of
+`docs/runbooks/laptop-deployment.md` and run the first index. Done on
+2026-11-18: the index finished with no blocked files, no source issues and no
+pending unknown shapes, and the literal and semantic smoke searches both found
+the expected message, the semantic one delivered as `hybrid`. The cross-vendor
+installed UAT was not run.
+
+**Original-message resolver:**
+`ccchat:v1:claude:df736ff6-7aff-45a9-9d02-b9a279a93026:uuid:c3cd5288-ed42-4684-8ccc-ce471a36dcb1`,
+same native source, line 841, timestamp `2026-11-18T02:22:35.825Z`;
+`cc-search-chats resolve` returned `status: resolved` on 2026-11-18.
 
 **Precedent consulted:** ADR 0003 (2026-09-02, "can we skip them without
 alarming out? ... this shouldn't cause an alarm/partial state"); the

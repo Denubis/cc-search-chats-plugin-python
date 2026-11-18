@@ -1,6 +1,6 @@
 # cc-search-chats
 
-Last verified: 2026-09-22
+Last verified: 2026-11-18
 
 ## Purpose
 
