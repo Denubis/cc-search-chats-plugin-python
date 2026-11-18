@@ -183,13 +183,14 @@ Optional source-root configuration belongs in
 and retain the operator's existing cache environment; the service deliberately
 supplies neither credentials nor cache overrides.
 
-`CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1` in that same file makes the nightly
-run index around unregistered record shapes instead of blocking whole files
-(the same as `cc-search-chats index --ignore-unknown-records`). Each omitted
-record is counted and reported by shape, and a flagged run retries files that an
-earlier run blocked on such a shape. This is operator policy, not a packaged
-default: the unit ships without it, and identity, payload and admission
-failures still block with it set. The operator's acknowledgement file for
+Since 2.5.3 every `index` run, the nightly timer included, indexes around
+unregistered record shapes and drift inside known record types instead of
+blocking whole files (ADR 0011). Each omitted record is counted and reported by
+shape, and every run retries files that an earlier release blocked on such a
+shape. Identity, admission and read failures still block. Nothing in
+`index.env` is needed for this: `CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS` is
+still accepted there and changes nothing, so an existing line may stay or go.
+The operator's acknowledgement file for
 shapes already looked at is `acknowledged-shapes.toml` in the same directory
 (or under `$XDG_CONFIG_HOME/cc-search-chats/` when that is set); its
 format and lifecycle are in `docs/runbooks/postgresql-index-maintenance.md`,
@@ -354,15 +355,15 @@ advances the Codex and Claude parser-state versions: the first `index`
 afterwards reparses every Codex and Claude source from byte zero (roughly
 half an hour, extrapolated from the 2.4.3 run) and the first `index --status`
 is expected to list, under `unknown_shapes.pending`, every unknown shape in
-indexed files plus the first blocking shape of each blocked file; a flagged
-run reveals the rest of a blocked file. Each
+indexed files plus the first blocking shape of each blocked file. Each
 is housekeeping to acknowledge in `acknowledged-shapes.toml` or a parser job to
-schedule; neither is missing conversations. Antigravity's parser version did
-not advance, so a file it blocked before the upgrade keeps a failure row
-without a shape and raises no warning; run `cc-search-chats index
---force-retry` once after the first index so such rows are re-recorded with
-their shape. Decide at that point whether `index.env` carries
-`CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1` for the timer.
+schedule; neither is missing conversations. The 2.5.3 upgrade applies no
+migration; it advances the Claude parser-state version, so the first `index`
+afterwards reparses every Claude source once, and that run (like every later
+one) retries each file an earlier release blocked on an unknown shape or on
+drift inside a known record type, of any provider, and indexes around it. A
+file blocked at Antigravity admission, or on an identity failure, stays
+blocked; `cc-search-chats index --force-retry` retries it explicitly.
 
 ```fish
 cc-search-chats index --migrate --json >"$upgrade_evidence/index-migrate.stdout.json" 2>"$upgrade_evidence/index-migrate.stderr.ndjson"

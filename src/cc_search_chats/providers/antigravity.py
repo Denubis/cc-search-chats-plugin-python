@@ -177,12 +177,13 @@ def _diagnostic(
     )
 
 
-def _rejected_shape(
-    code: AntigravityDiagnosticCode, payload: object
-) -> RecordShape | None:
-    """Fingerprint an unregistered record pair; other rejections carry none."""
-    if code is not AntigravityDiagnosticCode.UNKNOWN_RECORD_PAIR:
-        return None
+def _rejected_shape(payload: object) -> RecordShape:
+    """Fingerprint a rejected record by its source/type pair and key names.
+
+    Every rejection is drift the parser does not recognise: an unregistered
+    pair, or a registered pair missing a key or carrying a value of another
+    form. Each is indexed around and reported by this shape (ADR 0011).
+    """
     if not _is_json_object(payload):
         return record_shape(Provider.ANTIGRAVITY.value, "non_object", None)
     record_path = (
@@ -597,7 +598,7 @@ def parse_antigravity_session(
                     rejected.code,
                     record.envelope,
                     rejected.detail,
-                    _rejected_shape(rejected.code, record.payload),
+                    _rejected_shape(record.payload),
                 )
             )
             continue

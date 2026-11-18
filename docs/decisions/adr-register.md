@@ -18,3 +18,5 @@ ruling.
 | [0009](0009-unknown-shape-reporting.md) | Report every unknown record shape; ignore under a flag; acknowledge by file | Accepted | 2026-10-24 |
 | [0010](0010-claude-2-1-295-record-shapes.md) | Admit Claude Code 2.1.295 record shapes immediately (moved from the notes directory on 2026-10-26) | Answered | 2026-10-10 |
 | [2026-11-10-bbs-commit-parser-repair](2026-11-10-bbs-commit-parser-repair.md) | Commit the prepared 2.5.2 parser repair locally | Accepted | 2026-11-10 |
+| [2026-11-18-bbs-unknown-records-warn-not-block](2026-11-18-bbs-unknown-records-warn-not-block.md) | An unfamiliar record warns; only a failure blocks | Accepted | 2026-11-18 |
+| [0011](0011-unknown-shapes-warn-by-default.md) | An unrecognised record warns and is indexed around; only a failure blocks | Accepted | 2026-11-18 |

@@ -69,8 +69,14 @@ recovered. Intentionally excluded metadata is expected, not a processing
 failure. Counts are corpus-wide source files, including appended content in
 existing files—not missing conversations or sessions in the current project.
 An `unknown_record_shape` warning names a record family the parser does not
-recognise (key names only): `blocked` means that file's content since its
-last good checkpoint is outside the index, `ignored` means records of that
-shape were left out and counted. It is a parser-coverage note, not
-missing conversations; mention it only when it bears on the answer or the user
-asks about coverage.
+recognise (key names only): `ignored` means records of that shape were left
+out and counted while the rest of each file is indexed; `blocked` appears only
+for a file an earlier release blocked, whose content since its last good
+checkpoint is outside the index until the next `index` run. Its `record_path`
+shows whether a whole turn's text was left out (for example Claude
+`user/message`, Codex `response_item/message`, Antigravity
+`USER_EXPLICIT/USER_INPUT`), only one content block (`…/content/<block type>`),
+or an unrecognised record that may or may not hold conversation; the
+search-chat skill lists the paths. It is a parser-coverage note, not a count
+of missing conversations; mention it only when it bears on the answer (such as
+a left-out turn) or the user asks about coverage.

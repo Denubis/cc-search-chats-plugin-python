@@ -1,5 +1,45 @@
 # Changelog
 
+## cc-search-chats 2.5.3
+
+**Changed:**
+- An unrecognised native record no longer blocks its file. Every `index`
+  run, the nightly timer included, indexes the file with that record omitted,
+  counts it, and reports it as an `unknown_record_shape` warning
+  (ADR 0011). This covers unregistered record types and format drift inside a
+  known record type's body: a Claude conversation record
+  without a `message` object, a Codex `response_item` or `event_msg` whose
+  payload is not an object, and an Antigravity record missing a required key,
+  carrying a mistyped field or timestamp, or a user input without its request
+  element. The warning's record path shows whether a whole turn was left out
+  (for example Claude `user/message`, Codex `response_item/message`,
+  Antigravity `USER_EXPLICIT/USER_INPUT`) or only one content block
+  (`…/content/<block type>`); the search skill lists the paths. Identity,
+  admission and read failures still block. Coverage stays `complete` when
+  nothing is blocked.
+- `index --ignore-unknown-records` and `CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS`
+  are still accepted, so existing commands and `index.env` files keep working,
+  and change nothing.
+- The next index retries every file an earlier release blocked on such a
+  record, for all three providers. Until that run the file still counts as
+  blocked: Claude files under `retry_after_parser_update`, and Codex and
+  Antigravity files recorded at their current parser-state version under
+  `needs_attention`. A file blocked on an unregistered type shows its shape
+  with the `blocked` disposition; one blocked on drift inside a known record
+  type was recorded without a shape by earlier releases and raises no shape
+  warning.
+
+**Fixed:**
+- Claude metadata key sets are now required minima, as Codex's already are
+  (ADR 0003): a registered metadata type with an added key stays excluded
+  metadata, while a missing required key or an unregistered type is still
+  reported. Claude Code 2.1.325 `cost-state` rows carrying `modelCallCostUSD`,
+  which blocked their sessions under 2.5.2, are excluded metadata again.
+- The Claude parser-state version advances to 12, so Claude sources reparse
+  once; unchanged embeddings are reused. The Codex and Antigravity versions do
+  not change: their previously blocked files are retried because the failure
+  that blocked them is now an unknown shape.
+
 ## cc-search-chats 2.5.2
 
 **Fixed:**

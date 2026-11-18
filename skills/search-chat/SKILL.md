@@ -144,14 +144,30 @@ They do not require repair or make processing coverage partial.
 An `unknown_record_shape` warning (one per distinct pending shape, with
 provider, record path, key names, record and file counts and a first example)
 is a parser-coverage note: the native log contains a record family the
-installed parser does not recognise. With `dispositions` `blocked`, that
-file's content since its last good checkpoint (all of it, for a never-indexed
-file) is outside the index until a parser release or a flagged index run; with
-`ignored`, the records of that shape (or, for an unknown content block, just
-the block) were left out and counted. It is not a count of missing
-conversations and does not invalidate a resolved hit. Mention it only when it
-bears on the answer (a miss in a provider whose shapes are blocked) or when the
-user asks about coverage; `index --status` lists the shapes in full.
+installed parser does not recognise. With `ignored`, the records of that shape
+(or, for an unknown content block, just the block) were left out and counted;
+the rest of each file is indexed. The warning does not say whether the left-out
+record held conversation; read that from `record_path`:
+
+- A whole turn's text is out of the index for Claude `user/message`,
+  `assistant/message` (with or without a further role segment),
+  `user/content` and `assistant/content`; Codex `response_item/message` (with
+  or without a further role segment); and Antigravity
+  `USER_EXPLICIT/USER_INPUT` (a human prompt) and `MODEL/PLANNER_RESPONSE` (an
+  assistant reply).
+- A path that continues `/content/<block type>` means one content block was
+  left out; the rest of that turn is indexed.
+- Any other path is a record the parser does not recognise; whether it held
+  conversation cannot be told from the warning. `first_source_file_relative`
+  and `first_source_line` locate the first example.
+
+`blocked` appears only for a file an earlier release blocked: its content
+since its last good checkpoint (all of it, for a never-indexed file) is outside
+the index until the next `index` run retries it. A warning is not a count of
+missing conversations and does not invalidate a resolved hit. Mention it only
+when it bears on the answer (a miss in a provider with a `blocked` shape, or a
+left-out turn as above) or when the user asks about coverage; `index --status`
+lists the shapes in full.
 
 `coverage.completeness` and failure warnings describe processing limits; retain
 them when they bear on the conclusion instead of labelling every answer “stale

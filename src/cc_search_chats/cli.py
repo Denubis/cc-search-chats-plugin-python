@@ -1753,18 +1753,6 @@ def _postgres_index_status(context: _PostgresContext) -> int:
     return 0
 
 
-_IGNORE_UNKNOWN_RECORDS_VARIABLE = "CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS"
-
-
-def _index_ignore_unknown_records(
-    args: argparse.Namespace, environ: Mapping[str, str]
-) -> bool:
-    """Enable ignore mode from the flag or the operator variable set to ``1``."""
-    return bool(args.ignore_unknown_records) or (
-        environ.get(_IGNORE_UNKNOWN_RECORDS_VARIABLE) == "1"
-    )
-
-
 def _postgres_index_run(context: _PostgresContext) -> int:
     shutdown_query_embedder()
     acquire_index_session(context.connection)
@@ -1785,9 +1773,6 @@ def _postgres_index_run(context: _PostgresContext) -> int:
             progress=progress.refresh,
             embedding_progress=progress.embedding,
             force_retry=context.args.force_retry,
-            ignore_unknown_records=_index_ignore_unknown_records(
-                context.args, os.environ
-            ),
             acknowledged_shapes=context.args.acknowledged_shapes,
         )
     progress.complete(result)
@@ -2905,9 +2890,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--ignore-unknown-records",
         action="store_true",
         help=(
-            "index around unregistered record shapes instead of blocking the file; "
-            "each omitted record is counted and reported by shape "
-            "(CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1 does the same)"
+            "no effect since 2.5.3, accepted so existing invocations keep "
+            "working: index always indexes around unregistered record shapes "
+            "and reports each by shape"
         ),
     )
     index_mode = index_parser.add_mutually_exclusive_group()

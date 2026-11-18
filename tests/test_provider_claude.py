@@ -16,6 +16,7 @@ from cc_search_chats.core.identity import (
     SubmittedBy,
 )
 from cc_search_chats.core.record_shape import RecordShape
+from cc_search_chats.providers import claude as claude_module
 from cc_search_chats.providers.claude import (
     ClaudeDiagnosticCode,
     ClaudeParserState,
@@ -469,7 +470,7 @@ class TestClaudeRecognizedShapes:
             },
         ],
     )
-    def test_attachment_with_an_unaudited_key_still_fails_closed(
+    def test_attachment_with_an_unaudited_key_stays_excluded_metadata(
         self, extras: dict[str, object]
     ) -> None:
         result = parse_claude_session(
@@ -478,8 +479,22 @@ class TestClaudeRecognizedShapes:
         )
 
         assert result.messages == ()
-        assert ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD in [
-            diagnostic.code for diagnostic in result.diagnostics
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EXCLUDED_METADATA
+        ]
+
+    def test_attachment_missing_a_required_key_stays_unknown(self) -> None:
+        payload = self._attachment_with({"rendered": []})
+        del payload["entrypoint"]
+
+        result = parse_claude_session(
+            (envelope(payload),),
+            context=ClaudeSessionContext(source_session_id="session"),
+        )
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD
         ]
 
     @pytest.mark.parametrize(
@@ -1317,6 +1332,211 @@ class TestClaudeRecognizedShapes:
         ]
 
 
+_COST_STATE_RECORD: dict[str, object] = {
+    "type": "cost-state",
+    "hasUnknownModelCost": False,
+    "modelUsage": {"claude-opus-5": {"costUSD": 0.01, "inputTokens": 1}},
+    "sessionId": "session",
+    "startTime": 0,
+    "totalAPIDuration": 1,
+    "totalAPIDurationWithoutRetries": 1,
+    "totalCostUSD": 0.01,
+    "totalDuration": 1,
+    "totalLinesAdded": 0,
+    "totalLinesRemoved": 0,
+    "totalToolDuration": 0,
+}
+
+
+def _minimal_metadata_keysets() -> list[tuple[str, frozenset[str]]]:
+    """Return each registered metadata key set no other set of its type contains."""
+    registry = claude_module._CLAUDE_METADATA_KEYSETS
+    return sorted(
+        (
+            (record_type, keys)
+            for record_type, keysets in registry.items()
+            for keys in keysets
+            if not any(other < keys for other in keysets)
+        ),
+        key=lambda item: (item[0], sorted(item[1])),
+    )
+
+
+def _parse_one(payload: dict[str, object]):
+    return parse_claude_session(
+        (envelope(payload),),
+        context=ClaudeSessionContext(source_session_id="session"),
+    )
+
+
+class TestClaudeMetadataRequiredMinimum:
+    """Registered metadata key sets are required minima, as for Codex (ADR 0003)."""
+
+    def test_cost_state_with_model_call_cost_is_excluded_between_messages(
+        self, tmp_path: Path
+    ) -> None:
+        def visible(role: str, uuid: str, text: str) -> dict[str, object]:
+            return {
+                "type": role,
+                "uuid": uuid,
+                "sessionId": "session",
+                "timestamp": "2026-11-18T00:00:00Z",
+                "isSidechain": False,
+                "message": {"role": role, "content": text},
+            }
+
+        records = (
+            visible("user", "before-cost", "prose before the cost record"),
+            {**_COST_STATE_RECORD, "modelCallCostUSD": 0.0123},
+            visible("assistant", "after-cost", "prose after the cost record"),
+        )
+        path = tmp_path / "session.jsonl"
+        path.write_text("".join(json.dumps(item) + "\n" for item in records))
+        read = read_bounded_jsonl(
+            path,
+            source_file_relative=Path("project/session.jsonl"),
+            target_size=path.stat().st_size,
+        )
+
+        result = parse_claude_session(
+            read.envelopes, context=ClaudeSessionContext(source_session_id="session")
+        )
+
+        assert [message.text for message in result.messages] == [
+            "prose before the cost record",
+            "prose after the cost record",
+        ]
+        assert [(d.record_ordinal, d.code, d.shape) for d in result.diagnostics] == [
+            (1, ClaudeDiagnosticCode.EXCLUDED_METADATA, None)
+        ]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(
+                {"type": "custom-title", "customTitle": "t", "sessionId": "s"},
+                id="custom-title",
+            ),
+            pytest.param({"type": "launched"}, id="launched"),
+            pytest.param(
+                {"type": "tools-used", "sessionId": "s", "tools": ["Read"]},
+                id="tools-used",
+            ),
+            pytest.param(dict(_COST_STATE_RECORD), id="cost-state"),
+        ],
+    )
+    def test_registered_type_with_an_unseen_key_is_excluded_metadata(
+        self, payload: dict[str, object]
+    ) -> None:
+        result = _parse_one({**payload, "futureWriterKey": {"nested": "value"}})
+
+        assert result.messages == ()
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            ClaudeDiagnosticCode.EXCLUDED_METADATA
+        ]
+
+    @pytest.mark.parametrize(
+        ("record_type", "keys"),
+        _minimal_metadata_keysets(),
+        ids=lambda value: value if isinstance(value, str) else None,
+    )
+    def test_every_registered_minimum_admits_extra_keys_and_requires_each_key(
+        self, record_type: str, keys: frozenset[str]
+    ) -> None:
+        extended: dict[str, object] = dict.fromkeys(keys)
+        extended["type"] = record_type
+        extended["futureWriterKey"] = 1
+        assert [d.code for d in _parse_one(extended).diagnostics] == [
+            ClaudeDiagnosticCode.EXCLUDED_METADATA
+        ]
+
+        for missing in sorted(keys - {"type"}):
+            reduced = {key: value for key, value in extended.items() if key != missing}
+            result = _parse_one(reduced)
+            assert result.messages == ()
+            assert [d.code for d in result.diagnostics] == [
+                ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD
+            ], f"{record_type} without {missing} must stay unknown"
+
+    def test_registered_type_missing_a_required_key_stays_unknown(self) -> None:
+        payload = {
+            key: value
+            for key, value in _COST_STATE_RECORD.items()
+            if key != "totalCostUSD"
+        }
+
+        result = _parse_one({**payload, "modelCallCostUSD": 0.5})
+
+        [diagnostic] = result.diagnostics
+        assert diagnostic.code is ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD
+        assert diagnostic.shape is not None
+        assert diagnostic.shape.record_path == "cost-state"
+
+    def test_unregistered_type_with_registered_keys_stays_unknown(self) -> None:
+        result = _parse_one({**_COST_STATE_RECORD, "type": "cost-state-v2"})
+
+        [diagnostic] = result.diagnostics
+        assert diagnostic.code is ClaudeDiagnosticCode.UNKNOWN_CONVERSATION_RECORD
+        assert diagnostic.shape is not None
+        assert diagnostic.shape.record_path == "cost-state-v2"
+
+    def test_conversation_records_carrying_every_metadata_key_stay_conversation(
+        self, tmp_path: Path
+    ) -> None:
+        every_metadata_key = {
+            key
+            for keysets in claude_module._CLAUDE_METADATA_KEYSETS.values()
+            for keys in keysets
+            for key in keys
+        }
+        carried: dict[str, object] = dict.fromkeys(every_metadata_key - {"type"})
+        carried.update(
+            sessionId="session", isSidechain=False, timestamp="2026-11-18T00:00:00Z"
+        )
+        carried.pop("agentId", None)
+        records = (
+            {
+                **carried,
+                "type": "user",
+                "uuid": "user-with-metadata-keys",
+                "message": {"role": "user", "content": "visible user prose"},
+            },
+            {
+                **carried,
+                "type": "system",
+                "subtype": "compact_boundary",
+                "uuid": "boundary-with-metadata-keys",
+                "compactMetadata": {"trigger": "auto", "preTokens": 10},
+            },
+            {
+                **carried,
+                "type": "assistant",
+                "uuid": "assistant-with-metadata-keys",
+                "message": {"role": "assistant", "content": "visible reply"},
+            },
+        )
+        path = tmp_path / "session.jsonl"
+        path.write_text("".join(json.dumps(item) + "\n" for item in records))
+        read = read_bounded_jsonl(
+            path,
+            source_file_relative=Path("project/session.jsonl"),
+            target_size=path.stat().st_size,
+        )
+
+        result = parse_claude_session(
+            read.envelopes, context=ClaudeSessionContext(source_session_id="session")
+        )
+
+        assert [(m.role, m.text, m.conversation_epoch) for m in result.messages] == [
+            ("user", "visible user prose", 0),
+            ("assistant", "visible reply", 1),
+        ]
+        assert len(result.boundaries) == 1
+        assert ClaudeDiagnosticCode.EXCLUDED_METADATA not in {
+            diagnostic.code for diagnostic in result.diagnostics
+        }
+
+
 class TestClaudeFailClosedDiagnostics:
     def test_invalid_utf8_record_has_encoding_diagnostic(self) -> None:
         result = parse_claude_session(
@@ -1669,6 +1889,22 @@ class TestClaudeUnknownShapeFingerprints:
                     "payload.preTokens",
                     "payload.trigger",
                 ),
+            ),
+            (
+                {"type": "user", "uuid": "no-message", "content": _SHAPE_SENTINEL},
+                ClaudeDiagnosticCode.MISSING_MESSAGE,
+                "user/message",
+                ("content", "type", "uuid"),
+            ),
+            (
+                {
+                    "type": "assistant",
+                    "uuid": "text-message",
+                    "message": _SHAPE_SENTINEL,
+                },
+                ClaudeDiagnosticCode.NON_OBJECT_MESSAGE,
+                "assistant/message",
+                ("message", "type", "uuid"),
             ),
         ],
     )

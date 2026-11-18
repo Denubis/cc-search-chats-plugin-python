@@ -353,9 +353,12 @@ def test_ac4_content_boundary_and_unregistered_pair(
         "system-decoy-medlar",
         "checkpoint-decoy-sloe",
         "unregistered-decoy-elder",
-        "unregistered pair opening juniper",
     ):
         assert not _found_anywhere(postgres_connection, decoy), decoy
+    # ADR 0011: the unregistered pair is indexed around, so the rest of its
+    # session is searchable instead of the whole session being blocked.
+    assert search_messages(postgres_connection, "unregistered pair opening juniper")
+    assert search_messages(postgres_connection, "Juniper acknowledged")
 
     envelope = _envelope(postgres_connection, root, "index")
     coverage = cast("dict[str, object]", envelope["coverage"])
@@ -363,16 +366,18 @@ def test_ac4_content_boundary_and_unregistered_pair(
     assert coverage["source_issues"] == {
         "retry_after_parser_update": 0,
         "retryable_failures": 0,
-        "needs_attention": 1,
+        "needs_attention": 0,
     }
-    assert coverage["completeness"] == "partial"
-    assert result.blocked_source_count == 1
-    assert _failures(postgres_connection) == {
-        ANTIGRAVITY_SESSION_IDS["unregistered_pair"]: (
-            "deterministic",
-            "antigravity_unknown_record_pair",
-        )
-    }
+    assert coverage["completeness"] == "complete"
+    assert result.blocked_source_count == 0
+    assert _failures(postgres_connection) == {}
+    [warning] = [
+        warning
+        for warning in cast("list[dict[str, object]]", envelope["warnings"])
+        if warning["code"] == "unknown_record_shape"
+    ]
+    assert warning["record_path"] == "MODEL/SOMETHING_NEW"
+    assert warning["dispositions"] == ["ignored"]
 
 
 def test_error_message_records_are_excluded_without_blocking_the_session(

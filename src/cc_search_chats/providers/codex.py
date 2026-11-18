@@ -1349,6 +1349,7 @@ def _parse_response_item(
                 CodexDiagnosticCode.INVALID_PAYLOAD,
                 record.envelope,
                 "response_item payload is not an object",
+                _record_shape(record, "response_item/payload"),
             ),
         )
     item_type = payload.get("type")
@@ -1464,6 +1465,7 @@ def _parse_event(
             CodexDiagnosticCode.INVALID_PAYLOAD,
             record.envelope,
             "event_msg payload is not an object",
+            _record_shape(record, "event_msg/payload"),
         )
     event_type = payload.get("type")
     if isinstance(event_type, str) and _matches_excluded_keyset(

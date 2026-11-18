@@ -635,7 +635,7 @@ _CLAUDE = ProviderAdapter(
     default_roots=_claude_default_roots,
     discover=discover_claude_sources,
     locator_key_kinds=permitted_locator_key_kinds(Provider.CLAUDE),
-    parser_state_version=11,
+    parser_state_version=12,
     initial_state=ClaudeParserState,
     serialize_state=_serialize_claude_state,
     deserialize_state=_deserialize_claude_state,
@@ -677,6 +677,8 @@ _CLAUDE = ProviderAdapter(
             ClaudeDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
             ClaudeDiagnosticCode.UNKNOWN_ROLE,
             ClaudeDiagnosticCode.INVALID_COMPACT_BOUNDARY,
+            ClaudeDiagnosticCode.MISSING_MESSAGE,
+            ClaudeDiagnosticCode.NON_OBJECT_MESSAGE,
         }
     ),
     inspect_artifacts=True,
@@ -744,6 +746,7 @@ _CODEX = ProviderAdapter(
             CodexDiagnosticCode.UNKNOWN_COMPACTION,
             CodexDiagnosticCode.UNKNOWN_CONTENT_BLOCK,
             CodexDiagnosticCode.UNKNOWN_ROLE,
+            CodexDiagnosticCode.INVALID_PAYLOAD,
         }
     ),
     inspect_artifacts=True,
@@ -801,7 +804,15 @@ _ANTIGRAVITY = ProviderAdapter(
             AntigravityDiagnosticCode.TRUNCATED_PROSE,
         }
     ),
-    unknown_shape_codes=frozenset({AntigravityDiagnosticCode.UNKNOWN_RECORD_PAIR}),
+    unknown_shape_codes=frozenset(
+        {
+            AntigravityDiagnosticCode.UNKNOWN_RECORD_PAIR,
+            AntigravityDiagnosticCode.MISSING_REQUIRED_KEY,
+            AntigravityDiagnosticCode.INVALID_FIELD_TYPE,
+            AntigravityDiagnosticCode.MISSING_USER_REQUEST,
+            AntigravityDiagnosticCode.INVALID_CREATED_AT,
+        }
+    ),
     inspect_artifacts=False,
     admission=admit_antigravity_session,
     raw_record_matches=_ordinal_record_matches,

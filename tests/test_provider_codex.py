@@ -2799,6 +2799,24 @@ class TestCodexUnknownShapeFingerprints:
                 CodexDiagnosticCode.UNKNOWN_ROLE,
                 "response_item/message/tool",
             ),
+            (
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "response_item",
+                    "payload": _SHAPE_SENTINEL,
+                },
+                CodexDiagnosticCode.INVALID_PAYLOAD,
+                "response_item/payload",
+            ),
+            (
+                {
+                    "timestamp": "2026-08-11T09:00:00Z",
+                    "type": "event_msg",
+                    "payload": [_SHAPE_SENTINEL],
+                },
+                CodexDiagnosticCode.INVALID_PAYLOAD,
+                "event_msg/payload",
+            ),
         ],
     )
     def test_every_unknown_shape_code_names_its_record_path(

@@ -254,7 +254,6 @@ class _SourcePlan:
     prior_state: object
     prior_skipped_record_count: int
     prior_unknown_shapes: Mapping[str, object] = field(default_factory=dict)
-    ignore_unknown_records: bool = False
     acknowledgements: _Acknowledgements = field(default_factory=dict)
 
     @property
@@ -263,11 +262,13 @@ class _SourcePlan:
 
     @property
     def blocking_codes(self) -> frozenset[StrEnum]:
-        """Codes that abort this source: all unsupported, minus shapes when ignoring."""
+        """Codes that abort this source: real failures, never an unknown shape.
+
+        An unknown record shape is indexed around, counted and reported
+        (ADR 0011); identity, admission and read failures still block.
+        """
         adapter = self.adapter
-        if self.ignore_unknown_records:
-            return adapter.unsupported_codes - adapter.unknown_shape_codes
-        return adapter.unsupported_codes
+        return adapter.unsupported_codes - adapter.unknown_shape_codes
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,17 +748,16 @@ def _failed_observation_blocks(
     failure: _FailedObservation | None,
     *,
     force_retry: bool,
-    ignore_unknown_records: bool = False,
 ) -> bool:
     if force_retry or not _failed_observation_matches(observed, failure):
         return False
     if failure is None:
         return False
-    if ignore_unknown_records and failure.failure_code in {
+    if failure.failure_code in {
         code.value
         for code in provider_adapter(observed.root.provider).unknown_shape_codes
     }:
-        # A flagged run can index around the shape that blocked this file.
+        # An earlier release blocked this file on a shape; index around it now.
         return False
     return failure.failure_class == "deterministic" or not failure.retry_eligible
 
@@ -1034,15 +1034,16 @@ _CONTENT_BLOCK_CODE = "unknown_content_block"
 def _unknown_shape_entries(
     plan: _SourcePlan, parsed: ParseResult
 ) -> tuple[_ShapeEntries, frozenset[int]]:
-    """Count unknown shapes met in one batch; return the ordinals ignore mode omits.
+    """Count unknown shapes met in one batch; return the ordinals to omit.
 
-    The silent family (shape codes outside ``unsupported_codes``) is counted in
-    both modes. Under ignore mode the blocking shape codes are counted too, and
-    every such record except an unknown content block has its ordinal dropped
-    from staging so nothing it carried is persisted.
+    Every unknown shape code is counted. A shape the provider would otherwise
+    treat as unsupported has its ordinal dropped from staging, except an
+    unknown content block, so nothing that record carried is persisted. The
+    silent family (shape codes outside ``unsupported_codes``) never stages
+    content and is only counted.
     """
     adapter = plan.adapter
-    counted = adapter.unknown_shape_codes - plan.blocking_codes
+    counted = adapter.unknown_shape_codes
     omitted = counted & adapter.unsupported_codes
     entries: _ShapeEntries = {}
     ignored_ordinals: set[int] = set()
@@ -1578,7 +1579,6 @@ def _parse_and_stage_source(
                 1,
                 None,
                 0,
-                ignore_unknown_records=plan.ignore_unknown_records,
                 acknowledgements=plan.acknowledgements,
             ),
         )
@@ -2541,7 +2541,6 @@ def refresh_native_sources(
     codex_root: Path | None = None,
     progress: ProgressCallback | None = None,
     force_retry: bool = False,
-    ignore_unknown_records: bool = False,
     acknowledged_shapes: Sequence[AcknowledgedShape] = (),
     _candidate_publisher: Callable[..., int] | None = None,
     _require_publication: bool = False,
@@ -2569,17 +2568,12 @@ def refresh_native_sources(
                 value,
                 failed_observations.get(value.key),
                 force_retry=force_retry,
-                ignore_unknown_records=ignore_unknown_records,
             )
         )
         blocked_keys = {value.key for value in blocked_observations}
         acknowledgements = _acknowledgements(acknowledged_shapes)
         plans = tuple(
-            dataclasses.replace(
-                plan,
-                ignore_unknown_records=ignore_unknown_records,
-                acknowledgements=acknowledgements,
-            )
+            dataclasses.replace(plan, acknowledgements=acknowledgements)
             for value in observed
             if value.key not in blocked_keys
             and (plan := _plan_source(value, checkpoints.get(value.key))) is not None
@@ -2884,7 +2878,6 @@ def index_corpus(
     embedding_progress: Callable[[int, int], None] | None = None,
     batch_size: int = 4,
     force_retry: bool = False,
-    ignore_unknown_records: bool = False,
     acknowledged_shapes: Sequence[AcknowledgedShape] = (),
 ) -> CorpusIndexResult:
     """Prepare and jointly publish one coherent literal and semantic corpus."""
@@ -2985,7 +2978,6 @@ def index_corpus(
         codex_root=codex_root,
         progress=progress,
         force_retry=force_retry,
-        ignore_unknown_records=ignore_unknown_records,
         acknowledged_shapes=acknowledged_shapes,
         _candidate_publisher=publish_candidate,
         _require_publication=selected_before is None,

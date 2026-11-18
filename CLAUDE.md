@@ -81,13 +81,17 @@ They do not use the operator's production database.
   Claude and Codex that value is native; for Antigravity it is derived from
   the first `run_command` `Cwd` in the session and is NULL when none exists,
   so such sessions are found only without `--project`.
-- An unregistered record shape blocks its file by default (ADR 0003). Every
+- An unregistered record shape, or format drift in the body of a known record
+  type, never blocks its file (ADR 0011): `index` indexes
+  around the record, omits and counts it. Registered Claude and Codex metadata
+  key sets are required minima, so an added key keeps a known metadata type
+  excluded (ADR 0003). Every
   command reports each distinct pending shape as an `unknown_record_shape`
   warning by key-name fingerprint (provider, record path, key names (the unit's own keys sorted, then its `payload.`-prefixed nested keys sorted; never values)), derived from
-  current rows so it survives unchanged runs.
-  `index --ignore-unknown-records`, or `CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1`
-  in the operator's `index.env`, indexes around such records instead and counts
-  them; identity, payload and admission failures still block. Human `search`
+  current rows so it survives unchanged runs. Identity, admission and read
+  failures still block. `index --ignore-unknown-records` and
+  `CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS` are still accepted and change
+  nothing. Human `search`
   prints one summary note counting pending shapes after its results; human
   `index` and `index --status` print one `unknown shape …` line per pending
   shape after their results. Error envelopes carry the three shape counts as

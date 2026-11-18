@@ -2416,26 +2416,20 @@ class TestVerboseFlag:
 
 
 @pytest.mark.parametrize(
-    ("argv", "environ", "expected"),
+    "argv",
     [
-        (["index"], {}, False),
-        (["index", "--ignore-unknown-records"], {}, True),
-        (["index"], {"CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS": "1"}, True),
-        (["index"], {"CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS": "0"}, False),
-        (["index"], {"CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS": ""}, False),
-        (
-            ["index", "--ignore-unknown-records"],
-            {"CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS": "0"},
-            True,
-        ),
+        ["index", "--ignore-unknown-records"],
+        ["index", "--ignore-unknown-records", "--json"],
+        ["index", "--force-retry", "--ignore-unknown-records"],
     ],
 )
-def test_index_ignore_unknown_records_resolves_from_flag_or_variable(
-    argv: list[str], environ: dict[str, str], *, expected: bool
+def test_index_still_accepts_the_retired_ignore_unknown_records_flag(
+    argv: list[str],
 ) -> None:
+    """Existing invocations keep parsing; the flag has had no effect since 2.5.3."""
     args = build_parser().parse_args(argv)
 
-    assert cli_module._index_ignore_unknown_records(args, environ) is expected
+    assert args.command == "index"
 
 
 def test_index_reexec_preserves_the_ignore_unknown_records_flag(

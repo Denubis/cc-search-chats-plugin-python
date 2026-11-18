@@ -586,3 +586,93 @@ class TestAntigravityUnknownShapeFingerprints:
 
         assert parsed.messages
         assert all(diagnostic.shape is None for diagnostic in parsed.diagnostics)
+
+    @pytest.mark.parametrize(
+        ("drifted", "code", "record_path"),
+        [
+            pytest.param(
+                {
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "content": _SHAPE_SENTINEL,
+                },
+                AntigravityDiagnosticCode.MISSING_REQUIRED_KEY,
+                "MODEL/PLANNER_RESPONSE",
+                id="missing-created-at",
+            ),
+            pytest.param(
+                {
+                    **record(
+                        "MODEL",
+                        "PLANNER_RESPONSE",
+                        "2026-10-03T09:15:01Z",
+                        content=_SHAPE_SENTINEL,
+                    ),
+                    "type": 7,
+                },
+                AntigravityDiagnosticCode.INVALID_FIELD_TYPE,
+                "MODEL/untyped",
+                id="non-string-type",
+            ),
+            pytest.param(
+                record(
+                    "MODEL",
+                    "PLANNER_RESPONSE",
+                    "2026-10-03 09:15:01",
+                    content=_SHAPE_SENTINEL,
+                ),
+                AntigravityDiagnosticCode.INVALID_CREATED_AT,
+                "MODEL/PLANNER_RESPONSE",
+                id="created-at-format",
+            ),
+            pytest.param(
+                record(
+                    "MODEL",
+                    "PLANNER_RESPONSE",
+                    "2026-10-03T09:15:01Z",
+                    content=_SHAPE_SENTINEL,
+                    tool_calls=_SHAPE_SENTINEL,
+                ),
+                AntigravityDiagnosticCode.INVALID_FIELD_TYPE,
+                "MODEL/PLANNER_RESPONSE",
+                id="tool-calls-not-a-list",
+            ),
+            pytest.param(
+                record("USER_EXPLICIT", "USER_INPUT", "2026-10-03T09:15:01Z"),
+                AntigravityDiagnosticCode.MISSING_REQUIRED_KEY,
+                "USER_EXPLICIT/USER_INPUT",
+                id="user-input-without-content",
+            ),
+            pytest.param(
+                record(
+                    "USER_EXPLICIT",
+                    "USER_INPUT",
+                    "2026-10-03T09:15:01Z",
+                    content=_SHAPE_SENTINEL,
+                ),
+                AntigravityDiagnosticCode.MISSING_USER_REQUEST,
+                "USER_EXPLICIT/USER_INPUT",
+                id="user-input-without-user-request",
+            ),
+        ],
+    )
+    def test_drift_inside_a_known_record_carries_a_key_name_shape(
+        self,
+        drifted: dict[str, object],
+        code: AntigravityDiagnosticCode,
+        record_path: str,
+    ) -> None:
+        parsed = parse_antigravity_session(
+            envelopes(
+                user_input("hello"), drifted, planner("after", "2026-10-03T09:15:02Z")
+            ),
+            context=CONTEXT,
+        )
+
+        [diagnostic] = [value for value in parsed.diagnostics if value.code is code]
+        assert diagnostic.record_ordinal == 1
+        assert diagnostic.shape == RecordShape(
+            "antigravity", record_path, tuple(sorted(drifted))
+        )
+        assert _SHAPE_SENTINEL not in diagnostic.shape.canonical
+        assert [message.text for message in parsed.messages] == ["hello", "after"]

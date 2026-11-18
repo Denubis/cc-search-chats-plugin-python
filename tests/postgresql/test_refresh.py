@@ -65,6 +65,24 @@ def _set_parser_state_version(
     )
 
 
+def _set_released_parser(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, version: int
+) -> None:
+    """Simulate a release before 2.5.3, whose default blocked unknown shapes.
+
+    Before ADR 0011 an unregistered shape blocked its file unless a run was
+    flagged, so such a release exempted no unsupported code from blocking.
+    """
+    adapter = registry.provider_adapter(provider)
+    monkeypatch.setitem(
+        registry._ADAPTERS,
+        provider,
+        dataclasses.replace(
+            adapter, parser_state_version=version, unknown_shape_codes=frozenset()
+        ),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _current_schema(postgres_connection: psycopg.Connection) -> None:
     migrate(postgres_connection)
@@ -776,7 +794,7 @@ def test_native_record_policy_parser_state_versions() -> None:
         adapter.provider: adapter.parser_state_version
         for adapter in registry.provider_adapters()
     } == {
-        Provider.CLAUDE: 11,
+        Provider.CLAUDE: 12,
         Provider.CODEX: 8,
         Provider.ANTIGRAVITY: 2,
     }
@@ -857,12 +875,15 @@ def test_claude_attachment_parser_bump_recovers_unchanged_blocked_source(
     original_stat = source.stat()
     root = _source_root(Provider.CLAUDE, claude_root)
     with monkeypatch.context() as previous_parser:
-        _set_parser_state_version(previous_parser, Provider.CLAUDE, 4)
+        _set_released_parser(previous_parser, Provider.CLAUDE, 4)
         previous_parser.setitem(
             claude_module._CLAUDE_METADATA_KEYSETS,
             "attachment",
-            claude_module._CLAUDE_METADATA_KEYSETS["attachment"]
-            - {frozenset(attachment)},
+            {
+                keys
+                for keys in claude_module._CLAUDE_METADATA_KEYSETS["attachment"]
+                if not keys <= frozenset(attachment)
+            },
         )
         failed = inspect_native_sources(postgres_connection, source_roots=(root,))
     assert failed.blocked_source_count == 1
@@ -1160,22 +1181,22 @@ def test_codex_parser_state_bump_retries_unchanged_deterministic_failure(
     source = day / "rollout-retry.jsonl"
     shutil.copy(FIXTURES / "codex_modern_primary_145.jsonl", source)
     root = _source_root(Provider.CODEX, codex_root)
-    installed_parser_version = _parser_state_version(Provider.CODEX)
-    new_matcher = codex_module._matches_excluded_keyset
 
     def old_exact_matcher(
         payload: dict[str, object], required_keysets: set[frozenset[str]]
     ) -> bool:
         return frozenset(payload) in required_keysets
 
-    _set_parser_state_version(monkeypatch, Provider.CODEX, 3)
-    monkeypatch.setattr(codex_module, "_matches_excluded_keyset", old_exact_matcher)
     before = source.stat()
-
-    failed = inspect_native_sources(
-        postgres_connection,
-        source_roots=(root,),
-    )
+    with monkeypatch.context() as released_parser:
+        _set_released_parser(released_parser, Provider.CODEX, 3)
+        released_parser.setattr(
+            codex_module, "_matches_excluded_keyset", old_exact_matcher
+        )
+        failed = inspect_native_sources(
+            postgres_connection,
+            source_roots=(root,),
+        )
 
     assert failed.blocked_source_count == 1
     assert search_messages(postgres_connection, "modern visible") == ()
@@ -1188,8 +1209,6 @@ def test_codex_parser_state_bump_retries_unchanged_deterministic_failure(
         )
     ) == ("deterministic", "unknown_event", 3)
 
-    monkeypatch.setattr(codex_module, "_matches_excluded_keyset", new_matcher)
-    _set_parser_state_version(monkeypatch, Provider.CODEX, installed_parser_version)
     retried = refresh_native_sources(
         postgres_connection,
         source_roots=(root,),
@@ -1329,7 +1348,7 @@ def test_codex_metadata_parser_bump_recovers_unchanged_blocked_source(
         ),
     )
     with monkeypatch.context() as previous_parser:
-        _set_parser_state_version(previous_parser, Provider.CODEX, 4)
+        _set_released_parser(previous_parser, Provider.CODEX, 4)
         blocked = inspect_native_sources(postgres_connection, source_roots=(root,))
     assert blocked.blocked_source_count == 1
     assert blocked.attempted_content_bytes == 0
@@ -1467,7 +1486,7 @@ def test_codex_additional_tools_source_blocked_at_parser_5_recovers_unsearchable
     root = _source_root(Provider.CODEX, codex_root)
     with monkeypatch.context() as released_parser:
         # cc-search-chats 2.4.2: Codex parser-state version 5 without the shape.
-        _set_parser_state_version(released_parser, Provider.CODEX, 5)
+        _set_released_parser(released_parser, Provider.CODEX, 5)
         released_parser.delitem(
             codex_module._INTER_AGENT_RESPONSE_KEYSETS,
             "additional_tools",
@@ -1884,11 +1903,61 @@ def test_silent_unknown_metadata_shape_is_counted_without_blocking(
     )
 
 
-def test_unsupported_appended_shape_does_not_advance_checkpoint(
+def test_appended_unknown_shape_advances_checkpoint_and_warns(
+    postgres_connection: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    """ADR 0011: an appended unknown shape is indexed around, not blocked."""
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    source = claude_root / "session.jsonl"
+    shutil.copy(FIXTURES / "claude_primary.jsonl", source)
+    roots = (_source_root(Provider.CLAUDE, claude_root),)
+    refresh_native_sources(postgres_connection, source_roots=roots)
+    future_record = {
+        "type": "future_conversation_record",
+        "uuid": "future-shape",
+        "message": {
+            "role": "assistant",
+            "content": "future shape decoy wormwood",
+        },
+    }
+    with source.open("ab") as handle:
+        handle.write(
+            json.dumps(future_record, separators=(",", ":")).encode("utf-8") + b"\n"
+        )
+
+    appended = refresh_native_sources(postgres_connection, source_roots=roots)
+
+    assert appended.failed_source_count == 0
+    assert appended.blocked_source_count == 0
+    assert appended.ignored_unknown_record_count == 1
+    assert next(
+        postgres_connection.execute(
+            "SELECT complete_byte_offset FROM cc_search_chats.source_file_current"
+        )
+    ) == (source.stat().st_size,)
+    _assert_nothing_stored_from(postgres_connection, ("future shape decoy wormwood",))
+    envelope = _postgres_envelope(postgres_connection, "index", refresh_result=appended)
+    coverage = cast("dict[str, object]", envelope["coverage"])
+    assert coverage["completeness"] == "complete"
+    assert coverage["blocked_files"] == 0
+    [warning] = [
+        warning
+        for warning in cast("list[dict[str, object]]", envelope["warnings"])
+        if warning["code"] == "unknown_record_shape"
+    ]
+    assert warning["record_path"] == "future_conversation_record"
+    assert warning["dispositions"] == ["ignored"]
+    assert "wormwood" not in json.dumps(envelope)
+
+
+def test_unsupported_appended_record_does_not_advance_checkpoint(
     postgres_connection: psycopg.Connection,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An appended record that fails identity still blocks without re-reading."""
     claude_root = tmp_path / "claude"
     claude_root.mkdir()
     source = claude_root / "session.jsonl"
@@ -1903,16 +1972,15 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
             """
         )
     )
-    future_record = {
-        "type": "future_conversation_record",
-        "uuid": "future-shape",
+    identity_less_record = {
+        "type": "assistant",
         "message": {
             "role": "assistant",
-            "content": "future shape must not disappear behind a checkpoint",
+            "content": "identity-less prose must not disappear behind a checkpoint",
         },
     }
     future_bytes = (
-        json.dumps(future_record, separators=(",", ":")).encode("utf-8") + b"\n"
+        json.dumps(identity_less_record, separators=(",", ":")).encode("utf-8") + b"\n"
     )
     with source.open("ab") as handle:
         handle.write(future_bytes)
@@ -1948,7 +2016,7 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
         )
     )[0]
     assert diagnostics[0]["code"] == "source_refresh_failed"
-    assert "unknown_conversation_record" in diagnostics[0]["detail"]
+    assert "missing_message_uuid" in diagnostics[0]["detail"]
     failure = next(
         postgres_connection.execute(
             """
@@ -1960,7 +2028,7 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
             """
         )
     )
-    assert failure[0:2] == ("deterministic", "unknown_conversation_record")
+    assert failure[0:2] == ("deterministic", "missing_message_uuid")
     assert failure[2:7] == (
         source.stat().st_dev,
         source.stat().st_ino,
@@ -1977,12 +2045,8 @@ def test_unsupported_appended_shape_does_not_advance_checkpoint(
     failed_warnings = cast("list[dict[str, object]]", failed_envelope["warnings"])
     assert [warning["code"] for warning in failed_warnings] == [
         "source_refresh_failed",
-        "unknown_record_shape",
     ]
-    assert failed_warnings[1]["record_path"] == "future_conversation_record"
-    assert failed_warnings[1]["dispositions"] == ["blocked"]
-    assert failed_warnings[1]["first_source_line"] == failure[7] + 1
-    assert "future shape must not disappear" not in json.dumps(failed_warnings)
+    assert "identity-less prose must not disappear" not in json.dumps(failed_warnings)
 
     run_count = next(
         postgres_connection.execute("SELECT count(*) FROM cc_search_chats.refresh_run")
@@ -3465,11 +3529,11 @@ def _assert_nothing_stored_from(connection: psycopg.Connection, decoys) -> None:
             ), decoy
 
 
-def test_ignore_mode_indexes_around_an_unknown_response_item(
+def test_default_indexes_around_an_unknown_response_item(
     postgres_connection: psycopg.Connection,
     tmp_path: Path,
 ) -> None:
-    """AC3: with the flag, prose on both sides is indexed and the record is counted."""
+    """AC3, by default since ADR 0011: prose on both sides indexes; record counted."""
     codex_root = tmp_path / "codex"
     day = codex_root / "2026" / "10" / "24"
     day.mkdir(parents=True)
@@ -3487,12 +3551,7 @@ def test_ignore_mode_indexes_around_an_unknown_response_item(
     )
     root = _source_root(Provider.CODEX, codex_root)
 
-    blocked = inspect_native_sources(postgres_connection, source_roots=(root,))
-    assert blocked.blocked_source_count == 1
-
-    result = refresh_native_sources(
-        postgres_connection, source_roots=(root,), ignore_unknown_records=True
-    )
+    result = refresh_native_sources(postgres_connection, source_roots=(root,))
 
     assert result.blocked_source_count == 0
     assert result.failed_source_count == 0
@@ -3557,7 +3616,7 @@ def test_ignore_mode_keeps_non_shape_failures_blocking(
     postgres_connection: psycopg.Connection,
     tmp_path: Path,
 ) -> None:
-    """AC4: identity and payload failures are not record shapes and still block."""
+    """AC4: identity failures are not record shapes and still block."""
     codex_root = tmp_path / "codex"
     day = codex_root / "2026" / "10" / "24"
     day.mkdir(parents=True)
@@ -3590,9 +3649,7 @@ def test_ignore_mode_keeps_non_shape_failures_blocking(
         _source_root(Provider.CODEX, codex_root),
     )
 
-    result = inspect_native_sources(
-        postgres_connection, source_roots=roots, ignore_unknown_records=True
-    )
+    result = inspect_native_sources(postgres_connection, source_roots=roots)
 
     assert result.blocked_source_count == 2
     assert result.ignored_unknown_record_count == 0
@@ -3612,7 +3669,7 @@ def test_ignore_mode_keeps_non_shape_failures_blocking(
     )
 
 
-def test_ignore_mode_batch_boundary_drops_only_the_unknown_ordinal(
+def test_default_batch_boundary_drops_only_the_unknown_ordinal(
     postgres_connection: psycopg.Connection,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3644,9 +3701,7 @@ def test_ignore_mode_batch_boundary_drops_only_the_unknown_ordinal(
     monkeypatch.setattr(refresh_module, "read_bounded_jsonl", three_record_batches)
     root = _source_root(Provider.CODEX, codex_root)
 
-    result = refresh_native_sources(
-        postgres_connection, source_roots=(root,), ignore_unknown_records=True
-    )
+    result = refresh_native_sources(postgres_connection, source_roots=(root,))
 
     assert result.blocked_source_count == 0
     assert result.ignored_unknown_record_count == 1

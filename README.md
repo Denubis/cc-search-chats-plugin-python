@@ -3,7 +3,7 @@
 Search and recover context from native Claude Code, Codex and primary
 Antigravity CLI chat history.
 
-Current release: cc-search-chats 2.5.2
+Current release: cc-search-chats 2.5.3
 
 The CLI reads vendor JSONL session logs without modifying them, maintains a
 normalized PostgreSQL search projection, and supports PostgreSQL full-text
@@ -228,7 +228,8 @@ command writes one stdout object containing:
   `keys` (the unit's own key names sorted, then `payload.`-prefixed nested key
   names sorted), `record_count`, `file_count`, `first_source_root_id`,
   `first_source_file_relative`, `first_source_line`, `dispositions` (the set
-  seen across files: `blocked`, `ignored`, `acknowledged`) and
+  seen across files: `ignored`, `acknowledged`, or `blocked` for a file a
+  release before 2.5.3 blocked, until the next `index` retries it) and
   `parser_state_version`; the warning persists
   across unchanged runs until a parser release registers the shape or the
   operator acknowledges it. `index --status` additionally lists

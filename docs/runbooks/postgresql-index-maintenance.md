@@ -184,10 +184,10 @@ not in the reported order, a non-date `acknowledged`, a duplicate shape, or an u
 field, before the systemd scope is created and before any database write. The
 nightly timer fails the same way until the file is fixed; `index --status`,
 `search` and the other readers never open the file and keep reporting the
-previous state. Blocked shapes (`dispositions` contains `blocked`) cannot be
-acknowledged: a blocked file's content since its last good checkpoint is
-outside the index until a parser release or a flagged run (`index --ignore-unknown-records`, or
-`CC_SEARCH_INDEX_IGNORE_UNKNOWN_RECORDS=1` in `index.env`).
+previous state. Blocked shapes (`dispositions` contains `blocked`) appear only
+for a file that a release before 2.5.3 blocked, and cannot be acknowledged:
+that file's content since its last good checkpoint is outside the index until
+the next `index` run retries it and indexes around the shape (ADR 0011).
 
 ## 6. Recovery
 

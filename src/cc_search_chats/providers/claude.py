@@ -769,9 +769,19 @@ _CLAUDE_METADATA_KEYSETS["attachment"].update(
 
 
 def _is_known_metadata_record(payload: dict[str, object]) -> bool:
+    """Recognize registered metadata whose keys include one required-key set.
+
+    Registered key sets are required minima (ADR 0003): extra keys a writer adds
+    to a known metadata type keep it excluded, while a missing required key or
+    an unregistered type stays unknown.
+    """
     record_type = payload.get("type")
-    return isinstance(record_type, str) and frozenset(payload) in (
-        _CLAUDE_METADATA_KEYSETS.get(record_type, set())
+    if not isinstance(record_type, str):
+        return False
+    payload_keys = frozenset(payload)
+    return any(
+        required_keys <= payload_keys
+        for required_keys in _CLAUDE_METADATA_KEYSETS.get(record_type, set())
     )
 
 
@@ -1514,6 +1524,7 @@ def parse_claude_session(
                     ClaudeDiagnosticCode.MISSING_MESSAGE,
                     record.envelope,
                     "conversation record has no message field",
+                    _record_shape(payload, "message", suffix="/message"),
                 )
             )
             continue
@@ -1524,6 +1535,7 @@ def parse_claude_session(
                     ClaudeDiagnosticCode.NON_OBJECT_MESSAGE,
                     record.envelope,
                     "message field is not an object",
+                    _record_shape(payload, "message", suffix="/message"),
                 )
             )
             continue
