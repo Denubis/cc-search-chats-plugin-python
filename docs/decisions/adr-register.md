@@ -20,3 +20,4 @@ ruling.
 | [2026-11-10-bbs-commit-parser-repair](2026-11-10-bbs-commit-parser-repair.md) | Commit the prepared 2.5.2 parser repair locally | Accepted | 2026-11-10 |
 | [2026-11-18-bbs-unknown-records-warn-not-block](2026-11-18-bbs-unknown-records-warn-not-block.md) | An unfamiliar record warns; only a failure blocks | Accepted | 2026-11-18 |
 | [0011](0011-unknown-shapes-warn-by-default.md) | An unrecognised record warns and is indexed around; only a failure blocks | Accepted | 2026-11-18 |
+| [2026-11-21-bbs-semantic-search-read-lock-fix](2026-11-21-bbs-semantic-search-read-lock-fix.md) | Fix the semantic-search read-lock stall on a work branch | Accepted | 2026-11-21 |

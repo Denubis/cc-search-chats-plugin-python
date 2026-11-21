@@ -2136,13 +2136,15 @@ def _append_revision_warning(
         )
 
 
-def _semantic_search_state(
+@dataclass(frozen=True)
+class _DegradedQueryEmbedding:
+    warning: dict[str, object]
+
+
+def _semantic_query_embedding(
     context: _PostgresContext,
-    state: _SearchState,
-) -> None:
-    if context.args.literal or context.args.exhaustive:
-        return
-    _append_revision_warning(context.connection, state.warnings)
+) -> QueryEmbeddingResult | _DegradedQueryEmbedding:
+    """Embed the query before any read opens, so a slow model holds no lock."""
     try:
         with context.progress_stream.heartbeat("model_load") as heartbeat_update:
 
@@ -2150,25 +2152,31 @@ def _semantic_search_state(
                 heartbeat_update(phase, None, None, None)
                 context.progress_stream.emit(phase, progress_state)
 
-            query_embedding = _bounded_query_embedding(
+            return _bounded_query_embedding(
                 context.args.query,
                 progress=report_progress,
                 quiet=context.progress_stream.ndjson,
             )
     except (ModelUnavailable, RuntimeError, TypeError, ValueError) as error:
-        state.retrieval_mode = "literal_fallback"
         warning: dict[str, object] = {
             "code": "semantic_search_degraded",
             "detail": f"{type(error).__name__}: {error}",
         }
         if isinstance(error, ModelUnavailable):
             warning.update(_model_resource_diagnostics(error))
-        state.warnings.append(warning)
-        context.progress_stream.emit(
-            "query_embed",
-            "degraded",
-            warning=state.warnings[-1],
-        )
+        context.progress_stream.emit("query_embed", "degraded", warning=warning)
+        return _DegradedQueryEmbedding(warning)
+
+
+def _semantic_search_state(
+    context: _PostgresContext,
+    state: _SearchState,
+    query_embedding: QueryEmbeddingResult | _DegradedQueryEmbedding,
+) -> None:
+    _append_revision_warning(context.connection, state.warnings)
+    if isinstance(query_embedding, _DegradedQueryEmbedding):
+        state.retrieval_mode = "literal_fallback"
+        state.warnings.append(query_embedding.warning)
         return
     state.model_load_ms = query_embedding.model_load_ms
     state.query_embed_ms = query_embedding.query_embed_ms
@@ -2307,10 +2315,16 @@ def _output_search(
 
 def _postgres_search(context: _PostgresContext) -> int:
     answer_deadline = None if context.args.exhaustive else context.args.answer_deadline
+    query_embedding = (
+        None
+        if context.args.literal or context.args.exhaustive
+        else _semantic_query_embedding(context)
+    )
     _begin_search_snapshot(context.connection)
     context.progress_stream.emit("retrieve", "running")
     state = _literal_search_state(context)
-    _semantic_search_state(context, state)
+    if query_embedding is not None:
+        _semantic_search_state(context, state, query_embedding)
     context.progress_stream.emit(
         "retrieve",
         "complete",

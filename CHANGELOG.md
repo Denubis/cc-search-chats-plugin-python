@@ -1,5 +1,14 @@
 # Changelog
 
+## cc-search-chats 2.5.4
+
+**Fixed:**
+- A `--semantic` search now obtains its query embedding before it opens its
+  database snapshot, so a slow or stalled model load no longer holds the
+  shared read queue. Other searches, `list` and `extract` keep running while
+  it waits. Semantic search still has no overall deadline, and the
+  `model_load` and `query_embed` progress events now precede `retrieve`.
+
 ## cc-search-chats 2.5.3
 
 **Changed:**

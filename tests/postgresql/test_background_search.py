@@ -6,6 +6,7 @@ import shutil
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event, Thread
 from time import monotonic
 from typing import cast
 
@@ -798,3 +799,99 @@ def test_literal_deadline_after_retrieval_returns_hits_as_partial(
     warnings = cast("list[dict[str, object]]", payload["warnings"])
     assert any(warning["code"] == "deadline_degraded" for warning in warnings)
     assert payload["retrieval_mode"] == "literal"
+
+
+def test_literal_search_answers_while_a_semantic_search_waits_for_its_model(
+    postgres_cluster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A slow query-model load must not hold the shared read queue."""
+    monkeypatch.setattr(
+        "cc_search_chats.cli._contain_semantic_index", lambda _args: None
+    )
+    _stub_semantic_index(monkeypatch)
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    shutil.copy(
+        FIXTURES / "claude_primary.jsonl",
+        claude_root / "claude-session-primary.jsonl",
+    )
+    codex_root = tmp_path / "codex"
+    codex_root.mkdir()
+    _configure_cli_connection(postgres_cluster, monkeypatch)
+    monkeypatch.setenv("CC_SEARCH_CLAUDE_ROOT", str(claude_root))
+    monkeypatch.setenv("CC_SEARCH_CODEX_ROOT", str(codex_root))
+    assert _run(monkeypatch, capsys, "index", "--migrate", "--json")[0] == 0
+    assert _run(monkeypatch, capsys, "index", "--json")[0] == 0
+    paths = query_embedder.query_embedder_paths(tmp_path / "helper-runtime")
+    monkeypatch.setattr(query_embedder, "query_embedder_paths", lambda: paths)
+    monkeypatch.setattr(
+        query_embedder,
+        "_ensure_compatible_helper",
+        lambda _paths: None,
+    )
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    model_loading = Event()
+    model_loaded = Event()
+
+    def exchange(_path, request, *, progress=None):
+        assert request["kind"] == "embed"
+        assert progress is not None
+        progress("query_embed", "running")
+        progress("model_load", "running")
+        model_loading.set()
+        assert model_loaded.wait(60), "the test never released the model load"
+        progress("model_load", "complete")
+        progress("query_embed", "complete")
+        return {
+            "kind": "result",
+            "embedding": vector,
+            "model_load_ms": 12,
+            "query_embed_ms": 3,
+            "warm_reused": False,
+        }
+
+    monkeypatch.setattr(query_embedder, "_exchange", exchange)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cc-search-chats", "search", "visible assistant", "--semantic", "--json"],
+    )
+    semantic_exit: list[object] = []
+
+    def semantic_search() -> None:
+        try:
+            main()
+        except SystemExit as stopped:
+            semantic_exit.append(stopped.code)
+
+    semantic = Thread(target=semantic_search, daemon=True)
+    semantic.start()
+    try:
+        assert model_loading.wait(30), "the semantic search never reached its model"
+        code, literal = _run(
+            monkeypatch,
+            capsys,
+            "search",
+            "visible assistant",
+            "--literal",
+            "--json",
+        )
+    finally:
+        model_loaded.set()
+        semantic.join(30)
+
+    assert code == 0, literal.get("error")
+    assert literal["status"] == "complete"
+    assert literal["results"]
+    assert semantic_exit == [0]
+    semantic_payload = json.loads(capsys.readouterr().out)
+    assert semantic_payload["retrieval_mode"] == "hybrid"
+    assert semantic_payload["results"]
+    semantic_state = cast("dict[str, object]", semantic_payload["semantic"])
+    assert semantic_state["model_load_ms"] == 12
+    assert semantic_state["query_embed_ms"] == 3
+    assert semantic_state["warm_reused"] is False
